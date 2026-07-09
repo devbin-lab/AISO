@@ -1,6 +1,9 @@
 # 번들 툴체인 (w64devkit 등) — 크고 재현 가능하므로 커밋 제외. scripts/fetch-toolchain.ps1 로 재설치.
 /tools/
 
+# 임베디드 Python 런타임 번들 (~195MB, 생성물) — scripts/build-pyruntime.ps1 로 재생성.
+/pyruntime/
+
 # RAG 색인 (작업 폴더별 .aiso/ 에 생성 — 이 프로젝트를 색인할 경우 대비)
 .aiso/
 

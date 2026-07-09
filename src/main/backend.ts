@@ -44,18 +44,24 @@ function freePort(): Promise<number> {
   })
 }
 
-function resolvePython(dir: string): string {
-  // 우선순위: 환경변수 > 프로젝트 venv > 시스템 python
+function resolvePython(codeDir: string): string {
+  // 우선순위: 환경변수 > (패키징)번들 런타임 > 프로젝트 venv > 시스템 python
   if (process.env['AISO_PYTHON']) return process.env['AISO_PYTHON']
-  const venv = join(dir, '.venv', 'Scripts', 'python.exe')
+  // 패키징: 앱에 번들된 임베디드 Python 런타임(resources/pyruntime/python.exe).
+  // 사용자가 Python을 따로 설치하지 않아도 백엔드가 뜬다.
+  if (app.isPackaged) {
+    return join(process.resourcesPath, 'pyruntime', 'python.exe')
+  }
+  // 개발: 프로젝트 venv > 시스템 python
+  const venv = join(codeDir, '.venv', 'Scripts', 'python.exe')
   if (existsSync(venv)) return venv
   return 'python'
 }
 
 export async function startBackend(ollamaHost: string): Promise<void> {
   if (proc) return
-  // TODO(패키징): asar 밖 extraResources 경로로 전환 필요 (Phase 10)
-  const dir = join(app.getAppPath(), 'python')
+  // 앱 코드(main.py 등)는 extraResources로 복사된다: 패키징=resources/python, 개발=<repo>/python.
+  const dir = app.isPackaged ? join(process.resourcesPath, 'python') : join(app.getAppPath(), 'python')
   const py = resolvePython(dir)
   const port = await freePort()
   set({ state: 'starting', port, detail: undefined })

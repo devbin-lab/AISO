@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "로컬에서 도는, 스스로 검증하는 코딩·개발 크리에이터 도구",
   "main": "./out/main/index.js",
-  "author": "",
+  "author": "devbin-lab",
   "license": "Apache-2.0",
   "scripts": {
     "dev": "electron-vite dev",
@@ -13,7 +13,9 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "build:win": "electron-vite build && electron-builder --win"
+    "build:pyruntime": "powershell -ExecutionPolicy Bypass -File scripts/build-pyruntime.ps1",
+    "build:win": "electron-vite build && electron-builder --win",
+    "dist:win": "npm run build:pyruntime && npm run build:win"
   },
   "devDependencies": {
     "@types/node": "^26.1.0",
@@ -36,8 +38,31 @@
     "productName": "Aiso",
     "files": ["out/**/*"],
     "extraResources": [
-      { "from": "python", "to": "python", "filter": ["**/*", "!__pycache__", "!**/__pycache__/**"] },
+      {
+        "from": "python",
+        "to": "python",
+        "filter": [
+          "**/*",
+          "!__pycache__",
+          "!**/__pycache__/**",
+          "!.venv",
+          "!.venv/**",
+          "!tests",
+          "!tests/**",
+          "!requirements-dev.txt"
+        ]
+      },
+      { "from": "pyruntime", "to": "pyruntime", "filter": ["**/*"] },
       { "from": "tools", "to": "tools", "filter": ["**/*"] }
-    ]
+    ],
+    "win": {
+      "target": ["nsis"]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-${version}-Setup.${ext}"
+    }
   }
 }
