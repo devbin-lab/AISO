@@ -1,3 +1,14 @@
+# 번들 툴체인 (w64devkit 등) — 크고 재현 가능하므로 커밋 제외. scripts/fetch-toolchain.ps1 로 재설치.
+/tools/
+
+# RAG 색인 (작업 폴더별 .aiso/ 에 생성 — 이 프로젝트를 색인할 경우 대비)
+.aiso/
+
+# 개인정보 포함 문서 · 일회성 스크래치 파일 (저장소에 안 넣음, 로컬엔 유지)
+/*.pdf
+/_checkbox_test.md
+/checklist.html
+
 # Logs
 logs
 *.log
@@ -134,3 +145,13 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# Electron / electron-vite
+out/
+dist/
+.electron-vite/
+
+# Python sidecar
+python/.venv/
+__pycache__/
+*.pyc

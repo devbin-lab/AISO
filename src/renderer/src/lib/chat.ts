@@ -1,0 +1,61 @@
+import { type AppSettings, resolveTemperature } from '../../../shared/settings'
+
+export interface ChatChunk {
+  type: 'thinking' | 'content' | 'done' | 'error' | 'notice'
+  text?: string
+  error?: string
+  eval_count?: number
+  total_duration?: number
+}
+
+export interface ChatPayloadMessage {
+  role: 'user' | 'assistant' | 'system'
+  content: string
+}
+
+/** FastAPI 사이드카의 NDJSON 스트림을 읽어 청크 단위로 콜백한다. */
+export async function streamChat(
+  port: number,
+  settings: AppSettings,
+  messages: ChatPayloadMessage[],
+  onChunk: (c: ChatChunk) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const res = await fetch(`http://127.0.0.1:${port}/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      messages,
+      model: settings.model,
+      reasoning_effort: settings.reasoningEffort,
+      temperature: resolveTemperature(settings),
+      context_length: settings.contextLength,
+      ollama_host: settings.ollamaHost,
+      keep_alive: settings.keepAlive
+    }),
+    signal
+  })
+  if (!res.ok || !res.body) {
+    throw new Error(`백엔드 오류 (HTTP ${res.status})`)
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    let idx: number
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).trim()
+      buf = buf.slice(idx + 1)
+      if (!line) continue
+      try {
+        onChunk(JSON.parse(line) as ChatChunk)
+      } catch {
+        /* 불완전한 JSON 라인 무시 */
+      }
+    }
+  }
+}
