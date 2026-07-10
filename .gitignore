@@ -9,6 +9,7 @@
 
 # 개인정보 포함 문서 · 일회성 스크래치 파일 (저장소에 안 넣음, 로컬엔 유지)
 /*.pdf
+/*.pptx
 /_checkbox_test.md
 /checklist.html
 

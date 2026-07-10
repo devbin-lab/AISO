@@ -17,6 +17,7 @@ interface Props {
   settings: AppSettings
   backend: BackendInfo
   health: HealthInfo | null
+  onSaveSettings: (patch: Partial<AppSettings>) => Promise<void>
 }
 
 const BACKEND_LABEL: Record<BackendInfo['state'], string> = {
@@ -37,7 +38,7 @@ const STEPS: { n: string; label: string; state: 'done' | 'active' | '' }[] = [
   { n: '06', label: 'RAG', state: 'done' }
 ]
 
-function HomeView({ settings, backend, health }: Props): React.JSX.Element {
+function HomeView({ settings, backend, health, onSaveSettings }: Props): React.JSX.Element {
   const [ping, setPing] = useState<PingResult | null>(null)
   const [conn, setConn] = useState<Conn>('checking')
   const [usage, setUsage] = useState<UsageSummary | null>(null)
@@ -79,7 +80,12 @@ function HomeView({ settings, backend, health }: Props): React.JSX.Element {
         <p className="view__desc">로컬에서 도는, 스스로 검증하는 코딩·개발 크리에이터 도구</p>
       </header>
 
-      <SetupCard settings={settings} backend={backend} health={health} />
+      <SetupCard
+        settings={settings}
+        backend={backend}
+        health={health}
+        onSaveSettings={onSaveSettings}
+      />
 
       <div className="grid">
         <section className="panel">

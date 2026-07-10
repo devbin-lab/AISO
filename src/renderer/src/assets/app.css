@@ -542,8 +542,38 @@
   border-radius: 5px;
   padding: 4px 8px;
 }
+/* 추천 채팅 모델 — 드롭다운 + 동작 버튼 */
+.setup-pick {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.setup-pick .select__trigger {
+  width: 220px;
+}
+.setup-pick__action {
+  display: flex;
+  align-items: center;
+  min-width: 92px;
+}
+.setup-pick__desc {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.setup-model__ok {
+  font-size: 11.5px;
+  font-weight: 550;
+  color: var(--ok);
+}
 .setup-pull {
   margin-top: 8px;
+}
+.setup-pull--inline {
+  margin-top: 0;
+  min-width: 130px;
 }
 .setup-pull__bar {
   height: 6px;
@@ -1682,6 +1712,21 @@
   color: var(--text);
   font-weight: 600;
 }
+/* 옵션·트리거 왼쪽 설치 상태 점 (초록=설치됨 / 빨강=미설치) */
+.select__dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 7px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+.select__dot--on {
+  background: var(--ok);
+}
+.select__dot--off {
+  background: var(--err);
+}
 .select__empty {
   padding: 8px 9px;
   font-size: 12px;
@@ -1732,6 +1777,34 @@
   font-size: 12px;
   font-weight: 500;
   color: var(--ok);
+}
+
+/* 개발자 모드 잠금해제 토스트 — 화면 아무 곳에서나 트리거되는 단축키라 위치 고정 표시 */
+.dev-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  z-index: 1200;
+  padding: 9px 16px;
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--text);
+  background: var(--bg-elev);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 10px 32px var(--menu-shadow);
+  animation: dev-toast-in 0.18s ease;
+}
+@keyframes dev-toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
 }
 
 /* ---------- controls ---------- */

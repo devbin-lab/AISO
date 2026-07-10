@@ -7,10 +7,12 @@ interface Props {
   onChange: (v: string) => void
   placeholder?: string
   disabled?: boolean
+  /** 옵션·트리거 왼쪽 상태 점: 'on'(초록)·'off'(빨강)·null(없음). 예: 모델 설치 여부. */
+  status?: (value: string) => 'on' | 'off' | null
 }
 
 /** Ollama 모델 등 목록에서 고르는 커스텀 드롭다운 (키보드 탐색 지원). */
-function Select({ value, options, onChange, placeholder, disabled }: Props): React.JSX.Element {
+function Select({ value, options, onChange, placeholder, disabled, status }: Props): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [highlight, setHighlight] = useState(0)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -73,6 +75,9 @@ function Select({ value, options, onChange, placeholder, disabled }: Props): Rea
         onKeyDown={onKeyDown}
       >
         <span className={value ? 'mono' : 'select__placeholder'}>
+          {status && value && status(value) && (
+            <span className={`select__dot select__dot--${status(value)}`} />
+          )}
           {value || placeholder || '선택'}
         </span>
         <ChevronDownIcon />
@@ -83,21 +88,25 @@ function Select({ value, options, onChange, placeholder, disabled }: Props): Rea
           {options.length === 0 ? (
             <div className="select__empty">항목 없음</div>
           ) : (
-            options.map((opt, i) => (
-              <button
-                key={opt}
-                type="button"
-                role="option"
-                aria-selected={opt === value}
-                className={`select__opt mono ${opt === value ? 'select__opt--on' : ''} ${
-                  i === highlight ? 'select__opt--hi' : ''
-                }`}
-                onMouseEnter={() => setHighlight(i)}
-                onClick={() => choose(opt)}
-              >
-                {opt}
-              </button>
-            ))
+            options.map((opt, i) => {
+              const dot = status ? status(opt) : null
+              return (
+                <button
+                  key={opt}
+                  type="button"
+                  role="option"
+                  aria-selected={opt === value}
+                  className={`select__opt mono ${opt === value ? 'select__opt--on' : ''} ${
+                    i === highlight ? 'select__opt--hi' : ''
+                  }`}
+                  onMouseEnter={() => setHighlight(i)}
+                  onClick={() => choose(opt)}
+                >
+                  {dot && <span className={`select__dot select__dot--${dot}`} />}
+                  {opt}
+                </button>
+              )
+            })
           )}
         </div>
       )}

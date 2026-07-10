@@ -1,7 +1,8 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { AppSettings, DEFAULT_SETTINGS } from '../shared/settings'
+import { appDataFrozen } from './appdata-guard'
 
 function settingsFile(): string {
   return join(app.getPath('userData'), 'settings.json')
@@ -23,6 +24,7 @@ export function loadSettings(): AppSettings {
 
 export function saveSettings(patch: Partial<AppSettings>): AppSettings {
   const next: AppSettings = { ...loadSettings(), ...patch }
+  if (appDataFrozen()) return next // 공장초기화 직후 지연 저장 차단(파일 되살림 방지)
   try {
     const file = settingsFile()
     mkdirSync(join(file, '..'), { recursive: true })
@@ -31,4 +33,13 @@ export function saveSettings(patch: Partial<AppSettings>): AppSettings {
     console.error('[settings] 저장 실패:', err)
   }
   return next
+}
+
+/** 설정 파일을 지워 기본값으로 되돌린다(공장초기화). 다음 loadSettings가 DEFAULT_SETTINGS 반환. */
+export function resetSettings(): void {
+  try {
+    rmSync(settingsFile(), { force: true })
+  } catch (err) {
+    console.error('[settings] 초기화 실패:', err)
+  }
 }

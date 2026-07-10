@@ -1,7 +1,8 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import type { UsageSummary, DailyUsage } from '../shared/usage'
+import { appDataFrozen } from './appdata-guard'
 
 const WINDOW_DAYS = 30 // 그래프에 보여줄 일수
 
@@ -48,8 +49,18 @@ function dayAgo(daysAgo: number): string {
   return localDay(d)
 }
 
+/** 사용량 기록을 전부 지운다(공장초기화). */
+export function clearUsage(): void {
+  try {
+    rmSync(usageFile(), { force: true })
+  } catch (err) {
+    console.error('[usage] 초기화 실패:', err)
+  }
+}
+
 /** 한 번의 실행에서 쓴 토큰을 오늘 버킷에 더한다. */
 export function recordUsage(tokens: number): void {
+  if (appDataFrozen()) return // 공장초기화 직후 지연 저장 차단
   if (!Number.isFinite(tokens) || tokens <= 0) return
   const s = load()
   const day = localDay(new Date())

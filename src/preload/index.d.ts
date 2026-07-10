@@ -22,6 +22,7 @@ export interface AisoAPI {
   }
   pickWorkspace: () => Promise<string | null>
   setWindowTheme: (mode: 'dark' | 'light') => Promise<void>
+  factoryReset: () => Promise<void>
   usage: {
     record: (tokens: number) => Promise<void>
     summary: () => Promise<UsageSummary>

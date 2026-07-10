@@ -30,6 +30,8 @@ const api = {
   },
   pickWorkspace: (): Promise<string | null> => ipcRenderer.invoke('workspace:pick'),
   setWindowTheme: (mode: 'dark' | 'light') => ipcRenderer.invoke('window:set-theme', mode),
+  /** 공장초기화 — 설정·대화·사용량 등 앱 데이터 삭제(개발자 모드). 호출 후 창을 리로드하면 최초 상태. */
+  factoryReset: (): Promise<void> => ipcRenderer.invoke('app:factory-reset'),
   usage: {
     record: (tokens: number): Promise<void> => ipcRenderer.invoke('usage:record', tokens),
     summary: (): Promise<UsageSummary> => ipcRenderer.invoke('usage:summary')

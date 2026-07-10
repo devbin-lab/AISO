@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   type AppSettings,
   type ReasoningEffort,
@@ -12,12 +12,24 @@ import type { UpdateStatus } from '../../../shared/update'
 import Select from '../components/Select'
 import Segmented from '../components/Segmented'
 import Dropdown from '../components/Dropdown'
+import { confirmDialog } from '../components/ConfirmDialog'
+
+const ONOFF = [
+  { v: true, label: '켜짐' },
+  { v: false, label: '꺼짐' }
+]
 
 interface Props {
   settings: AppSettings
   health: HealthInfo | null
   onSave: (patch: Partial<AppSettings>) => Promise<void>
+  /** 지금 이 화면이 실제로 보이는 탭인지 — 개발자 모드 단축키 감지 범위를 설정 탭에 한정한다.
+   *  (뷰는 항상 마운트 상태로 유지되므로 이 플래그 없이는 다른 탭에서도 단축키가 먹힌다.) */
+  active: boolean
 }
+
+const DEV_UNLOCK_TAPS = 10 // 이 횟수만큼 눌러야 개발자 모드 활성화
+const DEV_UNLOCK_WINDOW_MS = 3000 // 이 시간 안에 연타해야 카운트(느리게 누르면 리셋)
 
 const EFFORTS: { v: ReasoningEffort; label: string }[] = [
   { v: 'low', label: 'Low' },
@@ -63,7 +75,7 @@ function rangeFill(pct: number): React.CSSProperties {
   return { background: `linear-gradient(to right, var(--accent) ${p}%, var(--track) ${p}%)` }
 }
 
-function SettingsView({ settings, health, onSave }: Props): React.JSX.Element {
+function SettingsView({ settings, health, onSave, active }: Props): React.JSX.Element {
   const [form, setForm] = useState<AppSettings>(settings)
   const [saved, setSaved] = useState(false)
   const [manualModel, setManualModel] = useState(false)
@@ -106,6 +118,52 @@ function SettingsView({ settings, health, onSave }: Props): React.JSX.Element {
       if (s.state === 'dev-disabled' || s.state === 'error') setUpd(s)
     })
   }
+  // ── 개발자 모드: Ctrl+Shift+F1 10회 연타로 활성화(설정 탭에서만 감지) ──
+  const [devToast, setDevToast] = useState<string | null>(null)
+  const devModeRef = useRef(settings.devMode) // 키 핸들러 클로저가 최신 값을 보게(리스너 재등록 없이)
+  const tapsRef = useRef<number[]>([])
+  useEffect(() => {
+    devModeRef.current = settings.devMode
+  }, [settings.devMode])
+  useEffect(() => {
+    if (!active) return // 설정 탭이 실제로 보일 때만 감지 — 뷰가 항상 마운트라 필요
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.repeat || e.key !== 'F1' || !e.ctrlKey || !e.shiftKey) return
+      e.preventDefault()
+      if (devModeRef.current) return // 이미 켜져 있으면 무시
+      const now = Date.now()
+      const taps = tapsRef.current.filter((t) => now - t < DEV_UNLOCK_WINDOW_MS)
+      taps.push(now)
+      tapsRef.current = taps
+      if (taps.length >= DEV_UNLOCK_TAPS) {
+        tapsRef.current = []
+        devModeRef.current = true // 라운드트립 끝나기 전 재연타로 다시 트리거되는 것 방지
+        void onSave({ devMode: true })
+        setDevToast('🔓 개발자 모드가 활성화되었습니다')
+        window.setTimeout(() => setDevToast(null), 2500)
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [active, onSave])
+
+  const disableDevMode = (): void => {
+    void onSave({ devMode: false, forceOnboarding: false })
+  }
+
+  const factoryReset = async (): Promise<void> => {
+    const ok = await confirmDialog({
+      title: '공장초기화',
+      message:
+        '설정·대화·토큰 사용량 기록이 모두 삭제되고 앱이 처음 설치 상태로 돌아갑니다.\n(작업 폴더의 파일과 RAG 색인은 그대로 유지됩니다.)\n계속할까요?',
+      confirmLabel: '초기화',
+      danger: true
+    })
+    if (!ok) return
+    await window.api.factoryReset()
+    window.location.reload()
+  }
+
   const updBusy = upd.state === 'checking' || upd.state === 'downloading'
   const updHint = ((): string => {
     switch (upd.state) {
@@ -400,6 +458,49 @@ function SettingsView({ settings, health, onSave }: Props): React.JSX.Element {
           </div>
         </section>
 
+        {form.devMode && (
+          <section>
+            <div className="group__title">개발자</div>
+            <div className="group">
+              <div className="row">
+                <div>
+                  <div className="row__label">온보딩 미리보기</div>
+                  <div className="row__hint">
+                    모델을 지우지 않고도 홈에서 최초 설치 안내 화면을 강제로 띄웁니다 · 저장 후 홈에서 확인
+                  </div>
+                </div>
+                <Segmented
+                  value={form.forceOnboarding}
+                  options={ONOFF}
+                  onChange={(v) => set('forceOnboarding', v)}
+                />
+              </div>
+              <div className="row">
+                <div>
+                  <div className="row__label">공장초기화</div>
+                  <div className="row__hint">
+                    설정·대화·사용량 기록을 모두 지우고 처음 상태로 되돌립니다 (되돌릴 수 없음)
+                  </div>
+                </div>
+                <button className="btn btn--stop" onClick={() => void factoryReset()}>
+                  초기화
+                </button>
+              </div>
+              <div className="row">
+                <div>
+                  <div className="row__label">개발자 모드 끄기</div>
+                  <div className="row__hint">
+                    다시 켜려면 이 화면에서 Ctrl+Shift+F1을 10회 누르세요
+                  </div>
+                </div>
+                <button className="btn btn--ghost2" onClick={disableDevMode}>
+                  끄기
+                </button>
+              </div>
+            </div>
+          </section>
+        )}
+
         <div className="actions">
           {saved && <span className="saved">저장됨</span>}
           <button className="btn" disabled={!dirty} onClick={submit}>
@@ -407,6 +508,7 @@ function SettingsView({ settings, health, onSave }: Props): React.JSX.Element {
           </button>
         </div>
       </div>
+      {devToast && <div className="dev-toast">{devToast}</div>}
     </div>
   )
 }

@@ -1,16 +1,18 @@
 import { app, shell, BrowserWindow, ipcMain, nativeTheme, dialog } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import { loadSettings, saveSettings } from './settings'
+import { loadSettings, saveSettings, resetSettings } from './settings'
 import { startBackend, stopBackend, backendInfo, onBackendChange } from './backend'
 import { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
-import { recordUsage, usageSummary } from './usage'
+import { recordUsage, usageSummary, clearUsage } from './usage'
+import { freezeAppDataWrites } from './appdata-guard'
 import {
   listConversations,
   getConversation,
   saveConversation,
   setConversationPinned,
-  deleteConversation
+  deleteConversation,
+  clearAllConversations
 } from './conversations'
 import type { AppSettings } from '../shared/settings'
 import type { ConversationKind, ConversationSave } from '../shared/conversation'
@@ -134,6 +136,15 @@ app.whenReady().then(() => {
   ipcMain.handle('conv:save', (_e, c: ConversationSave) => saveConversation(c))
   ipcMain.handle('conv:pin', (_e, id: string, pinned: boolean) => setConversationPinned(id, pinned))
   ipcMain.handle('conv:delete', (_e, id: string) => deleteConversation(id))
+
+  // ---- IPC: 공장초기화 (개발자 모드) — userData의 앱 데이터 삭제(설정·대화·사용량) ----
+  ipcMain.handle('app:factory-reset', () => {
+    // 삭제 전에 쓰기를 잠근다 — 진행 중이던 스트림의 지연 저장이 지운 파일을 되살리지 않게(리로드 시간 확보)
+    freezeAppDataWrites()
+    resetSettings()
+    clearAllConversations()
+    clearUsage()
+  })
 
   // ---- IPC: 자동 업데이트 (GitHub 릴리스 기반) ----
   ipcMain.handle('app:version', () => app.getVersion())

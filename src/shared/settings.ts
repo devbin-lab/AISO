@@ -35,6 +35,10 @@ export interface AppSettings {
   /** 모델 상주 유지(keep_alive) — 유휴 시 언로드로 인한 콜드 재로드(~5.8s) 방지.
    *  Ollama 형식: "30m"·"-1"(항상)·"0"(즉시 언로드). 상주는 VRAM을 계속 점유. */
   keepAlive: string
+  /** 개발자 모드 — 설정에 공장초기화·온보딩 미리보기 등 개발용 도구를 노출 */
+  devMode: boolean
+  /** 온보딩(첫 설치 안내) 강제 표시 — 모델을 지우지 않고도 최초 설치 화면을 테스트(개발용) */
+  forceOnboarding: boolean
 }
 
 /** 정리·분류 / 코딩·일반 고정 온도 — 사용자 조정 불가(코드 상수). */
@@ -100,5 +104,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   ragEnabled: true,
   ragMaxFiles: 300,
   ragTopK: 5,
-  keepAlive: '30m'
+  keepAlive: '30m',
+  devMode: false,
+  forceOnboarding: false
 }

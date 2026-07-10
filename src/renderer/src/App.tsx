@@ -120,7 +120,12 @@ function App(): React.JSX.Element {
         <Sidebar view={view} onNavigate={setView} />
         <main className="content">
           <div className={wrap('home')}>
-            <HomeView settings={settings} backend={backend} health={health} />
+            <HomeView
+              settings={settings}
+              backend={backend}
+              health={health}
+              onSaveSettings={saveSettings}
+            />
           </div>
           <div className={wrap('chat')}>
             <ChatView
@@ -142,7 +147,12 @@ function App(): React.JSX.Element {
             />
           </div>
           <div className={wrap('settings')}>
-            <SettingsView settings={settings} health={health} onSave={saveSettings} />
+            <SettingsView
+              settings={settings}
+              health={health}
+              onSave={saveSettings}
+              active={view === 'settings'}
+            />
           </div>
         </main>
       </div>
