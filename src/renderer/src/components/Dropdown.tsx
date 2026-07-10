@@ -47,7 +47,8 @@ function Dropdown({
       <button
         type="button"
         className="dd__chip"
-        title={title}
+        data-tip={title}
+        aria-label={title}
         disabled={disabled}
         aria-haspopup="listbox"
         aria-expanded={open}

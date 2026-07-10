@@ -210,6 +210,7 @@ async def _chat_turn(host: str, payload: dict) -> AsyncGenerator[dict, None]:
     thinking = ""
     tool_calls: list[dict] = []
     done_reason = None
+    output_tokens = 0  # eval_count — 이 턴에 '생성'된 토큰 (입력 토큰은 세지 않는다)
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream("POST", f"{host}/api/chat", json=payload) as r:
             if r.status_code != 200:
@@ -233,12 +234,14 @@ async def _chat_turn(host: str, payload: dict) -> AsyncGenerator[dict, None]:
                     tool_calls.extend(msg["tool_calls"])
                 if data.get("done"):
                     done_reason = data.get("done_reason")
+                    output_tokens = data.get("eval_count") or 0
     yield {
         "_final": True,
         "content": content,
         "thinking": thinking,
         "tool_calls": tool_calls,
         "done_reason": done_reason,
+        "output_tokens": output_tokens,
     }
 
 
@@ -381,7 +384,7 @@ async def run_agent(
     reasoning_effort: str = "medium",
     temperature: float = 0.7,
     context_length: int = 16384,
-    approval_mode: str = "require",
+    approval_mode: str = "read",
     session_id: str = "",
     rag_enabled: bool = True,
     rag_top_k: int = 5,
@@ -402,6 +405,7 @@ async def run_agent(
     repeat_count = 0
     nudges = 0  # 툴 없이 멈추려 할 때 이어가라고 찌른 연속 횟수 (진행하면 리셋)
     spin = 0    # 실질 작업(메타 툴 외) 없이 흘려보낸 연속 턴 수 (계획 갱신·설명만 반복 감지)
+    total_tokens = 0  # 이 런에서 누적 토큰(프롬프트+생성) — 실시간 표시·사용량 집계용
 
     # RAG — 색인이 있으면 (1)마지막 사용자 요청으로 자동 검색해 컨텍스트 주입,
     # (2)search_docs 툴 제공. 임베딩 모델은 색인에 저장된 것을 쓰므로 채팅 모델과 무관.
@@ -467,6 +471,12 @@ async def run_agent(
         if gen_error is not None:  # 치명적 종료(연결·Ollama·빈 응답·파싱 소진) → 런 종료
             yield {"type": "error", "error": gen_error}
             return
+
+        # 이번 턴 생성 토큰 누적 + 실시간 표시용 usage 이벤트 (출력 토큰만, 멀티턴이면 턴마다 증가)
+        turn_tokens = final.get("output_tokens") or 0
+        if turn_tokens:
+            total_tokens += turn_tokens
+            yield {"type": "usage", "total": total_tokens}
 
         tool_calls = final.get("tool_calls") or []
         if not tool_calls:

@@ -21,6 +21,7 @@ export async function streamChat(
   onChunk: (c: ChatChunk) => void,
   signal?: AbortSignal
 ): Promise<void> {
+  const lastUserText = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
   const res = await fetch(`http://127.0.0.1:${port}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -28,7 +29,7 @@ export async function streamChat(
       messages,
       model: settings.model,
       reasoning_effort: settings.reasoningEffort,
-      temperature: resolveTemperature(settings),
+      temperature: resolveTemperature(settings, lastUserText),
       context_length: settings.contextLength,
       ollama_host: settings.ollamaHost,
       keep_alive: settings.keepAlive

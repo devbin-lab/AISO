@@ -1,5 +1,7 @@
 :root,
 [data-theme='dark'] {
+  /* native 컨트롤(슬라이더·스크롤바)을 테마에 맞춰 렌더 — 흰 배경에 검은 트랙 방지 */
+  color-scheme: dark;
   --bg: #0b0c0f;
   --bg-elev: #111216;
   --bg-input: #0e0f13;
@@ -8,9 +10,11 @@
   --text: #e8e9ed;
   --text-muted: #9a9ea9;
   --text-dim: #62666f;
-  --accent: #5e6ad2;
-  --accent-hover: #6e7ae2;
-  --accent-soft: rgba(94, 106, 210, 0.14);
+  /* 청강문화산업대학교 시그니처 — CK Orange (#F16522, RGB 241·101·34) */
+  --accent: #f16522;
+  --accent-hover: #ff7a3d;
+  --accent-soft: rgba(241, 101, 34, 0.14);
+  --track: rgba(255, 255, 255, 0.16); /* 슬라이더 미채움(연한 회색) */
   --ok: #4cb782;
   --err: #e5534b;
   --warn: #d29922;
@@ -23,6 +27,7 @@
 }
 
 [data-theme='light'] {
+  color-scheme: light;
   --bg: #fafafa;
   --bg-elev: #ffffff;
   --bg-input: #ffffff;
@@ -31,9 +36,11 @@
   --text: #1c1e22;
   --text-muted: #5c6067;
   --text-dim: #94979e;
-  --accent: #5e6ad2;
-  --accent-hover: #4f5abf;
-  --accent-soft: rgba(94, 106, 210, 0.11);
+  /* 청강문화산업대학교 시그니처 — CK Orange (라이트: 대비 위해 진한 변형 #E8521B 호버) */
+  --accent: #f16522;
+  --accent-hover: #e8521b;
+  --accent-soft: rgba(241, 101, 34, 0.11);
+  --track: rgba(0, 0, 0, 0.1); /* 슬라이더 미채움(연한 회색) */
   --ok: #2f9e5f;
   --err: #d24841;
   --warn: #b07d10;
@@ -43,6 +50,15 @@
 
 * {
   box-sizing: border-box;
+}
+
+/* 버튼 네이티브(OS) 테마 리셋 — 미지정 시 Windows가 클릭 시 흰색 눌림 효과를 자체 렌더해
+   커스텀 배경/애니메이션 위로 튀어나온다. 색상·폰트도 커스텀 클래스가 그대로 이어받게 상속. */
+button {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  color: inherit;
 }
 
 html,

@@ -1,6 +1,6 @@
 {
   "name": "aiso",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "로컬에서 도는, 스스로 검증하는 코딩·개발 크리에이터 도구",
   "main": "./out/main/index.js",
   "author": "devbin-lab",
@@ -30,13 +30,16 @@
   },
   "dependencies": {
     "@electron-toolkit/utils": "^4.0.0",
+    "electron-updater": "^6.8.9",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
   "build": {
     "appId": "com.aiso.app",
     "productName": "Aiso",
-    "files": ["out/**/*"],
+    "files": [
+      "out/**/*"
+    ],
     "extraResources": [
       {
         "from": "python",
@@ -52,17 +55,38 @@
           "!requirements-dev.txt"
         ]
       },
-      { "from": "pyruntime", "to": "pyruntime", "filter": ["**/*"] },
-      { "from": "tools", "to": "tools", "filter": ["**/*"] }
+      {
+        "from": "pyruntime",
+        "to": "pyruntime",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "tools",
+        "to": "tools",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "win": {
-      "target": ["nsis"]
+      "target": [
+        "nsis"
+      ]
     },
     "nsis": {
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "artifactName": "${productName}-${version}-Setup.${ext}"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "devbin-lab",
+        "repo": "AISO"
+      }
+    ]
   }
 }

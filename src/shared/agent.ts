@@ -1,9 +1,9 @@
-export type ApprovalMode = 'require' | 'partial' | 'auto'
+export type ApprovalMode = 'manual' | 'read' | 'auto'
 
 export const APPROVAL_MODES: { v: ApprovalMode; label: string; hint: string }[] = [
-  { v: 'require', label: '승인요구', hint: '모든 쓰기·편집·삭제 승인' },
-  { v: 'partial', label: '일부승인', hint: '삭제만 승인, 쓰기·편집은 자동' },
-  { v: 'auto', label: '자동승인', hint: '전부 자동 실행' }
+  { v: 'manual', label: '수동', hint: '읽기·쓰기·편집·삭제 모두 승인' },
+  { v: 'read', label: '읽기', hint: '읽기는 자동, 쓰기·편집·삭제는 승인' },
+  { v: 'auto', label: '자동', hint: '모든 작업 승인 없이 실행' }
 ]
 
 export type ToolName =
@@ -38,6 +38,7 @@ export type AgentEvent =
   | { type: 'plan'; steps: PlanStep[] }
   | { type: 'notice'; text: string }
   | { type: 'rag_reindex'; state: 'start' | 'done'; count?: number; files?: number; ok?: boolean }
+  | { type: 'usage'; total: number }
   | { type: 'done' }
   | { type: 'error'; error: string }
 

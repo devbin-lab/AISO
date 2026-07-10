@@ -28,6 +28,12 @@ CHUNK_CHARS = 1200                 # 청크 목표 크기(문자)
 OVERLAP_LINES = 8                  # 청크 간 겹침(줄)
 EMBED_BATCH = 24                   # 임베딩 배치 크기
 
+# 대형 폴더 방어 — 총량 상한. 초과분은 잘라내되 부분 색인은 그대로 검색에 유용하다.
+# (상한이 없으면 문서가 많은 폴더에서 임베딩이 수천~수만 번 돌아 사실상 끝나지 않는다.)
+MAX_FILES = 3000            # 색인할 최대 파일 수
+MAX_TOTAL_CHUNKS = 12000    # 색인할 최대 총 청크 수 (임베딩 비용의 상한 — 약 49MB 벡터)
+MAX_CHUNKS_PER_FILE = 400   # 한 파일이 만들 수 있는 최대 청크 (거대 문서 하나가 예산을 독식하는 것 방지)
+
 # 색인 대상 텍스트/코드 확장자 (문서 형식은 EXTRACTORS로 별도 처리)
 INDEX_TEXT_EXT = {
     ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
@@ -207,11 +213,12 @@ def _read_indexable(path: Path) -> str | None:
 # ---------- 색인 (증분) ----------
 
 async def build_index(
-    root: Path, host: str, embed_model: str
+    root: Path, host: str, embed_model: str, max_files: int | None = None
 ) -> AsyncGenerator[dict, None]:
     """작업 폴더를 색인한다. 진행 이벤트를 yield 하는 async generator.
 
     증분: 이전 색인과 임베딩 모델이 같으면 변경되지 않은 파일의 벡터를 재사용한다.
+    max_files: 색인할 최대 파일 수(사용자 설정). None이면 이전 색인 저장값 → 기본값 순으로 결정.
     """
     old = _load_store(root)
     by_file: dict[str, list[tuple[dict, np.ndarray]]] = {}
@@ -221,18 +228,31 @@ async def build_index(
             by_file.setdefault(ch["file"], []).append((ch, old["vectors"][idx]))
         old_files_meta = old["manifest"].get("files", {})
 
-    files = list(iter_indexable(root))
-    total = len(files)
-    if total == 0:
+    # 파일 상한: 명시값 > 이전 색인에 저장된 값 > 기본값 순 (재색인 시 같은 상한 유지)
+    old_max = old["manifest"].get("max_files") if old else None
+    cap_files = max_files if max_files is not None else (old_max if old_max else MAX_FILES)
+
+    all_files = list(iter_indexable(root))
+    total_found = len(all_files)
+    if total_found == 0:
         yield {"type": "error", "error": "색인할 파일이 없습니다 (코드·문서 파일을 찾지 못함)."}
         return
+    # 대형 폴더 방어: 파일 수 상한 초과 시 잘라낸다 (부분 색인).
+    truncated = total_found > cap_files
+    files = all_files[:cap_files]
+    total = len(files)
 
     new_chunks: list[dict] = []
     new_vecs: list[np.ndarray] = []
     files_meta: dict = {}
     reused = 0
+    total_chunks = 0  # 누적 청크 (총량 상한 예산)
 
     for processed, (path, rel) in enumerate(files, 1):
+        remaining = MAX_TOTAL_CHUNKS - total_chunks
+        if remaining <= 0:  # 총 청크 예산 소진 → 나머지 파일은 색인하지 않는다
+            truncated = True
+            break
         try:
             st = path.stat()
             meta = {"mtime": int(st.st_mtime), "size": st.st_size}
@@ -246,10 +266,15 @@ async def build_index(
             and rel in by_file
         )
         if unchanged:
-            for ch, vec in by_file[rel]:
+            cap = min(MAX_CHUNKS_PER_FILE, remaining)
+            keep = by_file[rel][:cap]
+            if len(keep) < len(by_file[rel]):
+                truncated = True
+            for ch, vec in keep:
                 new_chunks.append(ch)
                 new_vecs.append(vec)
-            files_meta[rel] = {**meta, "n": len(by_file[rel])}
+            files_meta[rel] = {**meta, "n": len(keep)}
+            total_chunks += len(keep)
             reused += 1
         else:
             text = _read_indexable(path)
@@ -257,6 +282,10 @@ async def build_index(
                 files_meta[rel] = {**meta, "n": 0}
             else:
                 pieces = chunk_text(text)
+                cap = min(MAX_CHUNKS_PER_FILE, remaining)
+                if len(pieces) > cap:  # 파일당/총량 상한으로 잘라낸다
+                    pieces = pieces[:cap]
+                    truncated = True
                 if pieces:
                     try:
                         embs = await embed_texts(host, embed_model, [p[2] for p in pieces])
@@ -267,6 +296,7 @@ async def build_index(
                         new_chunks.append({"file": rel, "start": start, "end": end, "text": ctext})
                         new_vecs.append(_normalize(np.asarray(emb, dtype=np.float32)))
                 files_meta[rel] = {**meta, "n": len(pieces)}
+                total_chunks += len(pieces)
         if processed % 3 == 0 or processed == total:
             yield {"type": "progress", "done": processed, "total": total, "file": rel}
 
@@ -276,6 +306,7 @@ async def build_index(
         "embed_model": embed_model,
         "dim": int(dim),
         "count": len(new_chunks),
+        "max_files": cap_files,  # 재색인이 같은 상한을 재사용하도록 저장
         "files": files_meta,
     }
     _save_store(root, manifest, new_chunks, vectors)
@@ -284,6 +315,8 @@ async def build_index(
         "count": len(new_chunks),
         "files": len(files_meta),
         "reused": reused,
+        "truncated": truncated,      # 상한 초과로 일부만 색인했는가
+        "total_found": total_found,  # 실제로 발견된 색인 대상 파일 수
         "embed_model": embed_model,
         "dim": int(dim),
     }

@@ -3,10 +3,15 @@ import {
   type AppSettings,
   type ReasoningEffort,
   type ThemeMode,
-  TEMP_PRESET_META
+  type TempPreset,
+  TEMP_MODE_OPTIONS,
+  RAG_MAX_FILES_OPTIONS
 } from '../../../shared/settings'
 import type { HealthInfo } from '../../../shared/backend'
+import type { UpdateStatus } from '../../../shared/update'
 import Select from '../components/Select'
+import Segmented from '../components/Segmented'
+import Dropdown from '../components/Dropdown'
 
 interface Props {
   settings: AppSettings
@@ -52,6 +57,12 @@ function nearestTokenIndex(v: number): number {
   return idx
 }
 
+/** 슬라이더 배경 — 채움(오렌지)/미채움(연한 회색)을 값 비율(0~100)로 그린다. */
+function rangeFill(pct: number): React.CSSProperties {
+  const p = Math.max(0, Math.min(100, pct))
+  return { background: `linear-gradient(to right, var(--accent) ${p}%, var(--track) ${p}%)` }
+}
+
 function SettingsView({ settings, health, onSave }: Props): React.JSX.Element {
   const [form, setForm] = useState<AppSettings>(settings)
   const [saved, setSaved] = useState(false)
@@ -80,6 +91,42 @@ function SettingsView({ settings, health, onSave }: Props): React.JSX.Element {
     setSaved(true)
     window.setTimeout(() => setSaved(false), 1800)
   }
+
+  // ── 자동 업데이트 (GitHub 릴리스) ──
+  const [appVersion, setAppVersion] = useState('')
+  const [upd, setUpd] = useState<UpdateStatus>({ state: 'idle' })
+  useEffect(() => {
+    window.api.updates.version().then(setAppVersion).catch(() => {})
+    return window.api.updates.onStatus(setUpd)
+  }, [])
+  const checkUpdate = (): void => {
+    setUpd({ state: 'checking' })
+    // dev-disabled·error는 이벤트가 안 올 수 있어 반환값으로 즉시 반영
+    void window.api.updates.check().then((s) => {
+      if (s.state === 'dev-disabled' || s.state === 'error') setUpd(s)
+    })
+  }
+  const updBusy = upd.state === 'checking' || upd.state === 'downloading'
+  const updHint = ((): string => {
+    switch (upd.state) {
+      case 'checking':
+        return '릴리스 확인 중…'
+      case 'up-to-date':
+        return '최신 버전입니다.'
+      case 'available':
+        return `새 버전 v${upd.version} 이(가) 있습니다.`
+      case 'downloading':
+        return `다운로드 중… ${upd.percent ?? 0}%`
+      case 'downloaded':
+        return `v${upd.version} 다운로드 완료 — 재시작하면 설치됩니다.`
+      case 'dev-disabled':
+        return '개발 모드에선 확인할 수 없습니다 (설치본에서만 동작).'
+      case 'error':
+        return `오류: ${upd.message ?? '알 수 없음'}`
+      default:
+        return 'GitHub 릴리스에서 새 버전을 확인합니다.'
+    }
+  })()
 
   return (
     <div className="view">
@@ -150,55 +197,48 @@ function SettingsView({ settings, health, onSave }: Props): React.JSX.Element {
                 <div className="row__label">추론 강도</div>
                 <div className="row__hint">모델 사고(think) 깊이 · Low 빠름 / High 정확</div>
               </div>
-              <div className="seg">
-                {EFFORTS.map((o) => (
-                  <button
-                    key={o.v}
-                    type="button"
-                    className={`seg__opt ${form.reasoningEffort === o.v ? 'seg__opt--on' : ''}`}
-                    onClick={() => set('reasoningEffort', o.v)}
-                  >
-                    {o.label}
-                  </button>
-                ))}
-              </div>
+              <Segmented
+                value={form.reasoningEffort}
+                options={EFFORTS}
+                onChange={(v) => set('reasoningEffort', v)}
+              />
             </div>
-            <div className="row row--stack">
+            <div className="row">
               <div>
-                <div className="row__label">생성 온도 (작업별 프리셋)</div>
+                <div className="row__label">생성 온도</div>
                 <div className="row__hint">
-                  0 결정적 · 1 창의적 — 정리는 낮게, 창작은 높게. 활성 프리셋은 대화창 하단에서 선택합니다.
+                  자동이면 요청 내용을 보고 정리·분류/코딩·일반 온도를 매번 골라줍니다. 커스텀만 직접 조정합니다.
                 </div>
               </div>
-              <div className="temp-presets">
-                {TEMP_PRESET_META.map((p) => (
-                  <div
-                    className={`temp-preset ${form.tempPreset === p.id ? 'temp-preset--active' : ''}`}
-                    key={p.id}
-                  >
-                    <button
-                      type="button"
-                      className="temp-preset__name"
-                      title={`활성 프리셋으로 지정 · ${p.hint}`}
-                      onClick={() => set('tempPreset', p.id)}
-                    >
-                      {form.tempPreset === p.id ? '● ' : '○ '}
-                      {p.label}
-                    </button>
-                    <input
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      value={form[p.field]}
-                      onChange={(e) => set(p.field, Number(e.target.value))}
-                      className="range"
-                    />
-                    <span className="temp__val mono">{form[p.field].toFixed(2)}</span>
-                  </div>
-                ))}
-              </div>
+              <Dropdown
+                value={form.tempPreset}
+                options={TEMP_MODE_OPTIONS}
+                onChange={(v) => set('tempPreset', v as TempPreset)}
+                align="right"
+                title="생성 온도 모드"
+              />
             </div>
+            {form.tempPreset === 'custom' && (
+              <div className="row">
+                <div>
+                  <div className="row__label">커스텀 온도</div>
+                  <div className="row__hint">0 결정적 · 1 창의적</div>
+                </div>
+                <div className="temp">
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={form.tempCustom}
+                    onChange={(e) => set('tempCustom', Number(e.target.value))}
+                    className="range"
+                    style={rangeFill(form.tempCustom * 100)}
+                  />
+                  <span className="temp__val mono">{form.tempCustom.toFixed(2)}</span>
+                </div>
+              </div>
+            )}
             <div className="row">
               <div>
                 <div className="row__label">컨텍스트 길이</div>
@@ -213,6 +253,7 @@ function SettingsView({ settings, health, onSave }: Props): React.JSX.Element {
                   value={nearestTokenIndex(form.contextLength)}
                   onChange={(e) => set('contextLength', TOKEN_STEPS[Number(e.target.value)])}
                   className="range range--stepped"
+                  style={rangeFill((nearestTokenIndex(form.contextLength) / (TOKEN_STEPS.length - 1)) * 100)}
                   list="token-steps"
                 />
                 <datalist id="token-steps">
@@ -236,21 +277,14 @@ function SettingsView({ settings, health, onSave }: Props): React.JSX.Element {
                 <div className="row__label">RAG 사용</div>
                 <div className="row__hint">에이전트가 색인된 작업 폴더에서 관련 코드·문서를 자동 참고</div>
               </div>
-              <div className="seg">
-                {[
+              <Segmented
+                value={form.ragEnabled}
+                options={[
                   { v: true, label: '사용' },
                   { v: false, label: '끔' }
-                ].map((o) => (
-                  <button
-                    key={String(o.v)}
-                    type="button"
-                    className={`seg__opt ${form.ragEnabled === o.v ? 'seg__opt--on' : ''}`}
-                    onClick={() => set('ragEnabled', o.v)}
-                  >
-                    {o.label}
-                  </button>
-                ))}
-              </div>
+                ]}
+                onChange={(v) => set('ragEnabled', v)}
+              />
             </div>
             <div className="row">
               <div>
@@ -266,6 +300,24 @@ function SettingsView({ settings, health, onSave }: Props): React.JSX.Element {
                 placeholder="bge-m3"
               />
             </div>
+            <div className="row">
+              <div>
+                <div className="row__label">색인 범위 (최대 파일 수)</div>
+                <div className="row__hint">
+                  많을수록 더 많이 참고하지만 색인이 느려집니다 · 폴더가 커서 한계에 닿으면 늘리라고 안내합니다
+                </div>
+              </div>
+              <Dropdown
+                value={String(form.ragMaxFiles)}
+                options={RAG_MAX_FILES_OPTIONS.map((o) => ({
+                  value: String(o.value),
+                  label: o.label
+                }))}
+                onChange={(v) => set('ragMaxFiles', Number(v))}
+                align="right"
+                title="RAG 색인에 넣을 최대 파일 수"
+              />
+            </div>
           </div>
         </section>
 
@@ -279,18 +331,11 @@ function SettingsView({ settings, health, onSave }: Props): React.JSX.Element {
                   유휴 시 모델 언로드로 인한 콜드 재로드(~5.8초) 방지 · 상주는 VRAM을 계속 점유
                 </div>
               </div>
-              <div className="seg">
-                {KEEP_ALIVE.map((o) => (
-                  <button
-                    key={o.v}
-                    type="button"
-                    className={`seg__opt ${form.keepAlive === o.v ? 'seg__opt--on' : ''}`}
-                    onClick={() => set('keepAlive', o.v)}
-                  >
-                    {o.label}
-                  </button>
-                ))}
-              </div>
+              <Segmented
+                value={form.keepAlive}
+                options={KEEP_ALIVE}
+                onChange={(v) => set('keepAlive', v)}
+              />
             </div>
             <div className="row">
               <div>
@@ -312,19 +357,46 @@ function SettingsView({ settings, health, onSave }: Props): React.JSX.Element {
                 <div className="row__label">테마</div>
                 <div className="row__hint">시스템은 OS 설정을 따릅니다</div>
               </div>
-              <div className="seg">
-                {THEMES.map((o) => (
-                  <button
-                    key={o.v}
-                    type="button"
-                    className={`seg__opt ${form.theme === o.v ? 'seg__opt--on' : ''}`}
-                    onClick={() => set('theme', o.v)}
-                  >
-                    {o.label}
+              <Segmented value={form.theme} options={THEMES} onChange={(v) => set('theme', v)} />
+            </div>
+          </div>
+        </section>
+
+        <section>
+          <div className="group__title">업데이트</div>
+          <div className="group">
+            <div className="row">
+              <div>
+                <div className="row__label">버전{appVersion && ` · v${appVersion}`}</div>
+                <div className="row__hint">{updHint}</div>
+              </div>
+              <div className="update-actions">
+                {upd.state === 'downloaded' ? (
+                  <button className="btn" onClick={() => void window.api.updates.install()}>
+                    재시작하여 설치
                   </button>
-                ))}
+                ) : upd.state === 'available' ? (
+                  <button className="btn" onClick={() => void window.api.updates.download()}>
+                    v{upd.version} 다운로드
+                  </button>
+                ) : (
+                  <button className="btn btn--ghost2" disabled={updBusy} onClick={checkUpdate}>
+                    {upd.state === 'checking' ? '확인 중…' : '업데이트 확인'}
+                  </button>
+                )}
               </div>
             </div>
+            {upd.state === 'downloading' && (
+              <div className="row">
+                <div className="update-progress">
+                  <div
+                    className="update-progress__bar"
+                    style={{ width: `${upd.percent ?? 0}%` }}
+                  />
+                </div>
+                <span className="temp__val mono">{upd.percent ?? 0}%</span>
+              </div>
+            )}
           </div>
         </section>
 

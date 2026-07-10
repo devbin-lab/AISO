@@ -132,7 +132,7 @@ async def _stream_ollama(host: str, payload: dict):
                         }
                     yield {
                         "type": "done",
-                        "eval_count": data.get("eval_count"),
+                        "eval_count": data.get("eval_count"),  # 생성 토큰 (출력만 집계)
                         "total_duration": data.get("total_duration"),
                     }
 
@@ -194,7 +194,7 @@ class AgentRequest(BaseModel):
     reasoning_effort: str = Field(default="medium", pattern="^(low|medium|high)$")
     temperature: float = 0.7
     context_length: int = 16384  # /chat와 통일 — 모드 전환 시 num_ctx 변경으로 인한 재로드 방지
-    approval_mode: str = Field(default="require", pattern="^(require|partial|auto)$")
+    approval_mode: str = Field(default="read", pattern="^(manual|read|auto)$")
     session_id: str = ""
     ollama_host: str | None = None
     rag_enabled: bool = True
@@ -245,6 +245,7 @@ class RagIndexRequest(BaseModel):
     workspace: str
     embed_model: str = "nomic-embed-text"
     ollama_host: str | None = None
+    max_files: int | None = None  # 색인할 최대 파일 수(RAG 범위). None이면 저장값/기본값
 
 
 @app.post("/rag/index")
@@ -259,7 +260,7 @@ async def rag_index(req: RagIndexRequest):
             yield json.dumps({"type": "error", "error": str(e)}, ensure_ascii=False) + "\n"
             return
         try:
-            async for ev in build_index(root, host, req.embed_model):
+            async for ev in build_index(root, host, req.embed_model, req.max_files):
                 yield json.dumps(ev, ensure_ascii=False) + "\n"
         except RagError as e:
             yield json.dumps({"type": "error", "error": str(e)}, ensure_ascii=False) + "\n"
@@ -275,6 +276,69 @@ async def rag_status_ep(workspace: str):
     except ToolError as e:
         return {"indexed": False, "count": 0, "detail": str(e)}
     return rag_status(root)
+
+
+# ---- Ollama 모델 다운로드(pull) — 처음 설치 온보딩에서 임베딩 모델 원클릭 설치 ----
+
+
+class OllamaPullRequest(BaseModel):
+    model: str
+    ollama_host: str | None = None
+
+
+@app.post("/ollama/pull")
+async def ollama_pull(req: OllamaPullRequest):
+    """Ollama 모델을 내려받으며 진행 상황을 NDJSON으로 스트리밍한다.
+
+    Ollama /api/pull 은 레이어별로 {status, digest, total, completed} 를 흘리고
+    마지막에 {status:"success"} 를 준다. 이를 그대로 progress/done/error 로 중계한다.
+    """
+    host = (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
+    model = req.model.strip()
+
+    async def gen():
+        if not model:
+            yield json.dumps({"type": "error", "error": "모델명이 비어 있습니다."}, ensure_ascii=False) + "\n"
+            return
+        timeout = httpx.Timeout(None, connect=5)  # 다운로드는 무제한, 연결만 5s
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                # name(구버전)·model(신버전) 둘 다 실어 호환성 확보
+                payload = {"name": model, "model": model, "stream": True}
+                async with client.stream("POST", f"{host}/api/pull", json=payload) as r:
+                    if r.status_code != 200:
+                        body = (await r.aread()).decode(errors="ignore")
+                        yield json.dumps(
+                            {"type": "error", "error": f"Ollama 오류 ({r.status_code}): {body[:300]}"},
+                            ensure_ascii=False,
+                        ) + "\n"
+                        return
+                    async for line in r.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        data = json.loads(line)
+                        if data.get("error"):
+                            yield json.dumps(
+                                {"type": "error", "error": str(data["error"])[:300]}, ensure_ascii=False
+                            ) + "\n"
+                            return
+                        status = data.get("status", "")
+                        ev: dict = {"type": "progress", "status": status}
+                        if isinstance(data.get("total"), int):
+                            ev["total"] = data["total"]
+                        if isinstance(data.get("completed"), int):
+                            ev["completed"] = data["completed"]
+                        yield json.dumps(ev, ensure_ascii=False) + "\n"
+                        if status == "success":
+                            yield json.dumps({"type": "done", "model": model}, ensure_ascii=False) + "\n"
+                            return
+            # success 없이 스트림이 끝난 경우도 완료로 간주
+            yield json.dumps({"type": "done", "model": model}, ensure_ascii=False) + "\n"
+        except Exception as e:  # noqa: BLE001 — 연결 끊김 등은 오류로 중계
+            yield json.dumps({"type": "error", "error": f"연결 실패: {e}"}, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
 class RagSearchRequest(BaseModel):

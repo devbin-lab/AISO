@@ -3,7 +3,17 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { loadSettings, saveSettings } from './settings'
 import { startBackend, stopBackend, backendInfo, onBackendChange } from './backend'
+import { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
+import { recordUsage, usageSummary } from './usage'
+import {
+  listConversations,
+  getConversation,
+  saveConversation,
+  setConversationPinned,
+  deleteConversation
+} from './conversations'
 import type { AppSettings } from '../shared/settings'
+import type { ConversationKind, ConversationSave } from '../shared/conversation'
 
 // 로컬 LLM 앱: Chromium GPU 합성이 VRAM ~2.7GB를 점유해 16GB 카드에서
 // 무거운 모델(최대 gpt-oss:20b·13.8GB) 콜드 로드가 OOM(CUDA crash) 날 수 있다.
@@ -113,6 +123,24 @@ app.whenReady().then(() => {
   onBackendChange((i) => {
     BrowserWindow.getAllWindows().forEach((w) => w.webContents.send('backend:status', i))
   })
+
+  // ---- IPC: 토큰 사용량 (userData/usage.json) ----
+  ipcMain.handle('usage:record', (_e, tokens: number) => recordUsage(tokens))
+  ipcMain.handle('usage:summary', () => usageSummary())
+
+  // ---- IPC: 대화방 (userData/conversations.json) ----
+  ipcMain.handle('conv:list', (_e, kind: ConversationKind) => listConversations(kind))
+  ipcMain.handle('conv:get', (_e, id: string) => getConversation(id))
+  ipcMain.handle('conv:save', (_e, c: ConversationSave) => saveConversation(c))
+  ipcMain.handle('conv:pin', (_e, id: string, pinned: boolean) => setConversationPinned(id, pinned))
+  ipcMain.handle('conv:delete', (_e, id: string) => deleteConversation(id))
+
+  // ---- IPC: 자동 업데이트 (GitHub 릴리스 기반) ----
+  ipcMain.handle('app:version', () => app.getVersion())
+  ipcMain.handle('update:check', () => checkForUpdates())
+  ipcMain.handle('update:download', () => downloadUpdate())
+  ipcMain.handle('update:install', () => quitAndInstall())
+  initUpdater()
 
   // ---- IPC: 테마 변경 시 네이티브 타이틀바(창 버튼) 색 동기화 ----
   ipcMain.handle('window:set-theme', (e, mode: 'dark' | 'light') => {

@@ -11,7 +11,16 @@ export interface RagStatus {
 
 export type RagIndexEvent =
   | { type: 'progress'; done: number; total: number; file: string }
-  | { type: 'done'; count: number; files: number; reused: number; embed_model: string; dim: number }
+  | {
+      type: 'done'
+      count: number
+      files: number
+      reused: number
+      embed_model: string
+      dim: number
+      truncated?: boolean
+      total_found?: number
+    }
   | { type: 'error'; error: string }
 
 /** 작업 폴더 색인 상태 조회. */
@@ -37,7 +46,8 @@ export async function ragIndex(
     body: JSON.stringify({
       workspace,
       embed_model: settings.embeddingModel,
-      ollama_host: settings.ollamaHost
+      ollama_host: settings.ollamaHost,
+      max_files: settings.ragMaxFiles
     }),
     signal
   })

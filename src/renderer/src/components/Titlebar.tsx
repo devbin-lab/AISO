@@ -1,8 +1,15 @@
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
+import { PanelRightIcon } from './icons'
+
+interface ConvToggle {
+  collapsed: boolean
+  onToggle: () => void
+}
 
 interface Props {
   backend: BackendInfo
   health: HealthInfo | null
+  convToggle?: ConvToggle | null
 }
 
 type ConnKind = 'ok' | 'warn' | 'error' | 'checking'
@@ -16,16 +23,28 @@ function connState(backend: BackendInfo, health: HealthInfo | null): { kind: Con
   return { kind: 'ok', label: '연결됨' }
 }
 
-function Titlebar({ backend, health }: Props): React.JSX.Element {
+function Titlebar({ backend, health, convToggle }: Props): React.JSX.Element {
   const s = connState(backend, health)
   return (
     <header className="titlebar">
-      <div className="titlebar__brand">
-        <span className="titlebar__mark" />
-        Aiso
+      <div className="titlebar__left">
+        <div className="titlebar__brand">
+          <span className="titlebar__mark" />
+          Aiso
+        </div>
+        {convToggle && (
+          <button
+            className="iconbtn titlebar__convtoggle"
+            data-tip={convToggle.collapsed ? '대화 목록 열기' : '대화 목록 접기'}
+            aria-label="대화 목록 토글"
+            onClick={convToggle.onToggle}
+          >
+            <PanelRightIcon size={15} />
+          </button>
+        )}
       </div>
       <div className="titlebar__right">
-        <div className={`conn conn--${s.kind}`} title={s.title}>
+        <div className={`conn conn--${s.kind}`} data-tip={s.title}>
           <span className="conn__dot" />
           {s.label}
         </div>

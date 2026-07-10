@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import {
-  type AppSettings,
-  type ReasoningEffort,
-  type TempPreset,
-  TEMP_PRESET_META
-} from '../../../shared/settings'
+import type { AppSettings, ReasoningEffort } from '../../../shared/settings'
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import type { AgentEvent, ApprovalMode, PlanStep } from '../../../shared/agent'
+import type { ConversationMeta } from '../../../shared/conversation'
 import { TOOL_LABEL, APPROVAL_MODES } from '../../../shared/agent'
 import { streamAgent, approveAgent, type AgentMessage } from '../lib/agent'
+import { newConversationId, titleFromText } from '../lib/conversations'
+import { modelInstalled } from '../lib/ollama'
+import ConversationList from '../components/ConversationList'
 import { ragStatus, ragIndex, type RagStatus } from '../lib/rag'
 import {
   AgentIcon,
@@ -36,11 +35,6 @@ const APPROVAL_OPTIONS: DropdownOption[] = APPROVAL_MODES.map((m) => ({
   label: m.label,
   hint: m.hint
 }))
-const TEMP_OPTIONS: DropdownOption[] = TEMP_PRESET_META.map((p) => ({
-  value: p.id,
-  label: p.label,
-  hint: p.hint
-}))
 
 type ToolStatus = 'running' | 'awaiting' | 'done' | 'error' | 'rejected'
 
@@ -56,6 +50,7 @@ type Item =
       output?: string
       screenshot?: string
     }
+  | { kind: 'meta'; tokens: number; seconds: number } // 실행 완료 후 토큰·소요시간 요약줄
 
 interface Props {
   settings: AppSettings
@@ -63,6 +58,7 @@ interface Props {
   health: HealthInfo | null
   onPickWorkspace: () => Promise<void>
   onSaveSettings: (patch: Partial<AppSettings>) => Promise<void>
+  convCollapsed: boolean
 }
 
 function argPath(args: Record<string, unknown>): string {
@@ -78,12 +74,13 @@ function AgentView({
   backend,
   health,
   onPickWorkspace,
-  onSaveSettings
+  onSaveSettings,
+  convCollapsed
 }: Props): React.JSX.Element {
   const [items, setItems] = useState<Item[]>([])
   const [input, setInput] = useState('')
   const [running, setRunning] = useState(false)
-  const [approvalMode, setApprovalMode] = useState<ApprovalMode>('require')
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>('read')
   const [note, setNote] = useState<string | null>(null)
   const [plan, setPlan] = useState<PlanStep[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(false) // 우측 사이드바(계획+미리보기) 전체 토글
@@ -95,7 +92,9 @@ function AgentView({
   const [indexProg, setIndexProg] = useState<{ done: number; total: number } | null>(null)
   const [ragNote, setRagNote] = useState<string | null>(null)
   const [elapsed, setElapsed] = useState(0) // 현재 실행 경과(초) — '멈춘 것처럼 보임' 방지용 활동 표시
+  const [liveTokens, setLiveTokens] = useState(0) // 이번 실행 누적 토큰(실시간 표시)
   const runStartRef = useRef(0)
+  const runTokensRef = useRef(0) // 완료 시 사용량 기록용(마지막 usage.total)
 
   // 작업 폴더가 정해지면 사이드카에 미리보기 루트를 알려준다 (/f 정적 서빙용)
   useEffect(() => {
@@ -125,8 +124,79 @@ function AgentView({
   const sessionRef = useRef<string>('')
   const historyRef = useRef<AgentMessage[]>([])
   const finalTextRef = useRef<string>('') // 이번 run의 마지막 assistant 답변 (툴콜 이후 초기화)
+  const autoIndexedRef = useRef<string>('') // 자동 색인을 이미 시도한 워크스페이스 (중복 방지)
   const scrollRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
+
+  // ── 대화방 (에이전트 작업 세션) ──
+  const [convId, setConvId] = useState<string | null>(null)
+  const [convTitle, setConvTitle] = useState('새 대화')
+  const [convList, setConvList] = useState<ConversationMeta[]>([])
+  const convIdRef = useRef<string | null>(null)
+
+  const refreshConvs = (): void => {
+    window.api.conversations.list('agent').then(setConvList).catch(() => {})
+  }
+  useEffect(() => refreshConvs(), [])
+
+  // 실행이 끝나면 세션 저장 (스크린샷은 용량 커서 제외 — 재실행 시 재생성됨)
+  useEffect(() => {
+    const id = convIdRef.current
+    if (!id || running || items.length === 0) return
+    const lean = items.map((i) => (i.kind === 'tool' && i.screenshot ? { ...i, screenshot: undefined } : i))
+    window.api.conversations
+      .save({
+        id,
+        kind: 'agent',
+        title: convTitle,
+        data: { items: lean, history: historyRef.current, plan, workspace: settings.workspace }
+      })
+      .then(refreshConvs)
+      .catch(() => {})
+  }, [items, plan, running, convTitle])
+
+  const newConv = (): void => {
+    if (running) return
+    convIdRef.current = null
+    setConvId(null)
+    setConvTitle('새 대화')
+    setItems([])
+    setPlan([])
+    historyRef.current = []
+    setNote(null)
+    // 새 대화는 작업 폴더 미선택 상태로 시작 — 작업 폴더는 대화(작업 세션)마다 따로 고른다
+    if (settings.workspace) void onSaveSettings({ workspace: '' })
+  }
+  const selectConv = async (id: string): Promise<void> => {
+    if (running || id === convId) return
+    const c = await window.api.conversations.get(id)
+    if (!c) return
+    const d = (c.data ?? {}) as { items?: Item[]; history?: AgentMessage[]; plan?: PlanStep[]; workspace?: string }
+    convIdRef.current = id
+    setConvId(id)
+    setConvTitle(c.title)
+    setItems(d.items ?? [])
+    setPlan(d.plan ?? [])
+    historyRef.current = d.history ?? []
+    setNote(null)
+    // 작업 세션마다 작업 폴더가 다를 수 있으니 저장된 폴더로 복원
+    if (d.workspace && d.workspace !== settings.workspace) void onSaveSettings({ workspace: d.workspace })
+  }
+  const renameConv = async (id: string, title: string): Promise<void> => {
+    const c = await window.api.conversations.get(id)
+    if (!c) return
+    await window.api.conversations.save({ id, kind: 'agent', title, data: c.data })
+    if (convIdRef.current === id) setConvTitle(title)
+    refreshConvs()
+  }
+  const pinConv = (id: string, pinned: boolean): void => {
+    window.api.conversations.setPinned(id, pinned).then(refreshConvs).catch(() => {})
+  }
+  const deleteConv = async (id: string): Promise<void> => {
+    await window.api.conversations.remove(id)
+    if (convIdRef.current === id) newConv()
+    refreshConvs()
+  }
 
   useEffect(() => {
     const el = scrollRef.current
@@ -162,6 +232,10 @@ function AgentView({
       if (p && /\.html?$/i.test(p) && ['write_file', 'run_web', 'edit_file'].includes(ev.name)) {
         setPreviewPath(p.replace(/\\/g, '/'))
       }
+    } else if (ev.type === 'usage') {
+      runTokensRef.current = ev.total
+      setLiveTokens(ev.total)
+      return
     } else if (ev.type === 'notice') {
       setNote(ev.text)
       return
@@ -256,6 +330,13 @@ function AgentView({
   const send = async (): Promise<void> => {
     const text = input.trim()
     if (!text || !ready || running) return
+    // 새 세션의 첫 지시 → 대화 id·제목 부여 (이후 저장 이펙트가 영속화)
+    if (!convIdRef.current) {
+      const id = newConversationId()
+      convIdRef.current = id
+      setConvId(id)
+      setConvTitle(titleFromText(text))
+    }
     setInput('')
     if (taRef.current) taRef.current.style.height = 'auto'
 
@@ -265,6 +346,8 @@ function AgentView({
     setPlan([])
     setItems((prev) => [...prev, { kind: 'user', text }])
     setRunning(true)
+    setLiveTokens(0)
+    runTokensRef.current = 0
     const ac = new AbortController()
     abortRef.current = ac
     sessionRef.current =
@@ -288,6 +371,13 @@ function AgentView({
     } finally {
       setRunning(false)
       abortRef.current = null
+      // 이번 실행에서 쓴 토큰을 사용량 통계에 기록 (홈의 일/주/월 집계)
+      if (runTokensRef.current > 0) {
+        void window.api.usage.record(runTokensRef.current)
+        // 이번 답변 아래에 토큰·소요시간 요약줄을 남긴다
+        const secs = (Date.now() - runStartRef.current) / 1000
+        setItems((prev) => [...prev, { kind: 'meta', tokens: runTokensRef.current, seconds: secs }])
+      }
       // 이번 run의 마지막 assistant 답변을 대화 히스토리에 반영 (ref 기반 → 중복 없음)
       if (finalTextRef.current.trim()) {
         historyRef.current = [...historyRef.current, { role: 'assistant', content: finalTextRef.current }]
@@ -325,17 +415,15 @@ function AgentView({
     : '생각 중'
   const fmtElapsed = (s: number): string =>
     s < 60 ? `${s}초` : `${Math.floor(s / 60)}분 ${s % 60}초`
+  const fmtTokens = (n: number): string => n.toLocaleString('en-US')
+  const fmtDuration = (s: number): string =>
+    s < 60 ? `${s.toFixed(1)}초` : `${Math.floor(s / 60)}분 ${Math.round(s % 60)}초`
 
-  const clear = (): void => {
-    if (running) return
-    setItems([])
-    setPlan([])
-    historyRef.current = []
-  }
 
   // 작업 폴더를 임베딩 색인 (진행 상황 표시). 임베딩 모델은 채팅 모델과 무관.
   const runIndex = async (): Promise<void> => {
     if (!backendReady || !hasWorkspace || indexing) return
+    autoIndexedRef.current = settings.workspace // 이 워크스페이스는 (자동/수동) 색인 시도함 → 자동 재트리거 방지
     setIndexing(true)
     setRagNote(null)
     setIndexProg({ done: 0, total: 0 })
@@ -352,9 +440,11 @@ function AgentView({
             dim: e.dim
           })
           setRagNote(
-            e.count > 0
-              ? null
-              : '색인할 코드·문서를 찾지 못했습니다 (작업 폴더에 텍스트 파일이 있는지 확인하세요).'
+            e.count === 0
+              ? 'RAG로 참고할 코드·문서를 찾지 못했습니다 (작업 폴더에 텍스트 파일이 있는지 확인하세요).'
+              : e.truncated
+                ? `폴더가 커서 일부만 RAG에 넣었습니다 (발견 ${e.total_found ?? e.files}개 중 ${e.files}개 파일). 더 넣으려면 설정 → RAG의 '색인 범위(최대 파일 수)'를 늘리세요.`
+                : null
           )
         } else if (e.type === 'error') setRagNote(e.error)
       })
@@ -368,6 +458,29 @@ function AgentView({
       }
     }
   }
+
+  // 색인이 없으면 자동으로 한 번 색인한다 (매번 수동 클릭 불필요). 이후 파일 변경은 백엔드가
+  // 백그라운드로 재색인하므로 최초 1회만 트리거하면 된다.
+  useEffect(() => {
+    if (!settings.ragEnabled || !backendReady || !hasWorkspace || indexing) return
+    if (rag == null || rag.indexed) return // 상태 미확인 or 이미 색인됨
+    if (autoIndexedRef.current === settings.workspace) return // 이 워크스페이스는 이미 시도함
+    // 임베딩 모델이 설치돼 있을 때만 (health 로드 대기 + 미설치면 조용히 대기 — 수동 버튼으로 처리)
+    // 태그 무시 비교: 'bge-m3' vs 'bge-m3:latest'
+    if (!health || !modelInstalled(health.models, settings.embeddingModel)) return
+    void runIndex()
+    // runIndex는 매 렌더 재생성되므로 deps에서 제외(안정적 트리거 조건만 관찰)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    rag,
+    backendReady,
+    hasWorkspace,
+    indexing,
+    settings.ragEnabled,
+    settings.workspace,
+    settings.embeddingModel,
+    health
+  ])
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -396,7 +509,19 @@ function AgentView({
   else if (!hasWorkspace) notice = { text: '작업 폴더를 먼저 선택하세요 — 모든 파일 작업은 이 폴더 안으로 제한됩니다', kind: 'warn' }
 
   return (
-    <div className="agent">
+    <div className="convshell">
+      {!convCollapsed && (
+        <ConversationList
+          items={convList}
+          activeId={convId}
+          onSelect={selectConv}
+          onNew={newConv}
+          onRename={renameConv}
+          onPin={pinConv}
+          onDelete={deleteConv}
+        />
+      )}
+      <div className="agent">
       <section className="agent__main view view--chat">
       <header className="view__head view__head--row">
         <div>
@@ -405,7 +530,7 @@ function AgentView({
         </div>
         <button
           className={`iconbtn ${sidebarOpen ? 'iconbtn--on' : ''}`}
-          title={sidebarOpen ? '사이드바 끄기' : '사이드바 켜기'}
+          data-tip={sidebarOpen ? '사이드바 끄기' : '사이드바 켜기'}
           aria-label="사이드바 토글"
           onClick={() => setSidebarOpen((v) => !v)}
         >
@@ -446,6 +571,12 @@ function AgentView({
                 </div>
               )
             }
+            if (it.kind === 'meta')
+              return (
+                <div key={i} className="run-meta mono">
+                  {fmtTokens(it.tokens)} 토큰 · {fmtDuration(it.seconds)}
+                </div>
+              )
             // tool
             const path = argPath(it.args)
             const ToolIcon =
@@ -552,9 +683,47 @@ function AgentView({
             <i />
           </span>
           <span className="activity__label">{activityLabel}</span>
-          <span className="activity__time mono">{fmtElapsed(elapsed)}</span>
+          {liveTokens > 0 && (
+            <span className="activity__tokens mono">· {fmtTokens(liveTokens)} 토큰</span>
+          )}
+          <span className="activity__time mono">· {fmtElapsed(elapsed)}</span>
         </div>
       )}
+
+      {/* 입력창 위: 작업 폴더 + RAG (왼쪽 정렬) */}
+      <div className="composer-head">
+        <button
+          className="ws-pick"
+          onClick={() => void onPickWorkspace()}
+          data-tip={settings.workspace || '작업 폴더 선택'}
+        >
+          <FolderIcon />
+          <span className="mono">{wsName ?? '작업 폴더 선택'}</span>
+        </button>
+        {hasWorkspace && (
+          <button
+            className={`ws-pick rag-chip ${rag?.indexed ? 'rag-chip--on' : ''}`}
+            onClick={() => void runIndex()}
+            disabled={indexing || !backendReady}
+            data-tip={
+              rag?.indexed
+                ? `RAG 활성 · 조각 ${rag.count}개 (${rag.embed_model}) · 클릭하면 다시 만듭니다`
+                : 'RAG(검색 증강) — 작업 폴더를 의미 검색용으로 준비해 에이전트가 관련 코드·문서를 자동 참고 (자동 실행)'
+            }
+          >
+            <DatabaseIcon />
+            <span>
+              {indexing
+                ? indexProg && indexProg.total
+                  ? `RAG ${indexProg.done}/${indexProg.total}`
+                  : 'RAG 준비 중…'
+                : rag?.indexed
+                  ? `RAG ${rag.count}`
+                  : 'RAG'}
+            </span>
+          </button>
+        )}
+      </div>
 
       <div className="composer">
         <textarea
@@ -576,43 +745,12 @@ function AgentView({
       </div>
 
       <div className="composer-tools">
-        <button
-          className="ws-pick"
-          onClick={() => void onPickWorkspace()}
-          title={settings.workspace || '작업 폴더 선택'}
-        >
-          <FolderIcon />
-          <span className="mono">{wsName ?? '작업 폴더 선택'}</span>
-        </button>
-        {hasWorkspace && (
-          <button
-            className={`ws-pick rag-chip ${rag?.indexed ? 'rag-chip--on' : ''}`}
-            onClick={() => void runIndex()}
-            disabled={indexing || !backendReady}
-            title={
-              rag?.indexed
-                ? `색인됨 · ${rag.count}개 조각 · ${rag.embed_model} · 다시 색인하려면 클릭`
-                : 'RAG 색인 — 작업 폴더를 의미 검색용으로 색인 (에이전트가 관련 코드·문서를 자동 참고)'
-            }
-          >
-            <DatabaseIcon />
-            <span>
-              {indexing
-                ? indexProg && indexProg.total
-                  ? `색인 ${indexProg.done}/${indexProg.total}`
-                  : '색인 중…'
-                : rag?.indexed
-                  ? `색인 ${rag.count}`
-                  : '색인'}
-            </span>
-          </button>
-        )}
         <Dropdown
           value={approvalMode}
           options={APPROVAL_OPTIONS}
           onChange={(v) => setApprovalMode(v as ApprovalMode)}
           align="left"
-          title="승인 모드 — 파일 쓰기·삭제 승인 방식"
+          title="승인 모드 — 수동(전부 승인) · 읽기(쓰기·삭제만 승인) · 자동(승인 없음)"
         />
 
         <div className="composer-tools__right">
@@ -632,19 +770,12 @@ function AgentView({
             align="right"
             title="추론 성능"
           />
-          <Dropdown
-            value={settings.tempPreset}
-            options={TEMP_OPTIONS}
-            onChange={(v) => void onSaveSettings({ tempPreset: v as TempPreset })}
-            align="right"
-            title="생성 온도 — 작업 유형별 프리셋 (설정에서 값 조정)"
-          />
           {items.length > 0 && (
             <button
               className="iconbtn"
-              title="대화 지우기"
-              aria-label="대화 지우기"
-              onClick={clear}
+              data-tip="새 대화 시작"
+              aria-label="새 대화 시작"
+              onClick={newConv}
               disabled={running}
             >
               <TrashIcon />
@@ -684,7 +815,8 @@ function AgentView({
                 <span className="preview__file mono">{previewPath ?? '—'}</span>
                 <button
                   className="iconbtn"
-                  title="새로고침"
+                  data-tip="새로고침"
+                  aria-label="미리보기 새로고침"
                   disabled={!previewUrl}
                   onClick={() => setPreviewReload((n) => n + 1)}
                 >
@@ -692,7 +824,7 @@ function AgentView({
                 </button>
                 <button
                   className="iconbtn"
-                  title="미리보기 닫기"
+                  data-tip="미리보기 닫기"
                   aria-label="미리보기 닫기"
                   onClick={() => setShowPreview(false)}
                 >
@@ -714,6 +846,7 @@ function AgentView({
           )}
         </aside>
       )}
+      </div>
     </div>
   )
 }

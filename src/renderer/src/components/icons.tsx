@@ -157,6 +157,31 @@ export function TerminalIcon({ size = 13 }: IconProps): React.JSX.Element {
   )
 }
 
+export function EditIcon({ size = 13 }: IconProps): React.JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" />
+    </svg>
+  )
+}
+
+/** 고정 핀. filled=true면 채워진(고정됨) 상태. */
+export function PinIcon({ size = 13, filled = false }: IconProps & { filled?: boolean }): React.JSX.Element {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      {...stroke}
+      fill={filled ? 'currentColor' : 'none'}
+    >
+      <path d="M9 4h6l-1 6 3 3v2H7v-2l3-3z" />
+      <path d="M12 15v5" />
+    </svg>
+  )
+}
+
 export function DatabaseIcon({ size = 13 }: IconProps): React.JSX.Element {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>

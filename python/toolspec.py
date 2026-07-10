@@ -29,10 +29,12 @@ from webfetch import WEB_FETCH_SCHEMA, web_fetch
 
 
 class Approval(Enum):
-    SAFE = 0         # 승인 불필요 (읽기·조회)
-    DESTRUCTIVE = 1  # require 모드에서 승인 (쓰기·편집·이동)
-    DELETE = 2       # require·partial 모드에서 승인 (삭제)
-    ALWAYS = 3       # auto 외 모든 모드에서 승인 (임의 명령 실행)
+    SAFE = 0         # 읽기·조회 — read 모드에선 통과, manual 모드에선 승인
+    DESTRUCTIVE = 1  # 쓰기·편집·이동 — read·manual 모드에서 승인
+    DELETE = 2       # 삭제 — read·manual 모드에서 승인
+    ALWAYS = 3       # 임의 명령 실행 — read·manual 모드에서 승인
+    # (DESTRUCTIVE·DELETE·ALWAYS는 현재 승인 로직에선 동일하게 동작하나,
+    #  삭제/쓰기/명령이라는 성질 구분을 위해 등급은 유지한다.)
 
 
 class CallKind(Enum):
@@ -142,16 +144,22 @@ def is_meta(name: str) -> bool:
 
 
 def needs_approval(name: str, mode: str) -> bool:
-    """승인 모드별로 이 툴이 사용자 승인을 요구하는지."""
-    spec = REGISTRY.get(name)
-    approval = spec.approval if spec else Approval.SAFE  # 미등록 툴 → 승인 불필요(기존 동작)
+    """승인 모드별로 이 툴이 사용자 승인을 요구하는지.
+
+    - auto(자동):   승인 없이 전부 실행.
+    - read(읽기):   읽기(SAFE)는 통과, 쓰기·편집·삭제·명령은 승인.
+    - manual(수동): 읽기 포함 모든 실질 행위를 승인(계획 갱신 같은 메타는 제외).
+    """
     if mode == "auto":
         return False
-    if approval is Approval.ALWAYS:
-        return True
-    if mode == "partial":
-        return approval is Approval.DELETE
-    return approval is not Approval.SAFE  # require: 파괴/삭제 모두 승인
+    spec = REGISTRY.get(name)
+    if spec is None:
+        return mode == "manual"  # 미등록 툴 → 수동에서만 승인(그 외 기존처럼 통과)
+    if spec.kind is CallKind.META:
+        return False  # update_plan 등 메타는 실제 행위가 아니므로 승인 불필요
+    if mode == "manual":
+        return True  # 수동: 읽기까지 전부 승인
+    return spec.approval is not Approval.SAFE  # read: 읽기 제외 전부 승인
 
 
 async def execute(spec: ToolSpec, root: Path, host: str, args: dict) -> tuple[str, str | None]:

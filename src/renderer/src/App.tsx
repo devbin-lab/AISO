@@ -4,6 +4,8 @@ import { DEFAULT_SETTINGS } from '../../shared/settings'
 import type { BackendInfo, HealthInfo } from '../../shared/backend'
 import Titlebar from './components/Titlebar'
 import Sidebar, { type ViewKey } from './components/Sidebar'
+import TooltipHost from './components/Tooltip'
+import { ConfirmHost } from './components/ConfirmDialog'
 import HomeView from './views/HomeView'
 import ChatView from './views/ChatView'
 import AgentView from './views/AgentView'
@@ -15,6 +17,9 @@ function App(): React.JSX.Element {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [backend, setBackend] = useState<BackendInfo>({ state: 'starting', port: null })
   const [health, setHealth] = useState<HealthInfo | null>(null)
+  // 대화 목록 패널 접힘 상태 — 뷰별로 별도 유지, 토글 버튼은 타이틀바에 있다
+  const [chatConvCollapsed, setChatConvCollapsed] = useState(false)
+  const [agentConvCollapsed, setAgentConvCollapsed] = useState(false)
 
   // 메인 프로세스에서 저장된 설정 불러오기
   useEffect(() => {
@@ -101,9 +106,16 @@ function App(): React.JSX.Element {
   // 뷰는 숨김 처리로 유지 → 채팅 대화가 뷰 전환에 사라지지 않는다
   const wrap = (k: ViewKey): string => `viewwrap${view === k ? '' : ' viewwrap--hidden'}`
 
+  const convToggle =
+    view === 'chat'
+      ? { collapsed: chatConvCollapsed, onToggle: () => setChatConvCollapsed((v) => !v) }
+      : view === 'agent'
+        ? { collapsed: agentConvCollapsed, onToggle: () => setAgentConvCollapsed((v) => !v) }
+        : null
+
   return (
     <div className="frame">
-      <Titlebar backend={backend} health={health} />
+      <Titlebar backend={backend} health={health} convToggle={convToggle} />
       <div className="body">
         <Sidebar view={view} onNavigate={setView} />
         <main className="content">
@@ -116,6 +128,7 @@ function App(): React.JSX.Element {
               backend={backend}
               health={health}
               onSaveSettings={saveSettings}
+              convCollapsed={chatConvCollapsed}
             />
           </div>
           <div className={wrap('agent')}>
@@ -125,6 +138,7 @@ function App(): React.JSX.Element {
               health={health}
               onPickWorkspace={pickWorkspace}
               onSaveSettings={saveSettings}
+              convCollapsed={agentConvCollapsed}
             />
           </div>
           <div className={wrap('settings')}>
@@ -132,6 +146,8 @@ function App(): React.JSX.Element {
           </div>
         </main>
       </div>
+      <TooltipHost />
+      <ConfirmHost />
     </div>
   )
 }
