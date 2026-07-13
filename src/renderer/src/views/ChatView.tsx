@@ -319,7 +319,7 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
             <div className="empty__title">무엇이든 물어보세요</div>
             <div className="empty__desc">
               {settings.chatWebSearch
-                ? '웹 검색 켜짐 — 필요하면 인터넷을 조사해 답합니다 · 검색이 불필요하면 로컬에서 처리'
+                ? '필요할 때 자동으로 인터넷을 조사해 답합니다 · 검색이 불필요하면 로컬에서 처리 (설정에서 끌 수 있어요)'
                 : '모든 대화는 로컬에서 처리됩니다 · 사고 과정은 접힌 상태로 표시됩니다'}
             </div>
           </div>
@@ -416,18 +416,6 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
       </div>
 
       <div className="composer-tools">
-        <div className="composer-tools__left">
-          <button
-            type="button"
-            className={`websearch-toggle${settings.chatWebSearch ? ' websearch-toggle--on' : ''}`}
-            onClick={() => void onSaveSettings({ chatWebSearch: !settings.chatWebSearch })}
-            title="켜면 채팅이 인터넷을 검색해(여러 출처 교차 확인) 답합니다. 끄면 전부 로컬에서 처리합니다."
-            aria-pressed={settings.chatWebSearch}
-          >
-            <GlobeIcon size={13} />
-            <span>웹 검색</span>
-          </button>
-        </div>
         <div className="composer-tools__right">
           <Dropdown
             value={settings.model}

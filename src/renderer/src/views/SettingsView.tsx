@@ -328,6 +328,28 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
         </section>
 
         <section>
+          <div className="group__title">웹 검색</div>
+          <div className="group">
+            <div className="row">
+              <div>
+                <div className="row__label">채팅 웹 검색</div>
+                <div className="row__hint">
+                  채팅에서 모르는 최신 정보·사실을 물으면 <b>자동으로</b> 인터넷을 조사해 답합니다(DuckDuckGo·여러 출처 교차 확인). 끄면 전부 로컬에서만 처리합니다.
+                </div>
+              </div>
+              <Segmented
+                value={form.chatWebSearch}
+                options={[
+                  { v: true, label: '자동' },
+                  { v: false, label: '끔' }
+                ]}
+                onChange={(v) => set('chatWebSearch', v)}
+              />
+            </div>
+          </div>
+        </section>
+
+        <section>
           <div className="group__title">RAG · 검색 증강</div>
           <div className="group">
             <div className="row">

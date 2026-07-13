@@ -91,7 +91,11 @@ def _search_sync(query: str, count: int) -> str:
         with sync_playwright() as p:
             browser = p.chromium.launch(channel="msedge", headless=True)
             try:
-                page = browser.new_page(viewport={"width": 1024, "height": 900}, user_agent=_UA)
+                # accept_downloads=False: 결과 페이지에서 파일 다운로드가 트리거돼도 디스크에 쓰지 않는다.
+                context = browser.new_context(
+                    viewport={"width": 1024, "height": 900}, user_agent=_UA, accept_downloads=False
+                )
+                page = context.new_page()
                 try:
                     page.goto(url, wait_until="domcontentloaded", timeout=SEARCH_TIMEOUT)
                 except Exception as e:  # noqa: BLE001

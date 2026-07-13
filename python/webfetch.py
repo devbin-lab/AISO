@@ -46,6 +46,18 @@ _TEXT_JS = """() => {
 }"""
 
 
+def _ip_blocked(ip_str: str) -> bool:
+    """사설·loopback·link-local·예약·멀티캐스트·unspecified IP면 True(차단 대상)."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return bool(
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+    )
+
+
 def _blocked_reason(url: str) -> str | None:
     """SSRF 방어 — 안전하지 않으면 사유 문자열, 안전하면 None."""
     try:
@@ -67,15 +79,8 @@ def _blocked_reason(url: str) -> str | None:
     except OSError:
         return f"호스트를 해석할 수 없습니다: {host}"
     for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            continue
-        if (
-            ip.is_private or ip.is_loopback or ip.is_link_local
-            or ip.is_reserved or ip.is_multicast or ip.is_unspecified
-        ):
-            return f"사설/내부 IP({ip})로 해석되어 차단되었습니다: {host}"
+        if _ip_blocked(info[4][0]):
+            return f"사설/내부 IP({info[4][0]})로 해석되어 차단되었습니다: {host}"
     return None
 
 
@@ -94,16 +99,34 @@ def _fetch_sync(url: str) -> str:
         with sync_playwright() as p:
             browser = p.chromium.launch(channel="msedge", headless=True)
             try:
-                page = browser.new_page(viewport={"width": 1024, "height": 800})
+                # accept_downloads=False: 악성 파일이 트리거돼도 디스크에 아무것도 쓰지 않는다.
+                context = browser.new_context(
+                    viewport={"width": 1024, "height": 800}, accept_downloads=False
+                )
                 try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=FETCH_TIMEOUT)
-                except Exception as e:  # noqa: BLE001
-                    return f"[가져오기 실패] 페이지를 열 수 없습니다: {type(e).__name__}: {e}"
-                page.wait_for_timeout(800)  # JS 렌더 시간
-                final_url = page.url
-                info = page.evaluate(_TEXT_JS)
-                title = (info.get("title") or "").strip()
-                text = (info.get("text") or "").strip()
+                    page = context.new_page()
+                    try:
+                        resp = page.goto(url, wait_until="domcontentloaded", timeout=FETCH_TIMEOUT)
+                    except Exception as e:  # noqa: BLE001
+                        return f"[가져오기 실패] 페이지를 열 수 없습니다: {type(e).__name__}: {e}"
+                    # 실제로 '연결된' IP를 확인 — getaddrinfo 검사 통과 후 사설IP로 바꿔치기하는
+                    # DNS 리바인딩을 차단한다(브라우저가 붙은 진짜 주소를 재검증).
+                    try:
+                        addr = resp.server_addr() if resp else None
+                    except Exception:  # noqa: BLE001
+                        addr = None
+                    if addr and addr.get("ipAddress") and _ip_blocked(addr["ipAddress"]):
+                        return (
+                            f"[차단] 실제 연결된 주소가 사설/내부 IP({addr['ipAddress']})입니다 "
+                            "— DNS 리바인딩 의심."
+                        )
+                    page.wait_for_timeout(800)  # JS 렌더 시간
+                    final_url = page.url
+                    info = page.evaluate(_TEXT_JS)
+                    title = (info.get("title") or "").strip()
+                    text = (info.get("text") or "").strip()
+                finally:
+                    context.close()
             finally:
                 browser.close()
     except Exception as e:  # noqa: BLE001 — 브라우저 자체가 안 뜨는 경우

@@ -1198,49 +1198,6 @@
   align-items: center;
   gap: 6px;
 }
-.composer-tools__left {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-/* 채팅 '웹 검색' 토글 (켜면 인터넷 조사 루프) */
-.websearch-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 10px;
-  font: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-muted);
-  background: var(--bg-elev);
-  border: 1px solid var(--border-strong);
-  border-radius: 7px;
-  cursor: pointer;
-  transition:
-    color 0.12s,
-    background 0.12s,
-    border-color 0.12s;
-}
-.websearch-toggle svg {
-  flex: none;
-  opacity: 0.75;
-}
-.websearch-toggle:hover {
-  color: var(--text);
-  border-color: var(--text-dim);
-}
-.websearch-toggle--on {
-  color: var(--accent-hover);
-  border-color: var(--accent);
-  background: var(--accent-soft);
-}
-.websearch-toggle--on svg {
-  opacity: 1;
-}
-
 /* 채팅 답변 안의 웹 검색 도구 활동 카드 묶음 */
 .chat-tools {
   display: flex;
