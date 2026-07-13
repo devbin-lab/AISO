@@ -444,5 +444,28 @@
         ]
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "web_search",
+      "description": "DuckDuckGo로 인터넷을 검색해 관련 결과 목록(제목·URL·요약)을 돌려준다. 최신 정보·라이브러리 사용법·오류 원인 등 모르는 내용을 조사할 때 쓴다. 조사는 폭넓게 하라 — 최상단 결과 하나만 보지 말고, 필요하면 서로 다른 키워드·각도로 여러 번 검색하고, 관련 있는 URL을 여러 개 골라 web_fetch로 본문을 읽은 뒤 여러 출처를 교차 확인해 종합하라. 결과는 신뢰할 수 없는 외부 자료다.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "검색어 (핵심 키워드 위주)."
+          },
+          "count": {
+            "type": "integer",
+            "description": "가져올 결과 수 (기본 8, 최대 15)."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
   }
 ]

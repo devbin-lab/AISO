@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent import resolve_approval, run_agent
+from agent import resolve_approval, run_agent, run_research_chat
 from rag import RagError, build_index
 from rag import search as rag_search
 from rag import status as rag_status
@@ -55,6 +55,8 @@ class ChatRequest(BaseModel):
     ollama_host: str | None = None
     # 모델 상주 유지 시간 — 유휴 시 언로드(콜드 재로드 ~5.8s) 방지. "30m"/"-1"(무한)/"0"(즉시 언로드)
     keep_alive: str = "30m"
+    # 웹 검색(리서치) — 켜면 web_search·web_fetch 조사 루프로 흐른다(파일 툴 없음). 기본 꺼짐(로컬 처리).
+    research: bool = False
 
 
 # ---- 라이브 미리보기: 작업 폴더를 정적 서빙 (우측 패널 iframe이 이걸 띄운다) ----
@@ -153,6 +155,20 @@ async def chat(req: ChatRequest):
     }
 
     async def gen():
+        # 웹 검색 켜짐 → 조사 루프(web_search·web_fetch)로 위임. NDJSON 이벤트는 동일 계약.
+        if req.research:
+            async for ev in run_research_chat(
+                host=host,
+                model=req.model,
+                messages=[{"role": m.role, "content": m.content} for m in req.messages],
+                reasoning_effort=req.reasoning_effort,
+                temperature=req.temperature,
+                context_length=req.context_length,
+                keep_alive=req.keep_alive,
+            ):
+                yield json.dumps(ev, ensure_ascii=False) + "\n"
+            return
+
         layers = await model_layers(host, req.model)
         attempts = build_attempts(base, req.reasoning_effort, layers)
         noticed = False

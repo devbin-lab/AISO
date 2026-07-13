@@ -10,7 +10,7 @@
 
 <br/>
 
-![version](https://img.shields.io/badge/version-0.1.3-F16522?style=flat-square)
+![version](https://img.shields.io/badge/version-0.1.4-F16522?style=flat-square)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square&logo=windows)
 ![license](https://img.shields.io/badge/license-Apache--2.0-4c9a2a?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-47848F?style=flat-square&logo=electron&logoColor=white)
@@ -60,10 +60,15 @@
 ## 주요 기능
 
 ### 에이전트 하네스
-- **17개 파일·시스템 도구**를 계획(plan) → 실행 → 검증 루프로 자율 수행
+- **18개 도구**(파일·명령·웹)를 계획(plan) → 실행 → 검증 루프로 자율 수행
 - **자가 검증** — `run_web`·`run_code`로 결과물을 실제 실행하고 스크린샷/픽셀 변화를 비교해 "에러는 없는데 동작하지 않는" 버그까지 탐지
 - **승인 모드** — `수동`(모든 읽기·쓰기·삭제 승인) · `읽기`(쓰기·삭제만 승인) · `자동`(승인 없음)
 - 계획 패널(To-do) · 실시간 진행 상황 · 답변별 토큰·소요시간 표시
+
+### 웹 검색 (인터넷 조사)
+- 모르는 최신 정보·사실을 **DuckDuckGo로 검색**하고 관련 문서 본문을 읽어 **여러 출처를 교차 확인**해 종합
+- **채팅에서도** — 입력창의 `웹 검색` 토글을 켜면 채팅이 인터넷을 조사해 답합니다(기본 꺼짐, 켤 때만 외부 통신)
+- 지명·기관 같은 사실 질문은 기억에 의존하지 않고 **먼저 검색·원문 검증** — "아는 척"으로 인한 환각 억제
 
 ### RAG (문서 의미 검색)
 - 임베딩 모델(`bge-m3`)로 작업 폴더를 색인해 관련 코드·문서를 **자동으로 문맥 주입**
@@ -77,6 +82,7 @@
 - **자동 업데이트** — GitHub 릴리스 기반(설치본에서 동작)
 
 ### 완성도
+- **마크다운 렌더링** — 답변의 제목·굵게·목록·표·코드·링크를 서식으로 표시(링크는 기본 브라우저로 열림)
 - 청강대학교 시그니처 **CK Orange(#F16522)** 브랜딩, 스프링 애니메이션
 - 네이티브 대신 앱 내 커스텀 UI(확인창·툴팁·우클릭 메뉴)로 일관된 경험
 
@@ -93,7 +99,7 @@
 | 필수 | [Ollama](https://ollama.com/download) 설치 | — |
 
 ### 설치 단계
-1. [Releases](https://github.com/devbin-lab/AISO/releases/latest) 페이지에서 **`Aiso-0.1.3-Setup.exe`** 다운로드
+1. [Releases](https://github.com/devbin-lab/AISO/releases/latest) 페이지에서 **`Aiso-0.1.4-Setup.exe`** 다운로드
 2. 설치 파일 실행 → 설치 경로 선택 후 설치
 3. Aiso 실행
 
@@ -135,7 +141,7 @@ Aiso를 켜면 **홈 화면의 "시작 준비" 카드**가 준비 상태를 안�
 | 탭 | 용도 |
 |---|---|
 | **홈** | 시스템·모델 상태, 첫 설치 온보딩, 토큰 사용량 통계 |
-| **채팅** | 로컬 모델과의 일반 대화(파일 작업 없음) |
+| **채팅** | 로컬 모델과의 일반 대화 · `웹 검색` 토글을 켜면 인터넷 조사 |
 | **에이전트** | 작업 폴더 안에서 파일을 직접 다루는 자율 에이전트 |
 | **설정** | 모델·추론 강도·온도·RAG·업데이트 등 |
 
@@ -209,7 +215,7 @@ npm run dist:win     # Windows 설치본 빌드 → dist/Aiso-<ver>-Setup.exe
 ## 로드맵
 
 - [x] **1차 — 에이전트 코어 (완료)**
-  로컬 LLM 코딩 에이전트 MVP · 자가 검증 · RAG · 다중 대화방 · 첫 설치 온보딩 · 자동 업데이트
+  로컬 LLM 코딩 에이전트 MVP · 자가 검증 · RAG · 웹 검색(에이전트·채팅) · 마크다운 렌더링 · 다중 대화방 · 첫 설치 온보딩 · 자동 업데이트
 - [ ] **2차 — 확장**
   ComfyUI 이미지 생성 에이전트 · 디스코드 봇(팀 채널 자동 개설)
 - [ ] **3차 — 통합 비서 에이전트**

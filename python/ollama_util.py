@@ -37,6 +37,16 @@ def is_think_unsupported(body: str) -> bool:
     return "think" in body.lower()
 
 
+def is_tools_unsupported(body: str) -> bool:
+    """모델이 도구 호출(tools)을 지원하지 않아 tools를 넘겼을 때의 오류.
+
+    예: {"error":"registry.ollama.ai/library/xxx does not support tools"}.
+    이 경우 리서치 채팅은 tools 없이 순수 채팅으로 폴백한다.
+    """
+    b = body.lower()
+    return "does not support tools" in b or ("support" in b and "tools" in b)
+
+
 def is_tool_parse_error(body: str) -> bool:
     """gpt-oss 등에서 모델 출력을 툴 호출로 파싱하다 실패한 오류(재생성으로 회복 가능).
 

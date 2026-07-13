@@ -8,6 +8,7 @@ import { streamAgent, approveAgent, type AgentMessage } from '../lib/agent'
 import { newConversationId, titleFromText } from '../lib/conversations'
 import { modelInstalled } from '../lib/ollama'
 import ConversationList from '../components/ConversationList'
+import Markdown from '../components/Markdown'
 import { ragStatus, ragIndex, type RagStatus } from '../lib/rag'
 import {
   AgentIcon,
@@ -62,8 +63,8 @@ interface Props {
 }
 
 function argPath(args: Record<string, unknown>): string {
-  // 툴마다 주요 인자 키가 다르다 (path / command / pattern / src) — 카드·승인바에 표시할 값을 고른다
-  for (const k of ['path', 'command', 'pattern', 'src', 'url']) {
+  // 툴마다 주요 인자 키가 다르다 (path / command / pattern / query / src) — 카드·승인바에 표시할 값을 고른다
+  for (const k of ['path', 'command', 'pattern', 'query', 'src', 'url']) {
     if (typeof args[k] === 'string' && args[k]) return args[k] as string
   }
   return ''
@@ -563,7 +564,7 @@ function AgentView({
                       <div className="think__body">{it.thinking}</div>
                     </details>
                   )}
-                  {it.text && <div className="msg__body">{it.text}</div>}
+                  {it.text && <Markdown text={it.text} />}
                   {it.streaming && !it.text && !it.thinking && (
                     <div className="msg__body msg__body--pending">생각 중…</div>
                   )}
@@ -586,7 +587,7 @@ function AgentView({
                   ? CodeIcon
                   : it.name === 'run_command'
                     ? TerminalIcon
-                    : it.name === 'grep' || it.name === 'glob' || it.name === 'search_docs'
+                    : it.name === 'grep' || it.name === 'glob' || it.name === 'search_docs' || it.name === 'web_search'
                       ? SearchIcon
                       : it.name === 'list_dir' || it.name === 'list_tree'
                         ? FolderIcon

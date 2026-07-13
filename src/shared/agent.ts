@@ -21,6 +21,7 @@ export type ToolName =
   | 'move'
   | 'run_command'
   | 'web_fetch'
+  | 'web_search'
 
 export type PlanStatus = 'pending' | 'in_progress' | 'completed'
 export interface PlanStep {
@@ -69,6 +70,7 @@ export const TOOL_LABEL: Record<string, string> = {
   run_code: '코드 실행·검증',
   run_command: '명령 실행',
   web_fetch: '웹 문서 가져오기',
+  web_search: '웹 검색',
   search_docs: '문서 검색 (RAG)',
   update_plan: '계획 갱신'
 }

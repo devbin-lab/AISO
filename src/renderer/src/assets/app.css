@@ -891,6 +891,124 @@
 .msg__body--pending {
   color: var(--text-dim);
 }
+
+/* ---------- 어시스턴트 답변 마크다운 렌더 ---------- */
+.md {
+  font-size: 13px;
+  line-height: 1.7;
+  word-break: break-word;
+  user-select: text;
+}
+.md > *:first-child {
+  margin-top: 0;
+}
+.md > *:last-child {
+  margin-bottom: 0;
+}
+.md p {
+  margin: 0 0 0.7em;
+}
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  margin: 1em 0 0.5em;
+  line-height: 1.35;
+  font-weight: 700;
+}
+.md h1 {
+  font-size: 1.35em;
+}
+.md h2 {
+  font-size: 1.22em;
+}
+.md h3 {
+  font-size: 1.1em;
+}
+.md h4,
+.md h5,
+.md h6 {
+  font-size: 1em;
+}
+.md ul,
+.md ol {
+  margin: 0 0 0.7em;
+  padding-left: 1.4em;
+}
+.md li {
+  margin: 0.15em 0;
+}
+.md li > ul,
+.md li > ol {
+  margin: 0.15em 0;
+}
+.md a {
+  color: var(--accent-hover);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md a:hover {
+  color: var(--accent);
+}
+.md strong {
+  font-weight: 700;
+}
+.md em {
+  font-style: italic;
+}
+.md code {
+  font-family: 'Cascadia Code', ui-monospace, Consolas, monospace;
+  font-size: 0.9em;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  padding: 0.08em 0.35em;
+  border-radius: 4px;
+}
+.md pre {
+  margin: 0 0 0.7em;
+  padding: 10px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow-x: auto;
+}
+.md pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+}
+.md blockquote {
+  margin: 0 0 0.7em;
+  padding: 2px 12px;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-muted);
+}
+.md hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1em 0;
+}
+.md-table {
+  overflow-x: auto;
+  margin: 0 0 0.7em;
+}
+.md-table table {
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+.md-table th,
+.md-table td {
+  border: 1px solid var(--border-strong);
+  padding: 5px 10px;
+  text-align: left;
+}
+.md-table th {
+  background: var(--bg-elev);
+  font-weight: 700;
+}
 .msg__error {
   font-size: 12.5px;
   color: var(--err);
@@ -1079,6 +1197,76 @@
   display: flex;
   align-items: center;
   gap: 6px;
+}
+.composer-tools__left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 채팅 '웹 검색' 토글 (켜면 인터넷 조사 루프) */
+.websearch-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  cursor: pointer;
+  transition:
+    color 0.12s,
+    background 0.12s,
+    border-color 0.12s;
+}
+.websearch-toggle svg {
+  flex: none;
+  opacity: 0.75;
+}
+.websearch-toggle:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+.websearch-toggle--on {
+  color: var(--accent-hover);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.websearch-toggle--on svg {
+  opacity: 1;
+}
+
+/* 채팅 답변 안의 웹 검색 도구 활동 카드 묶음 */
+.chat-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+.tool__more {
+  border-top: 1px solid var(--border);
+}
+.tool__more > summary {
+  padding: 6px 11px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+.tool__more > summary::-webkit-details-marker {
+  display: none;
+}
+.tool__more > summary:hover {
+  color: var(--text-muted);
+}
+.tool__more .tool__output {
+  border-top: 1px solid var(--border);
 }
 
 /* 칩형 드롭다운 (메뉴가 위로 열림) */
@@ -1436,7 +1624,8 @@
 .tool--error {
   border-left-color: var(--err);
 }
-.tool--rejected {
+.tool--rejected,
+.tool--stopped {
   border-left-color: var(--text-dim);
   opacity: 0.75;
 }
@@ -1482,7 +1671,8 @@
 .tool__badge--error {
   color: var(--err);
 }
-.tool__badge--rejected {
+.tool__badge--rejected,
+.tool__badge--stopped {
   color: var(--text-dim);
 }
 .tool__caption {

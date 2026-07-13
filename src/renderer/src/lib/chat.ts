@@ -1,11 +1,27 @@
 import { type AppSettings, resolveTemperature } from '../../../shared/settings'
 
 export interface ChatChunk {
-  type: 'thinking' | 'content' | 'done' | 'error' | 'notice'
+  type:
+    | 'thinking'
+    | 'content'
+    | 'done'
+    | 'error'
+    | 'notice'
+    | 'tool_call'
+    | 'tool_result'
+    | 'usage'
+    | 'reset_content'
   text?: string
   error?: string
   eval_count?: number
   total_duration?: number
+  // 웹 검색(리서치) 모드 전용 이벤트 필드
+  id?: string
+  name?: string
+  args?: Record<string, unknown>
+  ok?: boolean
+  output?: string
+  total?: number // 누적 생성 토큰(usage)
 }
 
 export interface ChatPayloadMessage {
@@ -32,7 +48,8 @@ export async function streamChat(
       temperature: resolveTemperature(settings, lastUserText),
       context_length: settings.contextLength,
       ollama_host: settings.ollamaHost,
-      keep_alive: settings.keepAlive
+      keep_alive: settings.keepAlive,
+      research: settings.chatWebSearch
     }),
     signal
   })

@@ -5,7 +5,9 @@ import type { ConversationMeta } from '../../../shared/conversation'
 import { streamChat, type ChatPayloadMessage } from '../lib/chat'
 import { newConversationId, titleFromText } from '../lib/conversations'
 import { modelInstalled } from '../lib/ollama'
-import { ChatIcon } from '../components/icons'
+import { ChatIcon, SearchIcon, GlobeIcon } from '../components/icons'
+import { TOOL_LABEL } from '../../../shared/agent'
+import Markdown from '../components/Markdown'
 import ConversationList from '../components/ConversationList'
 import Dropdown, { type DropdownOption } from '../components/Dropdown'
 
@@ -15,14 +17,36 @@ const EFFORT_OPTIONS: DropdownOption[] = [
   { value: 'high', label: '높음', hint: '정확' }
 ]
 
+// 웹 검색(리서치) 모드에서 모델이 부른 조사 도구 1건의 진행 상태
+interface ToolAct {
+  id: string
+  name: string
+  arg: string // 검색어(query) 또는 URL — 카드에 표시
+  status: 'running' | 'done' | 'error' | 'stopped'
+  output?: string
+}
+
+// 스트림이 중단(중지/오류)될 때 아직 'running'인 도구 카드를 마무리한다 — 영구 '검색 중' 방지.
+const finalizeTools = (tools: ToolAct[] | undefined, to: 'stopped' | 'error'): ToolAct[] | undefined =>
+  tools?.map((t) => (t.status === 'running' ? { ...t, status: to } : t))
+
 interface ChatMsg {
   role: 'user' | 'assistant'
   content: string
   thinking?: string
   error?: string
   streaming?: boolean
+  tools?: ToolAct[] // 웹 검색 모드의 도구 활동(검색·문서 가져오기)
   tokens?: number // 이 답변에 쓴 토큰(프롬프트+생성)
   seconds?: number // 생성 소요 시간(초)
+}
+
+// 도구 인자에서 카드에 보여줄 주요 값(검색어/URL)을 고른다
+const toolArg = (args?: Record<string, unknown>): string => {
+  for (const k of ['query', 'url']) {
+    if (args && typeof args[k] === 'string' && args[k]) return args[k] as string
+  }
+  return ''
 }
 
 const fmtTokens = (n: number): string => n.toLocaleString('en-US')
@@ -135,8 +159,9 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
     if (taRef.current) taRef.current.style.height = 'auto'
 
     const history: ChatPayloadMessage[] = [
+      // 오류 메시지, 그리고 내용이 빈 어시스턴트 턴(조기 중지·리셋 후 중단 등)은 요청 히스토리에서 제외
       ...messages
-        .filter((m) => !m.error)
+        .filter((m) => !m.error && (m.role === 'user' || m.content.trim() !== ''))
         .map((m) => ({ role: m.role, content: m.content })),
       { role: 'user' as const, content: text }
     ]
@@ -150,19 +175,58 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
     const ac = new AbortController()
     abortRef.current = ac
     const startedAt = Date.now()
+    let runTokens = 0 // 웹 검색(멀티턴) 시 usage 이벤트로 누적되는 생성 토큰
+    let pendingReset = false // reset_content 예약 — 다음 스트림 토큰이 올 때 원자적으로 교체
 
     try {
       await streamChat(backend.port!, settings, history, (c) => {
         if (c.type === 'thinking' && c.text) {
-          updateLast((m) => ({ ...m, thinking: (m.thinking ?? '') + c.text }))
+          const txt = c.text
+          if (pendingReset) {
+            pendingReset = false
+            updateLast((m) => ({ ...m, content: '', thinking: txt }))
+          } else {
+            updateLast((m) => ({ ...m, thinking: (m.thinking ?? '') + txt }))
+          }
         } else if (c.type === 'content' && c.text) {
-          updateLast((m) => ({ ...m, content: m.content + c.text }))
+          const txt = c.text
+          if (pendingReset) {
+            pendingReset = false
+            updateLast((m) => ({ ...m, content: txt, thinking: '' }))
+          } else {
+            updateLast((m) => ({ ...m, content: m.content + txt }))
+          }
+        } else if (c.type === 'reset_content') {
+          // 웹 검색 모드: 스니펫만 보고 쓴 임시 답을 원문 검증 후 답으로 '교체 예약'한다.
+          // 실제 지우기는 다음 스트림 토큰이 올 때(원자적 교체) — 그 전에 중지/오류가 나도
+          // 임시답이 남아, 빈 어시스턴트 턴이 저장·재전송되는 일이 없다.
+          pendingReset = true
         } else if (c.type === 'notice' && c.text) {
           setNote(c.text)
+        } else if (c.type === 'tool_call') {
+          // 웹 검색 모드: 모델이 검색/문서 가져오기를 시작 → 카드 추가
+          const act: ToolAct = {
+            id: c.id ?? '',
+            name: c.name ?? '',
+            arg: toolArg(c.args),
+            status: 'running'
+          }
+          updateLast((m) => ({ ...m, tools: [...(m.tools ?? []), act] }))
+        } else if (c.type === 'tool_result') {
+          updateLast((m) => ({
+            ...m,
+            tools: (m.tools ?? []).map((t) =>
+              t.id === c.id ? { ...t, status: c.ok ? 'done' : 'error', output: c.output } : t
+            )
+          }))
+        } else if (c.type === 'usage') {
+          runTokens = c.total ?? runTokens
+          updateLast((m) => ({ ...m, tokens: runTokens }))
         } else if (c.type === 'error') {
           updateLast((m) => ({ ...m, error: c.error ?? '알 수 없는 오류', streaming: false }))
         } else if (c.type === 'done') {
-          const used = c.eval_count ?? 0 // 출력(생성) 토큰만 집계
+          // 순수 채팅은 done에 eval_count, 웹 검색은 usage로 누적 → 둘 중 큰 값을 쓴다
+          const used = Math.max(c.eval_count ?? 0, runTokens)
           const secs = (Date.now() - startedAt) / 1000
           updateLast((m) => ({
             ...m,
@@ -170,16 +234,20 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
             tokens: used > 0 ? used : undefined,
             seconds: secs
           }))
-          // 이번 응답의 토큰(프롬프트+생성)을 사용량 통계에 기록
           if (used > 0) void window.api.usage.record(used)
         }
       }, ac.signal)
       updateLast((m) => (m.streaming ? { ...m, streaming: false } : m))
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
-        updateLast((m) => ({ ...m, streaming: false }))
+        updateLast((m) => ({ ...m, streaming: false, tools: finalizeTools(m.tools, 'stopped') }))
       } else {
-        updateLast((m) => ({ ...m, error: (err as Error).message, streaming: false }))
+        updateLast((m) => ({
+          ...m,
+          error: (err as Error).message,
+          streaming: false,
+          tools: finalizeTools(m.tools, 'error')
+        }))
       }
     } finally {
       setStreaming(false)
@@ -250,7 +318,9 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
             </div>
             <div className="empty__title">무엇이든 물어보세요</div>
             <div className="empty__desc">
-              모든 대화는 로컬에서 처리됩니다 · 사고 과정은 접힌 상태로 표시됩니다
+              {settings.chatWebSearch
+                ? '웹 검색 켜짐 — 필요하면 인터넷을 조사해 답합니다 · 검색이 불필요하면 로컬에서 처리'
+                : '모든 대화는 로컬에서 처리됩니다 · 사고 과정은 접힌 상태로 표시됩니다'}
             </div>
           </div>
         ) : (
@@ -264,8 +334,38 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
                       <div className="think__body">{m.thinking}</div>
                     </details>
                   )}
-                  {m.content && <div className="msg__body">{m.content}</div>}
-                  {m.streaming && !m.content && !m.thinking && (
+                  {m.tools && m.tools.length > 0 && (
+                    <div className="chat-tools">
+                      {m.tools.map((t) => (
+                        <div key={t.id} className={`tool tool--${t.status}`}>
+                          <div className="tool__head">
+                            {t.name === 'web_search' ? <SearchIcon /> : <GlobeIcon />}
+                            <span className="tool__name">{TOOL_LABEL[t.name] ?? t.name}</span>
+                            {t.arg && <span className="tool__path mono">{t.arg}</span>}
+                            <span className={`tool__badge tool__badge--${t.status}`}>
+                              {t.status === 'running'
+                                ? t.name === 'web_search'
+                                  ? '검색 중'
+                                  : '읽는 중'
+                                : t.status === 'done'
+                                  ? '완료'
+                                  : t.status === 'stopped'
+                                    ? '중지됨'
+                                    : '오류'}
+                            </span>
+                          </div>
+                          {t.status !== 'running' && t.output && (
+                            <details className="tool__more">
+                              <summary>{t.status === 'error' ? '오류 상세' : '결과 보기'}</summary>
+                              <pre className="tool__output mono">{t.output.slice(0, 2000)}</pre>
+                            </details>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {m.content && <Markdown text={m.content} />}
+                  {m.streaming && !m.content && !m.thinking && !m.tools?.length && (
                     <div className="msg__body msg__body--pending">응답 대기 중…</div>
                   )}
                   {m.streaming && (m.content || m.thinking) && <span className="caret" />}
@@ -316,6 +416,18 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
       </div>
 
       <div className="composer-tools">
+        <div className="composer-tools__left">
+          <button
+            type="button"
+            className={`websearch-toggle${settings.chatWebSearch ? ' websearch-toggle--on' : ''}`}
+            onClick={() => void onSaveSettings({ chatWebSearch: !settings.chatWebSearch })}
+            title="켜면 채팅이 인터넷을 검색해(여러 출처 교차 확인) 답합니다. 끄면 전부 로컬에서 처리합니다."
+            aria-pressed={settings.chatWebSearch}
+          >
+            <GlobeIcon size={13} />
+            <span>웹 검색</span>
+          </button>
+        </div>
         <div className="composer-tools__right">
           <Dropdown
             value={settings.model}

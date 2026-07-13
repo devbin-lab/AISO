@@ -26,6 +26,7 @@ from runcode import RUN_CODE_SCHEMA, run_code
 from tools import TOOL_SCHEMAS, run_tool
 from webcheck import RUN_WEB_SCHEMA, run_web
 from webfetch import WEB_FETCH_SCHEMA, web_fetch
+from websearch import WEB_SEARCH_SCHEMA, web_search
 
 
 class Approval(Enum):
@@ -126,6 +127,7 @@ def _build_registry() -> dict[str, ToolSpec]:
     reg["run_command"] = ToolSpec("run_command", RUN_COMMAND_SCHEMA, CallKind.ASYNC_ROOT,
                                   approval=Approval.ALWAYS, mutates=True, handler=run_command)
     reg["web_fetch"] = ToolSpec("web_fetch", WEB_FETCH_SCHEMA, CallKind.ASYNC_PLAIN, handler=web_fetch)
+    reg["web_search"] = ToolSpec("web_search", WEB_SEARCH_SCHEMA, CallKind.ASYNC_PLAIN, handler=web_search)
     # 4) search_docs — 색인 있을 때만 노출(AGENT_TOOLS 제외)이지만 실행 디스패치엔 필요
     reg["search_docs"] = ToolSpec("search_docs", SEARCH_DOCS_SCHEMA, CallKind.ASYNC_ROOT_HOST,
                                   handler=search_docs_tool)
