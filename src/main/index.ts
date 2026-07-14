@@ -69,6 +69,22 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
+  // 최상위 창은 앱 화면 밖으로 절대 네비게이트되지 않는다 — 프리뷰 iframe 등이 top 프레임을
+  // 악성 페이지로 이동시켜 window.api(대화기록·설정 IPC)를 노출하는 것을 원천 차단한다.
+  const isAppUrl = (url: string): boolean => {
+    const dev = process.env['ELECTRON_RENDERER_URL']
+    return (!!dev && url.startsWith(dev)) || url.startsWith('file://')
+  }
+  const blockOffAppNav = (e: Electron.Event, url: string): void => {
+    if (isAppUrl(url)) return
+    e.preventDefault()
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      void shell.openExternal(url).catch(() => {})
+    }
+  }
+  mainWindow.webContents.on('will-navigate', blockOffAppNav)
+  mainWindow.webContents.on('will-redirect', blockOffAppNav)
+
   // dev: Vite dev 서버 URL / prod: 빌드된 html
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
