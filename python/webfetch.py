@@ -19,6 +19,9 @@ from tools import ToolError
 
 FETCH_TIMEOUT = 20000     # 페이지 로드 상한(ms)
 MAX_FETCH_CHARS = 30000   # 반환 텍스트 상한(문자)
+# URL 길이 상한 — 정상 웹 주소는 이보다 짧다(관용 한계 ~2048자). 이를 넘는 요청은
+# 대화/문맥을 쿼리스트링에 실어 외부로 보내는 유출(프롬프트 인젝션) 시도일 수 있어 차단한다.
+MAX_URL_LEN = 2048
 
 WEB_FETCH_SCHEMA = {
     "type": "function",
@@ -197,4 +200,11 @@ def _fetch_sync(url: str) -> str:
 async def web_fetch(url: str = "", **_ignore) -> str:
     if not isinstance(url, str) or not url.strip():
         raise ToolError("가져올 URL이 비어 있습니다.")
-    return await asyncio.to_thread(_fetch_sync, url.strip())
+    u = url.strip()
+    if len(u) > MAX_URL_LEN:
+        # 초장문 URL = 대화/문맥을 실어 외부로 보내려는 유출 시도로 보고 차단(정상 주소는 짧다).
+        return (
+            f"[차단] URL이 너무 깁니다({len(u)}자 > {MAX_URL_LEN}). 정상 웹 주소는 이보다 짧습니다 — "
+            "대화 내용 등을 URL에 담아 외부로 보내는 유출 시도로 판단해 차단했습니다."
+        )
+    return await asyncio.to_thread(_fetch_sync, u)
