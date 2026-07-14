@@ -10,6 +10,7 @@ import { modelInstalled } from '../lib/ollama'
 import ConversationList from '../components/ConversationList'
 import Markdown from '../components/Markdown'
 import { ragStatus, ragIndex, type RagStatus } from '../lib/rag'
+import { authHeaders } from '../lib/backend'
 import {
   AgentIcon,
   FolderIcon,
@@ -102,7 +103,7 @@ function AgentView({
     if (backend.state === 'ready' && backend.port && settings.workspace) {
       fetch(`http://127.0.0.1:${backend.port}/preview`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ workspace: settings.workspace })
       }).catch(() => {})
     }

@@ -1,4 +1,5 @@
 import type { AppSettings } from '../../../shared/settings'
+import { authHeaders } from './backend'
 
 export interface RagStatus {
   indexed: boolean
@@ -26,7 +27,8 @@ export type RagIndexEvent =
 /** 작업 폴더 색인 상태 조회. */
 export async function ragStatus(port: number, workspace: string): Promise<RagStatus> {
   const res = await fetch(
-    `http://127.0.0.1:${port}/rag/status?workspace=${encodeURIComponent(workspace)}`
+    `http://127.0.0.1:${port}/rag/status?workspace=${encodeURIComponent(workspace)}`,
+    { headers: authHeaders() }
   )
   if (!res.ok) return { indexed: false, count: 0 }
   return (await res.json()) as RagStatus
@@ -42,7 +44,7 @@ export async function ragIndex(
 ): Promise<void> {
   const res = await fetch(`http://127.0.0.1:${port}/rag/index`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({
       workspace,
       embed_model: settings.embeddingModel,

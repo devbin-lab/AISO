@@ -10,6 +10,15 @@ import type {
   ConversationSave
 } from '../shared/conversation'
 
+// 사이드카 인증 토큰 — preload 초기화 시 1회 동기 조회 후 캐시(세션 내 불변).
+// 렌더러 fetch는 이 값을 X-Aiso-Token 헤더로 실어 백엔드 인증을 통과한다.
+let backendTokenCache = ''
+try {
+  backendTokenCache = ipcRenderer.sendSync('backend:token') as string
+} catch {
+  backendTokenCache = ''
+}
+
 // 렌더러에 노출할 Aiso 전용 API (여기에 점점 기능을 추가한다)
 // sandbox: true 환경이라 preload는 'electron' 모듈만 사용한다 (외부 npm require 불가)
 const api = {
@@ -20,6 +29,8 @@ const api = {
   },
   backend: {
     info: () => ipcRenderer.invoke('backend:info'),
+    /** 사이드카 인증 토큰(fetch의 X-Aiso-Token 헤더용). */
+    token: (): string => backendTokenCache,
     onStatus: (cb: (info: BackendInfo) => void) => {
       const listener = (_e: unknown, info: BackendInfo): void => cb(info)
       ipcRenderer.on('backend:status', listener)

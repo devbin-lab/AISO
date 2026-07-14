@@ -1,4 +1,5 @@
 /** Ollama 모델 목록·다운로드(pull) 유틸 — 온보딩/에이전트에서 공용. */
+import { authHeaders } from './backend'
 
 /** 태그(:latest 등)를 무시하고 모델 설치 여부 판정.
  *  설정값은 'bge-m3'(태그 없음)인데 Ollama 목록은 'bge-m3:latest'라 단순 includes로는 안 잡힌다. */
@@ -24,7 +25,7 @@ export async function pullModel(
 ): Promise<void> {
   const res = await fetch(`http://127.0.0.1:${port}/ollama/pull`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ model, ollama_host: ollamaHost }),
     signal
   })
