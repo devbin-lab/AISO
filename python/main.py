@@ -113,6 +113,19 @@ class ChatRequest(BaseModel):
 # ---- 라이브 미리보기: 작업 폴더를 정적 서빙 (우측 패널 iframe이 이걸 띄운다) ----
 _preview_root: Path | None = None
 
+# 미리보기(/f) 응답에 거는 CSP — egress(유출) 제어. 업계(Claude Code allowlist·Codex 오프라인)와
+# 같은 발상으로, 미리보기 페이지가 데이터를 '밖으로 보내는' 채널을 막는다:
+#   - default-src 'self' (+inline·eval·data·blob): 자기 오리진 자산·인라인 JS는 허용(자체완결 게임 정상),
+#     외부 도메인 리소스(외부 img/script beacon)는 차단.
+#   - connect-src 'self': fetch·XHR·WebSocket·sendBeacon을 외부로 못 보냄(핵심 유출 채널 차단).
+#     같은 오리진 읽기는 되나 내보낼 통로가 없어 무해.
+#   - form-action·base-uri 'self', object-src 'none': 폼 전송·base 하이재킹·플러그인 차단.
+# 대가: CDN·외부 폰트/이미지·런타임 외부 fetch를 쓰는 미리보기는 깨질 수 있다(자체완결이면 무영향).
+PREVIEW_CSP = (
+    "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; "
+    "connect-src 'self'; form-action 'self'; base-uri 'self'; object-src 'none'"
+)
+
 
 class PreviewRequest(BaseModel):
     workspace: str
@@ -139,7 +152,8 @@ async def serve_preview_file(file_path: str):
         raise HTTPException(status_code=403, detail="작업 폴더 밖 접근 거부")
     if not target.is_file():
         raise HTTPException(status_code=404, detail="파일 없음")
-    return FileResponse(str(target))
+    # CSP로 미리보기의 외부 유출 채널을 차단(자체완결 콘텐츠는 정상 동작).
+    return FileResponse(str(target), headers={"Content-Security-Policy": PREVIEW_CSP})
 
 
 @app.get("/health")
