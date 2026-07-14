@@ -91,6 +91,12 @@ MAX_ACTIONS = 12
 MAX_TIMES_PER_ACTION = 40
 MAX_TOTAL_PRESSES = 200
 PRESS_DELAY_MS = 25
+# 검증 전체 벽시계 상한(초). 페이지 JS가 무한 루프에 빠지면 page.evaluate/screenshot이
+# 영원히 대기하므로(evaluate엔 타임아웃 옵션이 없음) 여기서 반드시 끊어 에이전트가 멈추지 않게 한다.
+RUN_WEB_TIMEOUT = 45
+# 개별 조작(스크린샷·클릭·bounding_box 등)의 기본 타임아웃(ms). evaluate는 여기에 안 걸리지만,
+# 나머지가 유한해져 대부분의 hang은 finally의 browser.close()로 스스로 정리된다.
+PAGE_OP_TIMEOUT_MS = 10000
 
 # 페이지 스크립트가 실행되기 전에 주입 — addEventListener 호출을 가로채 어떤 이벤트
 # 타입이 리스닝되는지 기록한다 (키보드 입력을 아예 안 받는 페이지를 값싸게, 오탐 없이 잡아낸다).
@@ -250,6 +256,7 @@ def _run_web_sync(target: Path, rel: str, actions: list | None = None) -> tuple[
             browser = p.chromium.launch(channel="msedge", headless=True)
             try:
                 page = browser.new_page(viewport={"width": 900, "height": 620})
+                page.set_default_timeout(PAGE_OP_TIMEOUT_MS)  # 조작·스크린샷이 무한 대기하지 않도록
                 page.add_init_script(_LISTENER_SNIFFER_JS)  # 페이지 스크립트 실행 전에 리스너 감지기를 심는다
                 page.on(
                     "console",
@@ -267,7 +274,7 @@ def _run_web_sync(target: Path, rel: str, actions: list | None = None) -> tuple[
                     has_canvas = bool(info.get("canvas"))
                     node_count = int(info.get("nodes") or 0)
                     blank = bool(info.get("blank"))
-                    shot = base64.b64encode(page.screenshot(type="png")).decode()
+                    shot = base64.b64encode(page.screenshot(type="png", timeout=8000)).decode()
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -323,4 +330,18 @@ async def run_web(root: Path, path: str, actions: list | None = None, **_ignore)
         raise ToolError(f"파일이 없습니다: {path}")
     if target.suffix.lower() not in (".html", ".htm"):
         raise ToolError("HTML 파일만 실행·검사할 수 있습니다.")
-    return await asyncio.to_thread(_run_web_sync, target, path, actions)
+    try:
+        # 전체 벽시계 상한 — 페이지 JS 무한 루프 등으로 검증이 무한 대기하면 에이전트가
+        # 멈춰버리므로(“웹 실행·검증 중”이 계속 뜸) 반드시 여기서 끊어 오류로 돌려준다.
+        return await asyncio.wait_for(
+            asyncio.to_thread(_run_web_sync, target, path, actions),
+            timeout=RUN_WEB_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        return (
+            f"[검증 시간 초과] {path} 실행·검증이 {RUN_WEB_TIMEOUT}초를 넘겨 중단했습니다. "
+            "페이지의 JavaScript가 무한 루프(while/for·재귀)에 빠져 브라우저가 응답하지 않을 "
+            "가능성이 높습니다. 게임 로직에서 끝나지 않는 반복문(예: 줄 제거·충돌·게임오버 처리, "
+            "requestAnimationFrame 안의 동기 루프)을 찾아 고친 뒤 다시 검증하라.",
+            None,
+        )
