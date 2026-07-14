@@ -18,6 +18,7 @@ export interface AisoAPI {
   }
   backend: {
     info: () => Promise<BackendInfo>
+    token: () => string
     onStatus: (cb: (info: BackendInfo) => void) => () => void
   }
   pickWorkspace: () => Promise<string | null>

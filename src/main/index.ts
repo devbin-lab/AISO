@@ -2,7 +2,7 @@ import { app, shell, BrowserWindow, ipcMain, nativeTheme, dialog } from 'electro
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { loadSettings, saveSettings, resetSettings } from './settings'
-import { startBackend, stopBackend, backendInfo, onBackendChange } from './backend'
+import { startBackend, stopBackend, backendInfo, backendToken, onBackendChange } from './backend'
 import { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
 import { recordUsage, usageSummary, clearUsage } from './usage'
 import { freezeAppDataWrites } from './appdata-guard'
@@ -122,6 +122,10 @@ app.whenReady().then(() => {
 
   // ---- IPC: FastAPI 사이드카 상태 ----
   ipcMain.handle('backend:info', () => backendInfo())
+  // 사이드카 인증 토큰 — preload가 초기화 시 동기 조회해 렌더러 fetch 헤더에 싣는다.
+  ipcMain.on('backend:token', (e) => {
+    e.returnValue = backendToken()
+  })
   onBackendChange((i) => {
     BrowserWindow.getAllWindows().forEach((w) => w.webContents.send('backend:status', i))
   })

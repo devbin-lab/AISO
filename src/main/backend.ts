@@ -1,5 +1,6 @@
 import { spawn, execFileSync, type ChildProcess } from 'child_process'
 import { createServer } from 'net'
+import { randomBytes } from 'crypto'
 import { app } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
@@ -9,6 +10,16 @@ import type { BackendInfo } from '../shared/backend'
  * FastAPI 사이드카 수명주기 관리.
  * 앱 시작 시 uvicorn을 동적 포트로 스폰하고, /health 폴링으로 준비를 확인한다.
  */
+
+// 사이드카 세션 인증 토큰 — 앱 실행마다 새로 생성. 환경변수로 백엔드에 넘기고,
+// preload를 통해서만 렌더러에 노출한다. 렌더러 fetch가 X-Aiso-Token 헤더로 실어야
+// 백엔드 인증을 통과하므로, 포트를 스캔한 악성 웹페이지의 cross-origin 호출을 막는다.
+const AUTH_TOKEN = randomBytes(32).toString('hex')
+
+/** 렌더러(preload)에 노출할 사이드카 인증 토큰. */
+export function backendToken(): string {
+  return AUTH_TOKEN
+}
 
 let proc: ChildProcess | null = null
 let info: BackendInfo = { state: 'stopped', port: null }
@@ -80,7 +91,12 @@ export async function startBackend(ollamaHost: string): Promise<void> {
   let stderrTail = ''
   proc = spawn(py, args, {
     cwd: dir,
-    env: { ...process.env, AISO_OLLAMA_HOST: ollamaHost, AISO_TOOLS_DIR: toolsDir },
+    env: {
+      ...process.env,
+      AISO_OLLAMA_HOST: ollamaHost,
+      AISO_TOOLS_DIR: toolsDir,
+      AISO_AUTH_TOKEN: AUTH_TOKEN
+    },
     windowsHide: true
   })
   proc.stderr?.on('data', (d: Buffer) => {
@@ -104,7 +120,10 @@ export async function startBackend(ollamaHost: string): Promise<void> {
   while (Date.now() < deadline) {
     if (!proc) return // 이미 종료됨 (exit 핸들러가 error 처리)
     try {
-      const r = await fetch(`http://127.0.0.1:${port}/health`)
+      // /health도 토큰 인증 대상이므로 준비 폴링에도 토큰을 실어야 한다.
+      const r = await fetch(`http://127.0.0.1:${port}/health`, {
+        headers: { 'X-Aiso-Token': AUTH_TOKEN }
+      })
       if (r.ok) {
         set({ state: 'ready' })
         console.log('[backend] 준비 완료')

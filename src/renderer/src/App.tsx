@@ -11,6 +11,7 @@ import ChatView from './views/ChatView'
 import AgentView from './views/AgentView'
 import SettingsView from './views/SettingsView'
 import { applyTheme } from './lib/theme'
+import { authHeaders } from './lib/backend'
 
 function App(): React.JSX.Element {
   const [view, setView] = useState<ViewKey>('home')
@@ -61,7 +62,8 @@ function App(): React.JSX.Element {
     const poll = async (): Promise<void> => {
       try {
         const r = await fetch(
-          `http://127.0.0.1:${backend.port}/health?host=${encodeURIComponent(settings.ollamaHost)}`
+          `http://127.0.0.1:${backend.port}/health?host=${encodeURIComponent(settings.ollamaHost)}`,
+          { headers: authHeaders() }
         )
         const j = await r.json()
         if (alive) setHealth({ ollama: j.ollama === true, models: j.models ?? [], detail: j.detail })

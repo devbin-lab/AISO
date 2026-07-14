@@ -4,6 +4,7 @@ Electron 메인 프로세스가 앱 시작 시 이 서버를 스폰한다:
   python -m uvicorn main:app --host 127.0.0.1 --port <동적포트>
 """
 
+import hmac
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent import resolve_approval, run_agent
@@ -29,12 +30,62 @@ from ollama_util import (
 
 DEFAULT_OLLAMA = os.environ.get("AISO_OLLAMA_HOST", "http://localhost:11434")
 
+# 세션 인증 토큰 — Electron 메인이 사이드카 스폰 시 환경변수로 넘긴다.
+# 백엔드는 127.0.0.1의 동적 포트에 붙지만 그것만으론 인증이 없어, 앱 실행 중
+# 악성 웹페이지가 포트를 스캔해 cross-origin으로 /agent(파일 툴!)·/chat을 호출할 수 있다.
+# 렌더러만 아는 이 토큰을 X-Aiso-Token 헤더로 검사해 근본적으로 잠근다.
+AUTH_TOKEN = os.environ.get("AISO_AUTH_TOKEN", "")
+
 app = FastAPI(title="aiso-backend")
 
-# 렌더러(dev: localhost:5173 / prod: file://)에서 직접 fetch하므로 CORS 허용
+# 토큰 인증에서 제외하는 경로: /f/ 정적 미리보기는 iframe 네비게이션이라 커스텀 헤더를
+# 실을 수 없다(작업폴더 내 읽기전용이라 위험이 낮다). OPTIONS 프리플라이트는 CORS가 처리.
+_AUTH_EXEMPT_PREFIXES = ("/f/",)
+
+
+class TokenAuthMiddleware:
+    """세션 토큰(X-Aiso-Token) 검사 — 순수 ASGI 미들웨어.
+
+    BaseHTTPMiddleware가 아닌 순수 ASGI로 작성한 이유: NDJSON 스트리밍 응답
+    (/chat·/agent·/rag/index·/ollama/pull)을 버퍼링/간섭하지 않기 위해서다.
+    AISO_AUTH_TOKEN 미설정 시(수동 uvicorn 실행·테스트)엔 잠금을 열어 개발 편의를 유지한다.
+    실제 앱에선 Electron 메인이 항상 토큰을 넘기므로 상시 잠긴다.
+    """
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not self.token:
+            await self.app(scope, receive, send)
+            return
+        method = scope.get("method", "")
+        path = scope.get("path", "")
+        if method == "OPTIONS" or path.startswith(_AUTH_EXEMPT_PREFIXES):
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers") or [])
+        supplied = headers.get(b"x-aiso-token", b"").decode("latin-1")
+        if not hmac.compare_digest(supplied, self.token):
+            resp = JSONResponse({"detail": "unauthorized"}, status_code=401)
+            await resp(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+# 미들웨어는 나중에 추가된 것이 바깥(먼저 실행)이다. CORS를 바깥에 둬서 (1) OPTIONS
+# 프리플라이트를 CORS가 먼저 처리하고 (2) 인증 실패(401) 응답에도 ACAO 헤더가 붙게 한다.
+app.add_middleware(TokenAuthMiddleware, token=AUTH_TOKEN)
+# CORS: 실제 앱 오리진만 허용. prod는 Electron file:// 로더라 Origin이 'null'로 온다.
+# (null 오리진은 위조 가능하므로 CORS는 보조 방어일 뿐, 근본 잠금은 위 토큰 인증이 담당.)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",  # dev: Vite dev 서버
+        "http://127.0.0.1:5173",  # dev: 127.0.0.1로 접속하는 경우
+        "null",  # prod: Electron file:// 로더 → Origin: null
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )

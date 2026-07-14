@@ -1,4 +1,5 @@
 import { type AppSettings, resolveTemperature } from '../../../shared/settings'
+import { authHeaders } from './backend'
 
 export interface ChatChunk {
   type: 'thinking' | 'content' | 'done' | 'error' | 'notice'
@@ -24,7 +25,7 @@ export async function streamChat(
   const lastUserText = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
   const res = await fetch(`http://127.0.0.1:${port}/chat`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({
       messages,
       model: settings.model,

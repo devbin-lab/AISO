@@ -1,5 +1,6 @@
 import { type AppSettings, resolveTemperature } from '../../../shared/settings'
 import type { AgentEvent, ApprovalMode } from '../../../shared/agent'
+import { authHeaders } from './backend'
 
 export interface AgentMessage {
   role: 'user' | 'assistant'
@@ -20,7 +21,7 @@ export async function streamAgent(
   const lastUserText = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
   const res = await fetch(`http://127.0.0.1:${port}/agent`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({
       messages,
       workspace,
@@ -69,7 +70,7 @@ export async function approveAgent(
 ): Promise<void> {
   await fetch(`http://127.0.0.1:${port}/agent/approve`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ session_id: sessionId, call_id: callId, approved })
   })
 }
