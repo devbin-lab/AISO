@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent import resolve_approval, run_agent, run_research_chat
+from agent import MAX_GEN_TOKENS, resolve_approval, run_agent, run_research_chat
 from rag import RagError, build_index
 from rag import search as rag_search
 from rag import status as rag_status
@@ -216,6 +216,7 @@ async def chat(req: ChatRequest):
         "options": {
             "temperature": req.temperature,
             "num_ctx": req.context_length,
+            "num_predict": MAX_GEN_TOKENS,  # 한 턴 생성 상한(폭주 방지, num_ctx와 분리)
         },
     }
 

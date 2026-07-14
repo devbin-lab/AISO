@@ -171,6 +171,86 @@ def test_research_loop_rejects_file_tool_without_executing(monkeypatch):
     assert executed == []  # 비조사 툴은 디스패치되지 않아야 한다
 
 
+def test_looks_degenerate_detects_repetition():
+    """같은 덩어리가 반복되면 퇴행으로 감지, 다양한/짧은 텍스트는 아님."""
+    assert agent._looks_degenerate("짧은 텍스트") is False
+    diverse = "\n".join(f"고유한 줄 {i} — 서로 다른 내용 {i * 37}" for i in range(300))
+    assert agent._looks_degenerate(diverse) is False
+    block = ("수정하겠습니다.\n```js\nfunction update(){ draw(); requestAnimationFrame(update); }\n```\n진행합니다.\n")
+    assert agent._looks_degenerate(block * 60) is True
+
+
+def test_chat_turn_aborts_repetitive_stream(monkeypatch):
+    """_chat_turn은 같은 본문을 반복하는 스트림을 num_ctx 한도 전에 조기 중단한다."""
+    import json as _json
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, lines):
+            self._lines = lines
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def aiter_lines(self):
+            for ln in self._lines:
+                yield ln
+
+        async def aread(self):
+            return b""
+
+    class _Client:
+        def __init__(self, lines):
+            self._lines = lines
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, method, url, json=None):
+            return _Resp(self._lines)
+
+    block = "수정하겠습니다. function update(){ draw(); requestAnimationFrame(update); } 진행합니다.\n"
+    chunk = _json.dumps({"message": {"content": block}}, ensure_ascii=False)
+    lines = [chunk] * 120 + [_json.dumps({"done": True, "done_reason": "stop", "eval_count": 9})]
+    monkeypatch.setattr(agent.httpx, "AsyncClient", lambda *a, **k: _Client(lines))
+
+    async def run():
+        final = None
+        n_content = 0
+        async for ev in agent._chat_turn("h", {"model": "m"}):
+            if ev.get("_final"):
+                final = ev
+            elif ev.get("type") == "content":
+                n_content += 1
+        return final, n_content
+
+    final, n_content = asyncio.run(run())
+    assert final["done_reason"] == "repetition"  # done(stop) 전에 반복 감지로 끊음
+    assert n_content < 120  # 120개 청크를 다 받기 전에 조기 중단
+
+
+def test_research_repetition_stops_with_notice(monkeypatch):
+    """반복 퇴행(done_reason='repetition')이면 안내 문구와 함께 정지한다."""
+    async def on_execute(spec, root, host, args):
+        return ("", None)
+
+    fin = {"content": "반복…", "thinking": "", "tool_calls": [], "done_reason": "repetition", "output_tokens": 1}
+    _script(monkeypatch, [fin], on_execute)
+    evs = asyncio.run(
+        _collect(agent.run_research_chat(host="h", model="m", messages=[{"role": "user", "content": "q"}]))
+    )
+    notes = [e.get("text", "") for e in evs if e.get("type") == "notice"]
+    assert any("반복" in n for n in notes)
+    assert [e["type"] for e in evs if "type" in e][-1] == "done"
+
+
 def test_research_loop_plain_answer_no_tools(monkeypatch):
     """검색이 불필요한 질문은 툴 없이 바로 content→done."""
     async def on_execute(spec, root, host, args):  # 호출되면 실패

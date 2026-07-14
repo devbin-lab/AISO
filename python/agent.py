@@ -42,6 +42,25 @@ MAX_NUDGES = 3    # 툴 없이 멈추려 할 때 '이어서 진행하라'고 찌
 SPIN_LIMIT = 4    # 실질 진전(update_plan 외 툴 실행) 없는 턴이 연속 이 횟수면 정체로 보고 중단
 MAX_PARSE_RETRIES = 2  # gpt-oss 툴콜 파싱 500 오류 시 재생성 최대 횟수 (재생성으로 대개 회복)
 APPROVAL_TIMEOUT = 600  # 파괴적 툴 승인 대기 상한(초)
+# 한 턴 생성 토큰 상한(num_predict). num_ctx(컨텍스트 창)와 분리한다 — 안 그러면 컨텍스트를
+# 크게 잡을수록 한 턴이 폭주(반복 퇴행)로 수만 토큰을 쏟아내 무한루프처럼 보인다(16k→64k 사례).
+MAX_GEN_TOKENS = 8192
+REP_MIN_LEN = 4000     # 이 길이 넘을 때부터 반복 퇴행 감지 시작(자)
+REP_CHECK_EVERY = 2000  # 이후 이 간격마다 재검사(자)
+
+
+def _looks_degenerate(text: str) -> bool:
+    """생성이 같은 덩어리를 반복하는 퇴행(무한 반복) 상태인지 감지한다.
+
+    최근 텍스트 중간의 짧은 조각이 그대로 여러 번 나타나면 반복으로 본다. 정상적으로
+    다양한 출력은 임의 조각이 반복되지 않으므로 오탐이 낮다(코드·표의 자연스러운 반복은
+    보통 3회 미만이거나 조각이 완전 일치하지 않는다).
+    """
+    if len(text) < REP_MIN_LEN:
+        return False
+    tail = text[-3000:]
+    probe = tail[1200:1400]  # 중간 200자 표본
+    return bool(probe.strip()) and tail.count(probe) >= 3
 
 # AGENT_TOOLS·needs_approval·툴 실행은 toolspec 레지스트리에서 온다 (import 참고).
 # 스키마 정의·분류·디스패치가 흩어져 있던 것을 한 곳으로 모았다.
@@ -212,6 +231,7 @@ async def _chat_turn(host: str, payload: dict) -> AsyncGenerator[dict, None]:
     tool_calls: list[dict] = []
     done_reason = None
     output_tokens = 0  # eval_count — 이 턴에 '생성'된 토큰 (입력 토큰은 세지 않는다)
+    rep_next = REP_MIN_LEN  # content가 이 길이를 넘으면 반복 퇴행 검사
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream("POST", f"{host}/api/chat", json=payload) as r:
             if r.status_code != 200:
@@ -231,6 +251,12 @@ async def _chat_turn(host: str, payload: dict) -> AsyncGenerator[dict, None]:
                 if msg.get("content"):
                     content += msg["content"]
                     yield {"type": "content", "text": msg["content"]}
+                    # 같은 덩어리를 무한 반복하는 퇴행이면 스트림을 끊는다(num_predict보다 훨씬 일찍).
+                    if len(content) >= rep_next:
+                        rep_next = len(content) + REP_CHECK_EVERY
+                        if _looks_degenerate(content):
+                            done_reason = "repetition"
+                            break
                 if msg.get("tool_calls"):
                     tool_calls.extend(msg["tool_calls"])
                 if data.get("done"):
@@ -456,6 +482,7 @@ async def run_agent(
             "options": {
                 "temperature": temperature,
                 "num_ctx": context_length,
+                "num_predict": MAX_GEN_TOKENS,  # 한 턴 생성 상한(폭주 방지, num_ctx와 분리)
             },
         }
         # 생성(오프로드 사다리 + 파싱오류 재생성 + 스트리밍)은 _generate_turn에 위임한다.
@@ -482,7 +509,9 @@ async def run_agent(
         tool_calls = final.get("tool_calls") or []
         if not tool_calls:
             spin += 1  # 툴을 안 부른 턴 = 실질 진전 없음
-            truncated = final.get("done_reason") == "length"
+            reason = final.get("done_reason")
+            degenerate = reason == "repetition"
+            truncated = reason in ("length", "repetition")  # 둘 다 '더 이어가지 말고 멈춤'
             incomplete = [s for s in plan if s.get("status") != "completed"] if plan else []
             # 자동 이어가기: 툴 없이 끝내려 하지만 계획에 미완 단계가 남았으면, 끝내지 말고
             # '다음 단계를 실제로 실행하라'고 찔러 이어가게 한다 (넛지·정체 한도 안에서만).
@@ -501,7 +530,15 @@ async def run_agent(
                 })
                 yield {"type": "notice", "text": "미완 단계가 남아 자동으로 이어서 진행합니다…"}
                 continue
-            if truncated:
+            if degenerate:
+                yield {
+                    "type": "notice",
+                    "text": (
+                        "⚠ 모델이 같은 내용을 반복해(퇴행) 자동 중단했습니다. 컨텍스트 길이를 낮추거나"
+                        "(예: 16k~32k) 더 강한 모델(gpt-oss)로 바꿔 다시 시도해보세요."
+                    ),
+                }
+            elif truncated:
                 yield {
                     "type": "notice",
                     "text": "⚠ 컨텍스트 한도에 도달해 응답이 중간에 잘렸습니다. 설정에서 '컨텍스트 길이'를 늘리거나 '추론 강도'를 낮춰보세요.",
@@ -736,7 +773,11 @@ async def run_research_chat(
             "messages": [system_msg, *working],
             "stream": True,
             "keep_alive": keep_alive,
-            "options": {"temperature": temperature, "num_ctx": context_length},
+            "options": {
+                "temperature": temperature,
+                "num_ctx": context_length,
+                "num_predict": MAX_GEN_TOKENS,  # 한 턴 생성 상한(폭주·반복 퇴행 방지)
+            },
         }
         if not tools_disabled:
             base["tools"] = tools
@@ -786,8 +827,14 @@ async def run_research_chat(
                 yield {"type": "reset_content"}
                 yield {"type": "notice", "text": "검색 결과를 원문으로 교차확인하는 중…"}
                 continue
-            # 최종 답변이 num_ctx를 넘겨 잘렸으면 알린다(/chat·/agent과 동일한 안내).
-            if final.get("done_reason") == "length":
+            # 최종 답변이 잘렸거나(길이) 반복 퇴행으로 끊겼으면 알린다.
+            reason = final.get("done_reason")
+            if reason == "repetition":
+                yield {
+                    "type": "notice",
+                    "text": "⚠ 모델이 같은 내용을 반복해 자동 중단했습니다. 컨텍스트 길이를 낮추거나 더 강한 모델로 바꿔보세요.",
+                }
+            elif reason == "length":
                 yield {
                     "type": "notice",
                     "text": "⚠ 컨텍스트 한도에 도달해 응답이 잘렸습니다. 설정에서 '컨텍스트 길이'를 늘리거나 '추론 강도'를 낮춰보세요.",
