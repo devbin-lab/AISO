@@ -52,10 +52,25 @@ def _resolve(root: Path, rel: str) -> Path:
     # 모델이 경로를 따옴표로 감싸거나(예: 약한 모델이 '.' 대신 '."""'처럼) 공백을 덧붙이는
     # 인용 아티팩트 방어. 따옴표·백틱은 Windows 파일명에 쓸 수 없으므로 양끝에서 벗겨도 안전.
     rel = str(rel).strip().strip("\"'`").strip() or "."
+    # NTFS 대체 데이터 스트림(':')·드라이브 지정자 차단 — 작업 폴더 기준 상대경로엔 콜론이
+    # 올 일이 없다. 'foo.py:x.md'처럼 스트림 접미사로 확장자 검사를 속이는 경로를 원천 차단한다.
+    if ":" in rel:
+        raise ToolError(f"경로에 ':'를 쓸 수 없습니다: {rel}")
     target = (root / rel).resolve()
     if target != root and root not in target.parents:
         raise ToolError(f"작업 폴더 밖 경로 접근이 거부되었습니다: {rel}")
     return target
+
+
+def _require_doc(target: Path, path: str) -> None:
+    """문서 쓰기는 마크다운(.md)만 허용 — 이 에이전트는 사용자의 프로그램 코드를 대신
+    작성·편집하지 않는다. 자동화가 필요하면 create_skill로 스킬을 만든다(별도 경로)."""
+    if target.suffix.lower() != ".md":
+        raise ToolError(
+            f"문서는 마크다운(.md)만 작성·편집할 수 있습니다. '{path}'는 허용되지 않습니다. "
+            "이 에이전트는 프로그램 코드를 직접 작성하지 않습니다 — 반복 자동화가 필요하면 "
+            "create_skill로 스킬을 만드세요."
+        )
 
 
 def _rel(root: Path, target: Path) -> str:
@@ -359,6 +374,7 @@ def create_dir(root: Path, path: str) -> str:
 
 def write_file(root: Path, path: str, content: str = "") -> str:
     target = _resolve(root, path)
+    _require_doc(target, path)
     if target.is_dir():
         raise ToolError(f"폴더에는 쓸 수 없습니다: {path}")
     existed = target.is_file()
@@ -370,6 +386,7 @@ def write_file(root: Path, path: str, content: str = "") -> str:
 
 def edit_file(root: Path, path: str, old_string: str, new_string: str) -> str:
     target = _resolve(root, path)
+    _require_doc(target, path)
     if not target.is_file():
         raise ToolError(f"파일이 없습니다: {path}")
     text = target.read_text(encoding="utf-8", errors="replace")
@@ -387,6 +404,7 @@ def edit_file(root: Path, path: str, old_string: str, new_string: str) -> str:
 def multi_edit(root: Path, path: str, edits: list) -> str:
     """한 파일에 여러 찾기·바꾸기를 순서대로 원자적으로 적용한다(전부 성공 또는 전부 취소)."""
     target = _resolve(root, path)
+    _require_doc(target, path)
     if not target.is_file():
         raise ToolError(f"파일이 없습니다: {path}")
     if not isinstance(edits, list) or not edits:
@@ -475,13 +493,19 @@ def move(root: Path, src: str, dst: str) -> str:
         raise ToolError("원본과 대상이 같습니다.")
     if d.exists():
         raise ToolError(f"대상이 이미 있습니다(덮어쓰지 않음): {_rel(root, d)}")
+    # .md 잠금 우회 차단 — 에이전트가 쓸 수 있는 문서(.md)를 코드 확장자로 개명해 워크스페이스에
+    # 실행 코드를 심는 경로를 막는다(write_file('x.md')→move('x.py')). 사용자의 기존 비-.md
+    # 파일 정리나 폴더 이동(.md는 이름 보존)은 그대로 허용된다.
+    if s.is_file() and s.suffix.lower() == ".md" and d.suffix.lower() != ".md":
+        raise ToolError(
+            "문서(.md)를 다른 확장자로 개명할 수 없습니다 — 이 에이전트는 프로그램 코드를 "
+            "워크스페이스에 만들지 않습니다. 자동화가 필요하면 create_skill을 쓰세요."
+        )
     src_label = _rel(root, s)
     d.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(s), str(d))
     return f"{src_label} → {_rel(root, d)} 로 이동함."
 
-
-DESTRUCTIVE = {"write_file", "edit_file", "multi_edit", "delete_file", "delete_dir", "move"}
 
 _DISPATCH = {
     "list_dir": list_dir,

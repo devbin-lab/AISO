@@ -1,10 +1,27 @@
-import ReactMarkdown from 'react-markdown'
+import { memo } from 'react'
+import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkBreaks from 'remark-breaks'
 
 interface Props {
   /** 렌더링할 마크다운 원문 (모델 답변) */
   text: string
+}
+
+// 모듈 스코프 상수로 호이스트 — 렌더마다 새 객체·클로저를 만들지 않는다(렌더러는 외부를 캡처하지 않아 안전).
+const MD_REMARK_PLUGINS = [remarkGfm, remarkBreaks]
+const MD_COMPONENTS: Components = {
+  a: ({ href, children }) => (
+    <a href={href} target="_blank" rel="noreferrer noopener">
+      {children}
+    </a>
+  ),
+  // 넓은 표가 말풍선을 넘치지 않도록 가로 스크롤 컨테이너로 감싼다.
+  table: ({ children }) => (
+    <div className="md-table">
+      <table>{children}</table>
+    </div>
+  )
 }
 
 /** 어시스턴트 답변의 마크다운(굵게·제목·목록·표·코드·링크 등)을 렌더링한다.
@@ -17,26 +34,13 @@ interface Props {
 function Markdown({ text }: Props): React.JSX.Element {
   return (
     <div className="md">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkBreaks]}
-        components={{
-          a: ({ href, children }) => (
-            <a href={href} target="_blank" rel="noreferrer noopener">
-              {children}
-            </a>
-          ),
-          // 넓은 표가 말풍선을 넘치지 않도록 가로 스크롤 컨테이너로 감싼다.
-          table: ({ children }) => (
-            <div className="md-table">
-              <table>{children}</table>
-            </div>
-          )
-        }}
-      >
+      <ReactMarkdown remarkPlugins={MD_REMARK_PLUGINS} components={MD_COMPONENTS}>
         {text}
       </ReactMarkdown>
     </div>
   )
 }
 
-export default Markdown
+// memo: prop이 text(문자열) 하나뿐이라 얕은 비교로 충분하다. 스트리밍 중 리스트가 매 토큰 리렌더돼도
+// text가 그대로인 '완료된 답변'들은 재렌더·마크다운 재파싱을 건너뛰고, 실제로 자라는 답변 1건만 재파싱한다.
+export default memo(Markdown)

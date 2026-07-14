@@ -5,6 +5,7 @@ import { loadSettings, saveSettings, resetSettings } from './settings'
 import { startBackend, stopBackend, backendInfo, backendToken, onBackendChange } from './backend'
 import { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
 import { recordUsage, usageSummary, clearUsage } from './usage'
+import { listSkills, deleteSkill } from './skills'
 import { freezeAppDataWrites } from './appdata-guard'
 import {
   listConversations,
@@ -149,6 +150,10 @@ app.whenReady().then(() => {
   // ---- IPC: 토큰 사용량 (userData/usage.json) ----
   ipcMain.handle('usage:record', (_e, tokens: number) => recordUsage(tokens))
   ipcMain.handle('usage:summary', () => usageSummary())
+
+  // ---- IPC: 스킬 (userData/skills/<이름>/) — 에이전트가 만든 자동화 도구 관리 ----
+  ipcMain.handle('skills:list', () => listSkills())
+  ipcMain.handle('skills:delete', (_e, name: string) => deleteSkill(name))
 
   // ---- IPC: 대화방 (userData/conversations.json) ----
   ipcMain.handle('conv:list', (_e, kind: ConversationKind) => listConversations(kind))

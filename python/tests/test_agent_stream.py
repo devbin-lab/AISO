@@ -23,6 +23,81 @@ def test_normal_completion(env):
     assert tr["ok"] is True and "rejected" not in tr
 
 
+# ── 작업 폴더 없이 실행: 로컬 도구 차단, 스킬은 허용 ───────────
+def test_no_workspace_restricts_tools_and_blocks_file_ops(env, monkeypatch, tmp_path):
+    monkeypatch.setenv("AISO_SKILLS_DIR", str(tmp_path))
+    fc = FakeChat([
+        {"calls": [
+            ("write_file", {"path": "a.md", "content": "hi"}),
+            ("create_skill", {"name": "greet", "description": "인사", "code": "print('OK')\n"}),
+        ]},
+        {"content": "완료"},
+    ])
+    evs = env.run(fc, workspace="", approval_mode="auto")
+    # (1) 모델에 넘긴 도구 목록에서 로컬 도구가 빠져 있다(웹·스킬만)
+    tool_names = {t["function"]["name"] for t in fc.payloads[0]["tools"]}
+    assert "write_file" not in tool_names and "run_command" not in tool_names
+    assert "create_skill" in tool_names and "web_search" in tool_names
+    # (2) 모델이 로컬 도구를 억지로 불러도 차단되고, 스킬은 실제로 만들어진다
+    id2name = {e["id"]: e["name"] for e in evs if e.get("type") == "tool_call"}
+    results = {id2name[e["id"]]: e for e in evs if e.get("type") == "tool_result"}
+    assert results["write_file"]["ok"] is False
+    assert "작업 폴더" in results["write_file"]["output"]
+    assert results["create_skill"]["ok"] is True
+    assert (tmp_path / "greet" / "main.py").exists()
+    assert types(evs)[-1] == "done"
+
+
+def test_no_workspace_unknown_tool_is_proper_error(env, monkeypatch, tmp_path):
+    """무폴더 모드에서 등록도 스킬도 아닌 이름을 부르면 '작업 폴더 필요'가 아니라 '알 수 없는 툴'로 답한다."""
+    monkeypatch.setenv("AISO_SKILLS_DIR", str(tmp_path))  # 스킬 없음
+    fc = FakeChat([
+        {"calls": [("nonexistent_tool", {})]},
+        {"content": "완료"},
+    ])
+    evs = env.run(fc, workspace="", approval_mode="auto")
+    id2name = {e["id"]: e["name"] for e in evs if e.get("type") == "tool_call"}
+    results = {id2name[e["id"]]: e for e in evs if e.get("type") == "tool_result"}
+    out = results["nonexistent_tool"]["output"]
+    assert "알 수 없는" in out and "작업 폴더" not in out
+
+
+def test_created_skill_callable_by_name_without_workspace(env, monkeypatch, tmp_path):
+    """사용자 시나리오 회귀: 다른 방에서 만든 스킬(get_current_time)을 무폴더 방에서 '이름 그대로'
+    부르면 작업 폴더 없이도 실제로 실행된다(예전엔 '작업 폴더 필요'로 실패했음)."""
+    import asyncio as _aio
+    import runskill
+    monkeypatch.setenv("AISO_SKILLS_DIR", str(tmp_path))
+    _aio.run(runskill.create_skill(name="get_current_time", description="현재 시각", code="print('21:21')\n"))
+    fc = FakeChat([
+        {"calls": [("get_current_time", {})]},  # 이름으로 직접 호출(모델의 자연스러운 방식)
+        {"content": "지금은 21시 21분입니다"},
+    ])
+    evs = env.run(fc, workspace="", approval_mode="auto")
+    # (1) 스킬이 도구 목록에 노출됐다
+    tool_names = {t["function"]["name"] for t in fc.payloads[0]["tools"]}
+    assert "get_current_time" in tool_names
+    # (2) 이름 호출 → 작업 폴더 없이도 실제 실행 성공
+    id2name = {e["id"]: e["name"] for e in evs if e.get("type") == "tool_call"}
+    results = {id2name[e["id"]]: e for e in evs if e.get("type") == "tool_result"}
+    assert results["get_current_time"]["ok"] is True
+    assert "21:21" in results["get_current_time"]["output"]
+
+
+def test_skill_by_name_requires_approval_in_read_mode(env, monkeypatch, tmp_path):
+    """이름으로 부른 스킬도 run_skill과 같은 승인 등급 — 읽기 모드에서 승인 필요(거부 시 실행 안 됨)."""
+    import asyncio as _aio
+    import runskill
+    monkeypatch.setenv("AISO_SKILLS_DIR", str(tmp_path))
+    _aio.run(runskill.create_skill(name="ring", description="알람", code="print('ring')\n"))
+    fc = FakeChat([{"calls": [("ring", {})]}, {"content": "done"}])
+    evs = env.drive(fc, approve=False, workspace="", approval_mode="read")
+    assert any(e.get("type") == "approval_request" and e.get("name") == "ring" for e in evs)
+    id2name = {e["id"]: e["name"] for e in evs if e.get("type") == "tool_call"}
+    results = {id2name[e["id"]]: e for e in evs if e.get("type") == "tool_result"}
+    assert results["ring"]["ok"] is False
+
+
 # ── 자동 이어가기(넛지): 툴 없이 멈추려는데 계획 미완 ───────────
 def test_no_tool_nudge_continues(env):
     evs = env.run(FakeChat([
@@ -196,7 +271,8 @@ def test_dirty_triggers_reindex(env):
     env.mp.setattr(agent, "format_context", lambda results: "")
     evs = env.run(
         FakeChat([
-            {"calls": [("write_file", {"path": "a.txt", "content": "hi"})]},
+            # 문서 쓰기는 .md만 허용 — 재색인 트리거(dirty) 검증은 확장자와 무관하므로 .md로 쓴다.
+            {"calls": [("write_file", {"path": "a.md", "content": "hi"})]},
             {"content": "작성 완료."},
         ]),
         approval_mode="auto",  # 승인 스킵
@@ -206,8 +282,9 @@ def test_dirty_triggers_reindex(env):
 
 
 # ── 치명적 오류: 잘못된 워크스페이스 / 연결 실패 ────────────
-def test_fatal_bad_workspace(env):
-    evs = env.run(FakeChat([{"content": "x"}]), workspace="")
+def test_fatal_bad_workspace(env, tmp_path):
+    # 존재하지 않는 폴더를 '지정'하면 치명적 오류. (빈 문자열=미지정은 무폴더 모드로 별도 테스트)
+    evs = env.run(FakeChat([{"content": "x"}]), workspace=str(tmp_path / "no_such_dir"))
     t = types(evs)
     assert t == ["error"]  # error 하나만, done 없음
 

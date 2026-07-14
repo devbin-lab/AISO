@@ -42,5 +42,16 @@ if ($LASTEXITCODE -ne 0) { throw "requirements 설치 실패 (exit $LASTEXITCODE
 Get-ChildItem $out -Recurse -Directory -Filter '__pycache__' -ErrorAction SilentlyContinue |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
+# 6) 런타임에 불필요한 패키지 제거 (용량 절감)
+#    - pip: 패키지 설치용(런타임 미사용)  - watchfiles: uvicorn --reload 전용
+#    (패키징본은 backend.ts가 --reload를 붙이지 않으므로 watchfiles를 임포트하지 않음)
+$sp = Join-Path $out 'Lib\site-packages'
+foreach ($pat in @('pip', 'pip-*.dist-info', 'watchfiles', 'watchfiles-*.dist-info')) {
+    Get-ChildItem -Path $sp -Filter $pat -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+Get-ChildItem -Path (Join-Path $out 'Scripts') -Filter 'pip*.exe' -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+
 $size = (Get-ChildItem $out -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
 Write-Host ("[pyruntime] 완료 — {0:N0} MB" -f $size)

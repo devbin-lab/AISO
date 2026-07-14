@@ -2035,6 +2035,8 @@
   display: inline-flex;
   gap: 2px;
   padding: 2px;
+  /* flex 행(.row)에서 긴 힌트 옆에 놓여도 눌려서 라벨이 줄바꿈되지 않게 폭을 지킨다 */
+  flex-shrink: 0;
   /* 하나로 이어진 연한 회색 트랙 — 흰 선택 칩(thumb)만 그 위를 슬라이드한다 */
   background: var(--track);
   border: 1px solid var(--border);
@@ -2062,6 +2064,7 @@
   font: inherit;
   font-size: 12px;
   font-weight: 500;
+  white-space: nowrap; /* '자동' 같은 라벨이 세로로 쪼개지지 않게 */
   color: var(--text-dim);
   background: transparent;
   border: none;

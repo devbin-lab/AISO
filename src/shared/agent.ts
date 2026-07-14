@@ -6,23 +6,6 @@ export const APPROVAL_MODES: { v: ApprovalMode; label: string; hint: string }[] 
   { v: 'auto', label: '자동', hint: '모든 작업 승인 없이 실행' }
 ]
 
-export type ToolName =
-  | 'list_dir'
-  | 'list_tree'
-  | 'grep'
-  | 'glob'
-  | 'read_file'
-  | 'create_dir'
-  | 'write_file'
-  | 'edit_file'
-  | 'multi_edit'
-  | 'delete_file'
-  | 'delete_dir'
-  | 'move'
-  | 'run_command'
-  | 'web_fetch'
-  | 'web_search'
-
 export type PlanStatus = 'pending' | 'in_progress' | 'completed'
 export interface PlanStep {
   content: string
@@ -38,20 +21,9 @@ export type AgentEvent =
   | { type: 'screenshot'; id: string; data: string }
   | { type: 'plan'; steps: PlanStep[] }
   | { type: 'notice'; text: string }
-  | { type: 'rag_reindex'; state: 'start' | 'done'; count?: number; files?: number; ok?: boolean }
   | { type: 'usage'; total: number }
   | { type: 'done' }
   | { type: 'error'; error: string }
-
-export const DESTRUCTIVE_TOOLS: ToolName[] = [
-  'write_file',
-  'edit_file',
-  'multi_edit',
-  'delete_file',
-  'delete_dir',
-  'move',
-  'run_command'
-]
 
 export const TOOL_LABEL: Record<string, string> = {
   list_dir: '폴더 목록',
@@ -71,6 +43,8 @@ export const TOOL_LABEL: Record<string, string> = {
   run_command: '명령 실행',
   web_fetch: '웹 문서 가져오기',
   web_search: '웹 검색',
+  create_skill: '스킬 만들기',
+  run_skill: '스킬 실행',
   search_docs: '문서 검색 (RAG)',
   update_plan: '계획 갱신'
 }

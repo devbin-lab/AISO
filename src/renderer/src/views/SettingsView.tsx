@@ -9,6 +9,7 @@ import {
 } from '../../../shared/settings'
 import type { HealthInfo } from '../../../shared/backend'
 import type { UpdateStatus } from '../../../shared/update'
+import type { SkillMeta } from '../../../shared/skill'
 import Select from '../components/Select'
 import Segmented from '../components/Segmented'
 import Dropdown from '../components/Dropdown'
@@ -149,6 +150,41 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
 
   const disableDevMode = (): void => {
     void onSave({ devMode: false, forceOnboarding: false })
+  }
+
+  // ── 스킬 관리 (에이전트가 만든 자동화 도구) ──
+  const [skills, setSkills] = useState<SkillMeta[]>([])
+  const loadSkills = (): void => {
+    window.api.skills
+      .list()
+      .then(setSkills)
+      .catch(() => {})
+  }
+  // 마운트 시 1회 + 설정 탭이 실제로 보일 때마다 새로고침(에이전트가 방금 만든 스킬 반영)
+  useEffect(() => {
+    if (active) loadSkills()
+  }, [active])
+  const removeSkill = async (name: string): Promise<void> => {
+    const ok = await confirmDialog({
+      title: '스킬 삭제',
+      message: `'${name}' 스킬을 삭제합니다. 되돌릴 수 없습니다.\n계속할까요?`,
+      confirmLabel: '삭제',
+      danger: true
+    })
+    if (!ok) return
+    await window.api.skills.remove(name)
+    loadSkills()
+  }
+  const fmtSkillDate = (ms: number): string => {
+    try {
+      return new Date(ms).toLocaleDateString('ko-KR', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      })
+    } catch {
+      return ''
+    }
   }
 
   const factoryReset = async (): Promise<void> => {
@@ -476,6 +512,46 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
                 </div>
                 <span className="temp__val mono">{upd.percent ?? 0}%</span>
               </div>
+            )}
+          </div>
+        </section>
+
+        <section>
+          <div className="group__title">스킬</div>
+          <div className="group">
+            <div className="row">
+              <div>
+                <div className="row__label">만들어진 스킬</div>
+                <div className="row__hint">
+                  에이전트가 만든 재사용 자동화 도구입니다. 여기서 확인·삭제할 수 있습니다.
+                </div>
+              </div>
+              <button className="btn btn--ghost2" onClick={loadSkills}>
+                새로고침
+              </button>
+            </div>
+            {skills.length === 0 ? (
+              <div className="row">
+                <div className="row__hint">
+                  아직 만들어진 스킬이 없습니다. 에이전트에게 반복 작업(예: 알람·브리핑)을
+                  자동화하는 스킬을 만들어 달라고 요청해 보세요.
+                </div>
+              </div>
+            ) : (
+              skills.map((s) => (
+                <div className="row" key={s.name}>
+                  <div>
+                    <div className="row__label mono">{s.name}</div>
+                    <div className="row__hint">
+                      {s.description || '(설명 없음)'}
+                      {s.created ? ` · ${fmtSkillDate(s.created)}` : ''}
+                    </div>
+                  </div>
+                  <button className="btn btn--stop" onClick={() => void removeSkill(s.name)}>
+                    삭제
+                  </button>
+                </div>
+              ))
             )}
           </div>
         </section>

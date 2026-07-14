@@ -236,6 +236,62 @@ def test_chat_turn_aborts_repetitive_stream(monkeypatch):
     assert n_content < 120  # 120개 청크를 다 받기 전에 조기 중단
 
 
+def test_chat_turn_aborts_repetitive_thinking(monkeypatch):
+    """thinking(사고) 채널에서 같은 덩어리를 반복하면 조기 중단한다 — content만 보면 놓치는 폭주."""
+    import json as _json
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, lines):
+            self._lines = lines
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def aiter_lines(self):
+            for ln in self._lines:
+                yield ln
+
+        async def aread(self):
+            return b""
+
+    class _Client:
+        def __init__(self, lines):
+            self._lines = lines
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, method, url, json=None):
+            return _Resp(self._lines)
+
+    block = "Actually, let's do this: 1. Create skill with urllib. 2. Run it. 3. Confirm.\n"
+    chunk = _json.dumps({"message": {"thinking": block}}, ensure_ascii=False)
+    lines = [chunk] * 200 + [_json.dumps({"done": True, "done_reason": "stop", "eval_count": 9})]
+    monkeypatch.setattr(agent.httpx, "AsyncClient", lambda *a, **k: _Client(lines))
+
+    async def run():
+        final = None
+        n_think = 0
+        async for ev in agent._chat_turn("h", {"model": "m"}):
+            if ev.get("_final"):
+                final = ev
+            elif ev.get("type") == "thinking":
+                n_think += 1
+        return final, n_think
+
+    final, n_think = asyncio.run(run())
+    assert final["done_reason"] == "repetition"  # 사고 폭주도 반복으로 감지해 끊음
+    assert n_think < 200  # 200개 청크를 다 받기 전에 조기 중단
+
+
 def test_research_repetition_stops_with_notice(monkeypatch):
     """반복 퇴행(done_reason='repetition')이면 안내 문구와 함께 정지한다."""
     async def on_execute(spec, root, host, args):

@@ -9,6 +9,7 @@ import type {
   ConversationMeta,
   ConversationSave
 } from '../shared/conversation'
+import type { SkillMeta } from '../shared/skill'
 
 // 사이드카 인증 토큰 — preload 초기화 시 1회 동기 조회 후 캐시(세션 내 불변).
 // 렌더러 fetch는 이 값을 X-Aiso-Token 헤더로 실어 백엔드 인증을 통과한다.
@@ -55,6 +56,10 @@ const api = {
     setPinned: (id: string, pinned: boolean): Promise<ConversationMeta | null> =>
       ipcRenderer.invoke('conv:pin', id, pinned),
     remove: (id: string): Promise<void> => ipcRenderer.invoke('conv:delete', id)
+  },
+  skills: {
+    list: (): Promise<SkillMeta[]> => ipcRenderer.invoke('skills:list'),
+    remove: (name: string): Promise<void> => ipcRenderer.invoke('skills:delete', name)
   },
   updates: {
     version: (): Promise<string> => ipcRenderer.invoke('app:version'),

@@ -9,6 +9,7 @@ import type {
   ConversationMeta,
   ConversationSave
 } from '../shared/conversation'
+import type { SkillMeta } from '../shared/skill'
 
 export interface AisoAPI {
   ping: () => Promise<PingResult>
@@ -34,6 +35,10 @@ export interface AisoAPI {
     save: (c: ConversationSave) => Promise<Conversation>
     setPinned: (id: string, pinned: boolean) => Promise<ConversationMeta | null>
     remove: (id: string) => Promise<void>
+  }
+  skills: {
+    list: () => Promise<SkillMeta[]>
+    remove: (name: string) => Promise<void>
   }
   updates: {
     version: () => Promise<string>

@@ -4,6 +4,7 @@ import { randomBytes } from 'crypto'
 import { app } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
+import { ensureSkillsDir } from './skills'
 import type { BackendInfo } from '../shared/backend'
 
 /**
@@ -87,6 +88,8 @@ export async function startBackend(ollamaHost: string): Promise<void> {
 
   // 번들 툴체인(w64devkit 등) 위치: dev는 앱 루트, 패키징은 resources 밑.
   const toolsDir = app.isPackaged ? process.resourcesPath : app.getAppPath()
+  // 스킬 저장소 — 사이드카(create_skill/run_skill)와 설정탭이 공유하는 앱 영속 폴더.
+  const skillsDirPath = ensureSkillsDir()
 
   let stderrTail = ''
   proc = spawn(py, args, {
@@ -95,6 +98,7 @@ export async function startBackend(ollamaHost: string): Promise<void> {
       ...process.env,
       AISO_OLLAMA_HOST: ollamaHost,
       AISO_TOOLS_DIR: toolsDir,
+      AISO_SKILLS_DIR: skillsDirPath,
       AISO_AUTH_TOKEN: AUTH_TOKEN
     },
     windowsHide: true

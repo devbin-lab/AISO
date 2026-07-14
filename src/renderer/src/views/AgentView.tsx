@@ -220,7 +220,8 @@ function AgentView({
   const backendReady = backend.state === 'ready' && backend.port != null
   const hasWorkspace = settings.workspace.trim().length > 0
   const ollamaOk = health?.ollama === true
-  const ready = backendReady && hasWorkspace && ollamaOk
+  // 작업 폴더는 선택 사항 — 없어도 웹 조사·스킬 제작은 가능(백엔드가 로컬 도구를 잠근다).
+  const ready = backendReady && ollamaOk
   const canSend = ready && !running && input.trim().length > 0
 
   // ---- 이벤트 → 타임라인 리듀서 (순수: 기존 객체를 변형하지 않는다) ----
@@ -243,22 +244,6 @@ function AgentView({
       return
     } else if (ev.type === 'plan') {
       setPlan(ev.steps)
-      return
-    } else if (ev.type === 'rag_reindex') {
-      // 에이전트가 파일을 바꾼 뒤 색인 자동 최신화 — 칩을 실시간 반영
-      if (ev.state === 'start') setIndexing(true)
-      else {
-        setIndexing(false)
-        if (typeof ev.count === 'number') {
-          setRag((prev) => ({
-            indexed: ev.count! > 0,
-            count: ev.count!,
-            files: ev.files,
-            embed_model: prev?.embed_model,
-            dim: prev?.dim
-          }))
-        }
-      }
       return
     } else if (ev.type === 'screenshot') {
       setPreviewReload((n) => n + 1) // 파일이 방금 실행됨 → 미리보기 새로고침
@@ -508,7 +493,11 @@ function AgentView({
   let notice: { text: string; kind: 'err' | 'warn' } | null = null
   if (backend.state !== 'ready') notice = { text: '백엔드 엔진 준비 중…', kind: 'warn' }
   else if (!ollamaOk) notice = { text: 'Ollama에 연결할 수 없습니다 — Ollama 앱을 실행하세요', kind: 'err' }
-  else if (!hasWorkspace) notice = { text: '작업 폴더를 먼저 선택하세요 — 모든 파일 작업은 이 폴더 안으로 제한됩니다', kind: 'warn' }
+  else if (!hasWorkspace)
+    notice = {
+      text: '작업 폴더 없이 실행 중 — 웹 조사·스킬 제작만 가능합니다. 파일 작업을 하려면 아래에서 작업 폴더를 선택하세요.',
+      kind: 'warn'
+    }
 
   return (
     <div className="convshell">
@@ -734,7 +723,7 @@ function AgentView({
           rows={1}
           value={input}
           disabled={!ready || running}
-          placeholder={ready ? '무엇을 할까요? · Enter 전송' : '작업 폴더·엔진 준비 후 사용 가능'}
+          placeholder={ready ? '무엇을 할까요? · Enter 전송' : '엔진 준비 후 사용 가능'}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onKeyDown}
           onInput={autoGrow}

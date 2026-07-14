@@ -24,7 +24,7 @@ _ALL_TOOLS = [
     "update_plan", "list_dir", "list_tree", "read_file", "grep", "glob",
     "create_dir", "move", "write_file", "edit_file", "multi_edit",
     "delete_file", "delete_dir", "run_web", "run_code", "run_command",
-    "web_fetch", "web_search", "search_docs",
+    "web_fetch", "web_search", "create_skill", "run_skill", "search_docs",
 ]
 
 

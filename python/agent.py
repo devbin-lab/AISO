@@ -30,6 +30,7 @@ from rag import (
     search as rag_search,
     status as rag_status,
 )
+from runskill import list_skills, run_skill
 from toolspec import AGENT_TOOLS, REGISTRY, execute, is_meta, needs_approval
 from tools import ToolError, run_tool, validate_workspace
 
@@ -139,26 +140,55 @@ def compact_convo(convo: list[dict], context_length: int, reserve_tokens: int = 
     return out
 
 
-SYSTEM_PROMPT = """너는 Aiso의 로컬 코딩 에이전트다. 사용자의 작업 폴더 안에서만 파일을 읽고 쓸 수 있다.
-- **여러 단계가 필요한 작업이면 먼저 update_plan으로 할 일을 3~6단계로 나눠라.** 각 단계를
-  시작할 때 in_progress, 끝내면 completed로 갱신한다. update_plan을 호출하면 결과로 현재 계획 전체가
-  표시되니 그걸 근거로 삼되, 계획 텍스트를 사용자 답변에 그대로 옮겨 적지는 마라.
-- **update_plan(계획 갱신)은 실제 작업의 대체가 아니다.** 계획을 세웠으면 곧바로 실제 작업 툴
-  (read_file/edit_file/write_file/run_code 등)을 호출해 일을 진행하라. 같은 계획을 반복해서
-  갱신하지 말고, 오류가 나면 원인을 실제로 고쳐라(예: 잘못된 import는 edit_file로 삭제).
-- **작업을 마칠 때 마지막 단계(요약 등)까지 반드시 completed로 갱신한 뒤 최종 요약을 하라.**
-  한 단계라도 미완으로 남기면 안 된다.
-- 파일을 수정하기 전에 필요하면 먼저 read_file/list_dir로 현황을 파악한다.
+# 작업 폴더 없이도 쓸 수 있는 도구 — 로컬 데이터에 접근하지 않는 것만(웹 조사·스킬·계획).
+# 이 밖의 파일·코드·명령 도구는 작업 폴더가 있어야 하며, 없으면 노출도·실행도 하지 않는다.
+WORKSPACE_FREE_TOOLS = frozenset(
+    {"update_plan", "web_search", "web_fetch", "create_skill", "run_skill"}
+)
+
+
+SYSTEM_PROMPT = """너는 Aiso의 로컬 에이전트다. 너의 역할은 사용자의 코드를 대신 짜 주는 것이 아니라,
+**작업 폴더의 파일을 탐색·분석·정리하고, 자료를 조사하고, 문서(.md)를 정리하며, 반복 작업을 자동화하는
+'스킬'을 만들어 실행**하는 것이다. 사용자의 작업 폴더 안에서만 파일을 읽고 쓸 수 있다.
+
+## 역할과 한계 — 반드시 지켜라
+- **사용자의 프로그램/앱 코드를 대신 작성·수정하지 않는다.** "이 파이썬/JS/HTML/게임을 만들어 줘·고쳐 줘"
+  같은 요청이 오면, 정중히 "이 에이전트는 코드를 직접 작성하지 않는다"고 밝히고 대신 할 수 있는 일
+  (파일 정리·분석, 자료 조사, .md 문서화, 또는 반복 작업을 자동화하는 스킬 제작)을 제안하라.
+- **문서는 마크다운(.md)만 작성·편집할 수 있다.** write_file/edit_file/multi_edit는 .md 파일에만 동작하고,
+  다른 확장자(.py·.js·.html·.txt 등)는 도구가 거부한다 — 우회하려 하지 마라. 보고서·정리 결과·메모는 .md로 쓴다.
+- 파일 이동·이름변경(move), 폴더 생성·삭제(create_dir/delete_dir/delete_file)는 정상적인 파일 관리 작업이다.
+
+## 스킬 — 코드 산출의 유일한 경로
+- 알람·브리핑·데이터 수집처럼 **반복 자동화가 필요하면, 사용자 폴더에 코드를 흩뿌리지 말고 create_skill로
+  '스킬'을 만들어라.** 스킬은 앱 전용 폴더에 저장되어 도구처럼 재사용된다.
+- **스킬 규약:** 스킬은 하나의 파이썬 프로그램(main.py)이다. 실행되면 결과를 **표준출력(print)** 으로 낸다.
+  입력이 필요하면 `import sys, json; args = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}` 로 읽어라.
+  표준 라이브러리 위주로 작성하되, **HTTP 요청은 urllib.request(표준) 또는 설치된 requests·httpx**를 쓰고,
+  **소리는 winsound(윈도우 표준)** 를 쓴다. 없는 패키지(예: 임의 pip 패키지)를 import하면 실행이 실패한다.
+- create_skill(name, description, code)로 만든다. **description(설명)은 필수다 — 이 스킬이 무엇을 하는지
+  한 줄로 반드시 적어라**(비우면 거부된다. 설정탭·목록에 그대로 표시됨). **만든 뒤 반드시 run_skill로
+  실행해 정상 동작을 확인하라.** 오류가 나면 create_skill로 코드를 고쳐 다시 실행한다(에러 0건까지).
+  같은 이름으로 다시 만들면 덮어쓴다.
+- **실제 효과(소리·알림·파일 출력 등)를 내는 스킬은 print로 '시늉'하지 말고 실제 동작 코드를 넣어라.**
+  단순히 결과 문장을 print만 하면 실제로는 아무 일도 일어나지 않는다. run_skill로 돌려 실제 효과가
+  나는지 확인한 뒤에 완료라고 말하라.
+- 이미 있는 스킬(아래 '사용 가능한 스킬' 목록)은 같은 걸 또 만들지 말고 run_skill로 실행하라.
+
+## 계획·진행
+- **여러 단계가 필요한 작업이면 먼저 update_plan으로 할 일을 3~6단계로 나눠라.** 각 단계를 시작할 때
+  in_progress, 끝내면 completed로 갱신한다. 계획 텍스트를 사용자 답변에 그대로 옮겨 적지는 마라.
+- **update_plan은 실제 작업의 대체가 아니다.** 계획을 세웠으면 곧바로 실제 툴을 호출해 진행하라.
+  같은 계획을 반복 갱신하지 말고, 오류가 나면 원인을 실제로 고쳐라.
+- **작업을 마칠 때 마지막 단계까지 반드시 completed로 갱신한 뒤** 최종 요약을 하라. 한 단계도 미완으로 남기지 마라.
+
+## 파일 탐색
 - **폴더/파일 구조나 "무슨 파일이 있는지"를 물으면 list_tree로 하위까지 재귀 조회해 파일을 빠짐없이 보여줘라.**
-  list_dir(한 단계)만 보고 하위 폴더 안의 파일을 빠뜨리지 마라. 요약할 때 실제로 존재하는 파일(문서·PDF 등)을 임의로 생략하지 말고 전부 나열한다.
-- **코드에서 특정 함수·변수·문구를 찾을 땐 파일을 하나씩 열지 말고 grep(정규식 내용 검색)을 써라.**
-  파일 이름/확장자로 위치를 찾을 땐 glob('**/*.py' 등)을 쓴다. 큰 파일은 read_file의 offset·limit으로 필요한 줄 범위만 읽어라(줄번호가 함께 나온다).
-- **한 파일에 여러 곳을 고칠 땐 edit_file을 반복하지 말고 multi_edit으로 한 번에(원자적으로) 처리하라.**
-- **테스트 실행·빌드·git·패키지 설치 등 파일 툴로 못 하는 작업은 run_command로 셸 명령을 실행하라**
-  (예: `pytest -q`, `npm test`, `git status`, `dotnet build`). 명령 실행은 승인이 필요할 수 있고, 대화형 명령은 피한다.
-  코드를 고친 뒤 테스트가 있으면 run_command로 돌려 통과를 확인한다.
-- **라이브러리 사용법·API 문서 등 외부 자료가 필요하면 web_fetch로 해당 URL의 본문을 가져와 참고하라**(공개 http/https만).
-- 부분 수정은 edit_file, 새 파일이나 전면 재작성은 write_file을 사용한다.
+  list_dir(한 단계)만 보고 하위 폴더 파일을 빠뜨리지 마라. 요약 시 실제로 존재하는 파일(문서·PDF 등)을 임의로 생략하지 마라.
+- **특정 함수·변수·문구를 찾을 땐 파일을 하나씩 열지 말고 grep(정규식 내용 검색)을 써라.** 파일 이름/확장자로
+  찾을 땐 glob('**/*.py' 등)을 쓴다. 큰 파일은 read_file의 offset·limit으로 필요한 줄 범위만 읽어라.
+
+## 파일 정리
 - **파일을 옮기거나 이름을 바꿀 때는 반드시 move 툴을 써라. read_file+write_file로 옮기지 마라 —
   PDF·엑셀·한글 등 바이너리가 깨진다.** 폴더별 정리도 move로 하면 파일당 한 번에 끝난다.
 - **정리·분류로 이동할 때는 폴더만 바꾸고 파일 이름은 원본 그대로 둬라 — 사용자가 개명을 명시적으로
@@ -189,26 +219,15 @@ SYSTEM_PROMPT = """너는 Aiso의 로컬 코딩 에이전트다. 사용자의 �
   않았는지 확인하고, 빈 폴더는 delete_dir로 정리한다.
 - **여러 파일을 처리하는 작업(정리·일괄 변경 등)은 도중에 멈추지 말고 목록의 끝까지 이어서 진행하라.**
   한 파일을 처리한 뒤 설명만 하고 멈추지 말고, 곧바로 다음 파일에 대한 툴을 호출한다. 전부 끝낸 뒤에 요약한다.
+
+## 조사·검증
+- **자료·문서·최신 정보가 필요하면 web_search로 검색하고 web_fetch로 원문을 가져와 참고하라**(공개 http/https만).
+- **스킬이나 기존 코드의 동작을 확인할 땐 run_code(Python·C/C++·C# 실행)나 run_command(셸)를 쓴다.**
+  이 둘은 '검증' 용도로만 쓰고, 새 프로그램을 만드는 데 쓰지 마라. 명령 실행은 승인이 필요할 수 있고, 대화형 명령은 피한다.
+
 - **독립적인 여러 작업(여러 파일 읽기·검색 등)은 한 응답에서 tool call을 여러 개 동시에 호출해 왕복을 줄여라.**
 - 모든 경로는 작업 폴더 기준 상대경로로 지정한다.
-- **코드는 완전하고 실행 가능하게 작성하라.** TODO·미완성 스텁·"여기에 구현"류 주석을 남기지 마라.
-  요구된 기능을 전부 구현한다 (예: 게임이면 렌더링·입력·충돌·점수·게임오버 루프까지 실제로 동작하게).
-- **웹 산출물(HTML/JS)을 만들거나 고친 뒤에는 반드시 run_web으로 실제 실행해 검증하라.**
-  에러가 보고되면 그 원인을 파일에서 고치고 다시 run_web으로 검증하며, 에러가 0건이 될 때까지 반복한다.
-  run_web이 "캔버스가 비어있다"고 하면 렌더링이 안 되는 것이니 그리기 로직을 고쳐 다시 검증하라.
-  에러 0건이어도 요구된 기능이 빠졌으면 아직 미완성이다 — 채워서 완성하라.
-- **게임처럼 키보드로 조작하는 페이지는 에러 0건·정상 렌더링만으로 "완성"이라 하지 마라 — 실제로 조작해봐야 한다.**
-  run_web을 actions와 함께 호출해 실제 컨트롤(예: 방향키)을 눌러보고, 리스너가 등록됐는지와 눌린 방향으로
-  화면이 실제로 반응하는지(좌우 변화 비율 등)를 확인하라. "좌우를 눌렀는데 변화량이 비슷하다"는 경고가 나오면
-  이동/충돌 판정 로직(좌표가 정수인지 등)을 의심하고 고친 뒤 다시 actions로 검증한다.
-  "완성했다"고 말하기 전에 에러 0건 + 화면이 실제로 그려짐 + (조작 가능한 페이지라면) 조작 테스트에서
-  경고가 없음을 모두 확인해야 한다.
-- **코드(Python·C/C++·C#)를 만들거나 고친 뒤에는 run_code로 실제 실행·컴파일해 검증하라.**
-  에러가 나오면 원인을 고쳐 에러 0건이 될 때까지 반복한다. (웹은 run_web, 코드는 run_code)
-- **완벽하게 계획한 뒤 한 번에 만들려 하지 마라.** 장황한 계획으로 토큰을 소모하지 말고,
-  먼저 동작하는 최소 버전을 write_file로 만든 다음 run_web으로 검증하고, 그 결과를 보며
-  점진적으로 개선하라. 생각은 짧게, 행동(툴 호출)은 빠르게.
-- 작업을 마치면 무엇을 했고 검증 결과가 어땠는지 한국어로 간결히 요약한다."""
+- 작업을 마치면 무엇을 했고 결과가 어땠는지 한국어로 간결히 요약한다."""
 
 # 승인 대기 레지스트리 (단일 프로세스 asyncio 기준)
 _pending: dict[str, dict[str, Any]] = {}
@@ -231,7 +250,8 @@ async def _chat_turn(host: str, payload: dict) -> AsyncGenerator[dict, None]:
     tool_calls: list[dict] = []
     done_reason = None
     output_tokens = 0  # eval_count — 이 턴에 '생성'된 토큰 (입력 토큰은 세지 않는다)
-    rep_next = REP_MIN_LEN  # content가 이 길이를 넘으면 반복 퇴행 검사
+    rep_next = REP_MIN_LEN        # content가 이 길이를 넘으면 반복 퇴행 검사
+    rep_next_think = REP_MIN_LEN  # thinking도 동일하게 검사 (사고 채널에서 폭주하는 경우)
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream("POST", f"{host}/api/chat", json=payload) as r:
             if r.status_code != 200:
@@ -248,6 +268,13 @@ async def _chat_turn(host: str, payload: dict) -> AsyncGenerator[dict, None]:
                 if msg.get("thinking"):
                     thinking += msg["thinking"]
                     yield {"type": "thinking", "text": msg["thinking"]}
+                    # 사고(thinking) 채널에서 같은 덩어리를 무한 반복하는 퇴행도 끊는다.
+                    # (content만 보면 놓친다 — 실제 폭주는 종종 thinking에서 먼저 터진다.)
+                    if len(thinking) >= rep_next_think:
+                        rep_next_think = len(thinking) + REP_CHECK_EVERY
+                        if _looks_degenerate(thinking):
+                            done_reason = "repetition"
+                            break
                 if msg.get("content"):
                     content += msg["content"]
                     yield {"type": "content", "text": msg["content"]}
@@ -417,11 +444,16 @@ async def run_agent(
     rag_top_k: int = 5,
     keep_alive: str = "30m",
 ) -> AsyncGenerator[dict, None]:
-    try:
-        root: Path = validate_workspace(workspace)
-    except ToolError as e:
-        yield {"type": "error", "error": str(e)}
-        return
+    # 작업 폴더는 선택 사항 — 지정하면 로컬 파일 작업까지, 없으면 웹 조사·스킬만 한다.
+    workspace = (workspace or "").strip()
+    no_workspace = not workspace
+    root: Path | None = None
+    if not no_workspace:
+        try:
+            root = validate_workspace(workspace)
+        except ToolError as e:
+            yield {"type": "error", "error": str(e)}
+            return
 
     convo: list[dict] = list(messages)  # 대화(user/assistant/tool)만. 시스템+계획은 매 턴 재구성.
     plan: list[dict] = []
@@ -438,8 +470,12 @@ async def run_agent(
     # (2)search_docs 툴 제공. 임베딩 모델은 색인에 저장된 것을 쓰므로 채팅 모델과 무관.
     rag_available = False
     rag_context = ""
-    tools = list(AGENT_TOOLS)
-    if rag_enabled:
+    if no_workspace:
+        # 로컬 접근 도구는 목록에서 제외 — 모델이 아예 보지 못하게 한다.
+        tools = [t for t in AGENT_TOOLS if t["function"]["name"] in WORKSPACE_FREE_TOOLS]
+    else:
+        tools = list(AGENT_TOOLS)
+    if rag_enabled and not no_workspace:
         try:
             if rag_status(root).get("indexed"):
                 rag_available = True
@@ -459,6 +495,47 @@ async def run_agent(
     # 담아 대화(append-only)에 남긴다. 그래야 (1)프리픽스가 안 깨지고 (2)약한 모델이 계획
     # 리마인더를 자기 답변에 그대로 복사(에코)하는 일이 없다.
     stable_sys = SYSTEM_PROMPT
+    # 만들어진 스킬을 (1)'이름 그대로' 부를 수 있는 도구로 노출하고 (2)프롬프트 목록으로도 알린다.
+    # 사용자가 만든 스킬(get_current_time 등)을 도구처럼 이름으로 직접 호출할 수 있게 하는 게 핵심.
+    # 스킬은 로컬 파일에 접근하지 않으므로 작업 폴더 없이도 쓸 수 있다(no_workspace여도 노출).
+    try:
+        _skills = list_skills()
+    except Exception:  # noqa: BLE001 — 스킬 목록 실패는 치명적이지 않음
+        _skills = []
+    skill_names: set[str] = set()
+    if _skills:
+        _skill_tools = []
+        for s in _skills:
+            nm = s["name"]
+            if nm in REGISTRY:  # 빌트인 툴 이름과 겹치는 스킬은 노출 안 함(섀도잉 방지)
+                continue
+            skill_names.add(nm)
+            _skill_tools.append({
+                "type": "function",
+                "function": {
+                    "name": nm,
+                    "description": f"[스킬] {s.get('description') or '(설명 없음)'}",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "args": {"type": "object", "description": "스킬에 넘길 입력(선택)."}
+                        },
+                    },
+                },
+            })
+        tools = tools + _skill_tools  # 스킬을 이름으로 부를 수 있는 도구로 추가(작업 폴더 무관)
+        _lines = "\n".join(f"  - {s['name']}: {s.get('description') or '(설명 없음)'}" for s in _skills)
+        stable_sys += (
+            "\n\n## 사용 가능한 스킬 — 이름을 도구처럼 직접 호출하거나 run_skill(name=...)로 실행\n" + _lines
+        )
+    if no_workspace:
+        stable_sys += (
+            "\n\n## 지금 상태: 작업 폴더 없음\n"
+            "작업 폴더가 지정되지 않았습니다. 로컬 파일 접근(읽기·쓰기·정리·검색·코드 실행·셸 명령)은 "
+            "지금 사용할 수 없습니다. 지금 할 수 있는 일은 **웹 조사(web_search/web_fetch)** 와 "
+            "**스킬 제작·실행(create_skill/run_skill)** 뿐입니다. 사용자가 파일 정리·분석 등 로컬 작업을 "
+            "요청하면, 먼저 작업 폴더를 선택해야 한다고 정중히 안내하라(그 전엔 로컬 도구가 잠겨 있다)."
+        )
     if rag_available:
         stable_sys += (
             "\n- 파일명을 몰라도 작업 폴더 전체를 의미로 검색하려면 search_docs를 사용하라. "
@@ -584,6 +661,20 @@ async def run_agent(
 
             yield {"type": "tool_call", "id": call_id, "name": name, "args": args}
 
+            # 작업 폴더 미지정 → 로컬 데이터 접근 '실제 도구'만 차단(웹 조사·스킬은 허용).
+            # 목록에서 이미 뺐지만 모델이 호출해도 안 돌게 한 겹 더 막는다. 단 등록되지 않은
+            # (모델이 지어낸) 이름은 여기서 막지 않고 아래로 흘려 "알 수 없는 툴" 오류가 나게 한다
+            # — 없는 툴을 "작업 폴더가 필요하다"고 잘못 안내하지 않도록.
+            if no_workspace and name in REGISTRY and name not in WORKSPACE_FREE_TOOLS:
+                result = (
+                    f"[불가] '{name}'은(는) 작업 폴더가 있어야 쓸 수 있습니다. 지금은 작업 폴더 없이 실행 중이라 "
+                    "로컬 파일·명령·코드 도구가 잠겨 있습니다. 웹 조사(web_search/web_fetch)와 "
+                    "스킬(create_skill/run_skill)만 가능합니다. 파일 작업이 필요하면 작업 폴더를 선택하라고 안내하세요."
+                )
+                yield {"type": "tool_result", "id": call_id, "ok": False, "output": result}
+                convo.append({"role": "tool", "content": result})
+                continue
+
             # 계획 갱신 — 별도 상태로 관리하고 UI에 plan 이벤트로 전달
             if name == "update_plan":
                 plan = normalize_plan(args.get("steps"))
@@ -595,8 +686,9 @@ async def run_agent(
                 convo.append({"role": "tool", "content": result})
                 continue
 
-            # 파괴적 툴 → 승인 대기 (모드에 따라)
-            if needs_approval(name, approval_mode):
+            # 파괴적 툴 → 승인 대기 (모드에 따라). 스킬을 이름으로 부르면 run_skill과 같은 등급(임의 실행).
+            _approval_name = "run_skill" if name in skill_names else name
+            if needs_approval(_approval_name, approval_mode):
                 key = f"{session_id}:{call_id}"
                 event = asyncio.Event()
                 _pending[key] = {"event": event, "approved": False}
@@ -615,14 +707,20 @@ async def run_agent(
                     continue
 
             try:
-                spec = REGISTRY.get(name)
-                if spec is None:
-                    # 미등록 툴 → run_tool이 "알 수 없는 툴" ToolError를 낸다 (기존 동작 보존)
-                    result, shot = run_tool(root, name, args), None
+                if name in skill_names:
+                    # 스킬을 이름 그대로 호출 → run_skill로 라우팅. args는 {"args": {...}}·평평한 dict 모두 허용.
+                    _raw = args.get("args") if isinstance(args, dict) else None
+                    _sargs = _raw if isinstance(_raw, dict) else (args if isinstance(args, dict) else None)
+                    result, shot = await run_skill(name=name, args=_sargs), None
                 else:
-                    result, shot = await execute(spec, root, host, args)
-                    if spec.mutates:  # 파일이 바뀔 수 있는 툴 → 색인 최신화 필요
-                        dirty = True
+                    spec = REGISTRY.get(name)
+                    if spec is None:
+                        # 미등록 툴 → run_tool이 "알 수 없는 툴" ToolError를 낸다 (기존 동작 보존)
+                        result, shot = run_tool(root, name, args), None
+                    else:
+                        result, shot = await execute(spec, root, host, args)
+                        if spec.mutates:  # 파일이 바뀔 수 있는 툴 → 색인 최신화 필요
+                            dirty = True
                 yield {"type": "tool_result", "id": call_id, "ok": True, "output": result}
                 if shot:
                     yield {"type": "screenshot", "id": call_id, "data": shot}

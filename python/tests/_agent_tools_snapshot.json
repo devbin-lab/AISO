@@ -467,5 +467,57 @@
         ]
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "create_skill",
+      "description": "재사용 가능한 자동화 '스킬'(파이썬 프로그램)을 만들어 앱 전용 폴더에 저장한다. 사용자의 프로그램 코드를 대신 작성하는 용도가 아니라, 알람·브리핑·데이터 수집처럼 반복 실행할 작업을 도구화하는 용도다. 같은 이름이 있으면 덮어써(갱신) 디버깅에 쓴다. 규약: 코드(main.py)는 실행되면 결과를 print로 출력한다. 입력이 필요하면 sys.argv[1]에 JSON 문자열로 전달되니 `import sys, json; args = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}` 로 읽어라. 표준 라이브러리 위주로 작성하되, HTTP 요청은 urllib.request(표준) 또는 설치된 requests·httpx를 쓴다. 소리는 winsound(윈도우 표준)를 쓴다. 만든 뒤 반드시 run_skill로 실행해 정상 동작을 확인하라(에러 나면 고쳐 다시 만든다).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "스킬 이름(영문·숫자·한글·_·-, 1~64자). 예: morning_briefing"
+          },
+          "description": {
+            "type": "string",
+            "description": "이 스킬이 하는 일 한 줄 설명(필수). 설정탭·목록에 그대로 표시된다."
+          },
+          "code": {
+            "type": "string",
+            "description": "스킬 본문(파이썬). 실행되면 결과를 print로 출력해야 한다."
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "code"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "run_skill",
+      "description": "저장된 스킬을 이름으로 실행하고 표준출력·표준에러를 돌려준다. create_skill로 만든 스킬을 도구처럼 쓴다. 입력이 필요한 스킬이면 args에 객체를 넘겨라(스킬의 sys.argv[1]에 JSON으로 전달된다). 실행은 승인이 필요할 수 있다(자동 모드 제외).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "실행할 스킬 이름."
+          },
+          "args": {
+            "type": "object",
+            "description": "스킬에 넘길 입력(선택). 스킬의 sys.argv[1]에 JSON 문자열로 전달됨."
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    }
   }
 ]
