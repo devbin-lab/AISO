@@ -184,6 +184,7 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
           const txt = c.text
           if (pendingReset) {
             pendingReset = false
+            setNote(null) // 재작성 답이 시작되면 '교차확인 중…' 진행 문구를 지운다
             updateLast((m) => ({ ...m, content: '', thinking: txt }))
           } else {
             updateLast((m) => ({ ...m, thinking: (m.thinking ?? '') + txt }))
@@ -192,6 +193,7 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
           const txt = c.text
           if (pendingReset) {
             pendingReset = false
+            setNote(null) // 재작성 답이 시작되면 '교차확인 중…' 진행 문구를 지운다
             updateLast((m) => ({ ...m, content: txt, thinking: '' }))
           } else {
             updateLast((m) => ({ ...m, content: m.content + txt }))

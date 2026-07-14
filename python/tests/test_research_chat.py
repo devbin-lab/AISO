@@ -109,6 +109,44 @@ def test_research_no_nudge_when_already_fetched(monkeypatch):
     assert calls["i"] == 2  # 추가 턴 없이 종료
 
 
+def test_research_auto_fetches_top_search_urls(monkeypatch):
+    """검색 결과에 URL이 있으면 하네스가 상위 원문을 자동으로 정독한다(모델이 안 시켜도)."""
+    executed: list[tuple] = []
+
+    async def on_execute(spec, root, host, args):
+        executed.append((spec.name, args.get("url")))
+        if spec.name == "web_search":
+            return (
+                "'q' 검색 결과 3건 …\n\n"
+                "1. A\n   https://a.example/1\n   snippet a\n"
+                "2. B\n   https://b.example/2\n   snippet b\n"
+                "3. C\n   https://c.example/3\n   snippet c",
+                None,
+            )
+        return (f"[본문] {args.get('url')}", None)
+
+    calls = _script(
+        monkeypatch,
+        [
+            _final([{"function": {"name": "web_search", "arguments": {"query": "q"}}}]),
+            _final([], content="여러 출처 종합 답"),
+        ],
+        on_execute,
+    )
+    evs = asyncio.run(
+        _collect(agent.run_research_chat(host="h", model="m", messages=[{"role": "user", "content": "q"}]))
+    )
+    # web_search 1회 + 상위 3개 원문 자동 web_fetch
+    assert executed[0] == ("web_search", None)
+    fetched = [u for (n, u) in executed if n == "web_fetch"]
+    assert fetched == ["https://a.example/1", "https://b.example/2", "https://c.example/3"]
+    # 자동으로 원문을 읽었으니 넛지(reset_content) 없이 바로 마무리
+    assert not any(e.get("type") == "reset_content" for e in evs)
+    types = [e["type"] for e in evs if "type" in e]
+    assert types[-1] == "done"
+    assert calls["i"] == 2  # 넛지로 인한 추가 턴 없음
+
+
 def test_research_loop_rejects_file_tool_without_executing(monkeypatch):
     """모델이 write_file 등 비조사 툴을 지어내면 실행하지 말고 오류를 되돌려준다."""
     executed: list[str] = []
