@@ -835,7 +835,16 @@ function AgentView({
               </div>
               <div className="preview__body">
                 {previewUrl ? (
-                  <iframe key={previewReload} className="preview__frame" src={previewUrl} title="미리보기" />
+                  // sandbox: 스크립트·자체 오리진 자산·폼은 허용(미리보기 정상)하되 팝업(window.open)과
+                  // 최상위 네비게이션은 차단 — CSP가 못 막는 window.open 외부 유출 경로를 닫는다.
+                  // (iframe은 앱과 cross-origin이라 allow-same-origin+allow-scripts로도 샌드박스 자기해제 불가.)
+                  <iframe
+                    key={previewReload}
+                    className="preview__frame"
+                    src={previewUrl}
+                    title="미리보기"
+                    sandbox="allow-scripts allow-same-origin allow-forms"
+                  />
                 ) : (
                   <div className="preview__empty">
                     아직 미리볼 HTML이 없습니다.
