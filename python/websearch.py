@@ -14,6 +14,7 @@ import asyncio
 from urllib.parse import parse_qs, quote, urlparse
 
 from tools import ToolError
+from webfetch import _guard_subresource
 
 SEARCH_TIMEOUT = 20000     # 검색 페이지 로드 상한(ms)
 DEFAULT_COUNT = 8
@@ -89,12 +90,17 @@ def _search_sync(query: str, count: int) -> str:
     url = "https://html.duckduckgo.com/html/?q=" + quote(query)
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(channel="msedge", headless=True)
+            browser = p.chromium.launch(
+                channel="msedge",
+                headless=True,
+                args=["--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
+            )
             try:
                 # accept_downloads=False: 결과 페이지에서 파일 다운로드가 트리거돼도 디스크에 쓰지 않는다.
                 context = browser.new_context(
                     viewport={"width": 1024, "height": 900}, user_agent=_UA, accept_downloads=False
                 )
+                context.route("**/*", _guard_subresource)  # 서브리소스 로컬/사설망 요청 차단
                 page = context.new_page()
                 try:
                     page.goto(url, wait_until="domcontentloaded", timeout=SEARCH_TIMEOUT)

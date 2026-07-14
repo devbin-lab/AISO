@@ -58,6 +58,47 @@ def _ip_blocked(ip_str: str) -> bool:
     )
 
 
+def _is_internal_target(url: str) -> bool:
+    """서브리소스 요청이 사설/내부 네트워크(localhost·LAN)로 가는지 — 페이지 JS의 로컬 탐침 차단용."""
+    try:
+        u = urlparse(url)
+    except Exception:  # noqa: BLE001
+        return False
+    if u.scheme not in ("http", "https", "ws", "wss"):
+        return False  # data:/blob:/about: 등은 네트워크 exfil 대상이 아니므로 허용
+    host = u.hostname
+    if not host:
+        return False
+    low = host.lower()
+    if low == "localhost" or low.endswith((".local", ".internal", ".localhost")):
+        return True
+    try:
+        port = u.port or (443 if u.scheme in ("https", "wss") else 80)
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return False  # 해석 실패 → 어차피 연결 안 됨
+    return any(_ip_blocked(info[4][0]) for info in infos)
+
+
+def _guard_subresource(route) -> None:
+    """페이지가 만드는 모든 요청을 검사해, 로컬/사설망 대상이면 차단한다.
+
+    SSRF 방어는 상위 내비게이션 URL만 막았는데(그건 _blocked_reason), 로드된 페이지의 자체
+    JS(fetch/XHR/img/WebSocket)가 127.0.0.1·192.168.x·Ollama 등 내부로 요청하는 '피벗'은
+    그 검사를 우회했다. 여기서 모든 서브리소스를 같은 기준으로 걸러 그 통로를 닫는다.
+    """
+    try:
+        if _is_internal_target(route.request.url):
+            route.abort()
+        else:
+            route.continue_()
+    except Exception:  # noqa: BLE001 — 라우팅 실패가 fetch 자체를 깨지 않게
+        try:
+            route.continue_()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _blocked_reason(url: str) -> str | None:
     """SSRF 방어 — 안전하지 않으면 사유 문자열, 안전하면 None."""
     try:
@@ -97,13 +138,20 @@ def _fetch_sync(url: str) -> str:
     final_url = url
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(channel="msedge", headless=True)
+            # WebRTC 비프록시 UDP 후보 수집 차단 → 악성 페이지의 LAN/공인 IP 열거 방지.
+            browser = p.chromium.launch(
+                channel="msedge",
+                headless=True,
+                args=["--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
+            )
             try:
                 # accept_downloads=False: 악성 파일이 트리거돼도 디스크에 아무것도 쓰지 않는다.
                 context = browser.new_context(
                     viewport={"width": 1024, "height": 800}, accept_downloads=False
                 )
                 try:
+                    # 페이지의 모든 서브리소스 요청을 로컬/사설망 기준으로 필터(SSRF 피벗 차단).
+                    context.route("**/*", _guard_subresource)
                     page = context.new_page()
                     try:
                         resp = page.goto(url, wait_until="domcontentloaded", timeout=FETCH_TIMEOUT)
