@@ -69,7 +69,13 @@
         "from": "tools",
         "to": "tools",
         "filter": [
-          "**/*"
+          "**/*",
+          "!w64devkit/bin/nc.exe",
+          "!w64devkit/bin/wget.exe",
+          "!w64devkit/bin/whois.exe",
+          "!w64devkit/bin/busybox.exe",
+          "!w64devkit/bin/gdb.exe",
+          "!w64devkit/bin/gdbserver.exe"
         ]
       }
     ],
