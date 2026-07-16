@@ -13,6 +13,9 @@ from typing import Any, AsyncGenerator
 
 import httpx
 
+import discordops  # 서버 구성·전송(디스코드) — 모듈 자체는 discord 미의존(지연 import)
+import discordsched  # 예약(디스코드) — 순수 파이썬
+
 from ollama_util import (
     OllamaHTTPError,
     build_attempts,
@@ -140,11 +143,19 @@ def compact_convo(convo: list[dict], context_length: int, reserve_tokens: int = 
     return out
 
 
-# 작업 폴더 없이도 쓸 수 있는 도구 — 로컬 데이터에 접근하지 않는 것만(웹 조사·스킬·계획).
+# 작업 폴더 없이도 쓸 수 있는 도구 — 로컬 데이터에 접근하지 않는 것만(웹 조사·스킬·계획·디스코드).
 # 이 밖의 파일·코드·명령 도구는 작업 폴더가 있어야 하며, 없으면 노출도·실행도 하지 않는다.
 WORKSPACE_FREE_TOOLS = frozenset(
-    {"update_plan", "web_search", "web_fetch", "create_skill", "run_skill"}
+    {
+        "update_plan", "web_search", "web_fetch", "create_skill", "run_skill",
+        "discord_server_map", "discord_server_apply", "discord_send",
+        "discord_schedule_add", "discord_schedule_list", "discord_schedule_remove",
+    }
 )
+
+# 외부(공유 디스코드 서버)로 즉시 발신되거나 미래의 자율 발신을 만드는 툴 —
+# 자동(auto) 모드에서도 예외 없이 승인을 받는다(작업 폴더 파일과 달리 되돌릴 수 없다).
+DISCORD_FORCE_APPROVE = frozenset({"discord_server_apply", "discord_send", "discord_schedule_add"})
 
 
 SYSTEM_PROMPT = """너는 Aiso의 로컬 에이전트다. 너의 역할은 사용자의 코드를 대신 짜 주는 것이 아니라,
@@ -475,6 +486,17 @@ async def run_agent(
         tools = [t for t in AGENT_TOOLS if t["function"]["name"] in WORKSPACE_FREE_TOOLS]
     else:
         tools = list(AGENT_TOOLS)
+    # 디스코드 봇이 연결돼 있으면 서버 구성 도구를 노출 — search_docs처럼 조건부(스냅샷 불변).
+    try:
+        discord_ready = discordops.available()
+    except Exception:  # noqa: BLE001 — 봇 상태 확인 실패는 도구 미노출로만 처리
+        discord_ready = False
+    if discord_ready:
+        tools = tools + [
+            discordops.MAP_SCHEMA, discordops.APPLY_SCHEMA, discordops.SEND_SCHEMA,
+            discordsched.SCHEDULE_ADD_SCHEMA, discordsched.SCHEDULE_LIST_SCHEMA,
+            discordsched.SCHEDULE_REMOVE_SCHEMA,
+        ]
     if rag_enabled and not no_workspace:
         try:
             if rag_status(root).get("indexed"):
@@ -535,6 +557,29 @@ async def run_agent(
             "지금 사용할 수 없습니다. 지금 할 수 있는 일은 **웹 조사(web_search/web_fetch)** 와 "
             "**스킬 제작·실행(create_skill/run_skill)** 뿐입니다. 사용자가 파일 정리·분석 등 로컬 작업을 "
             "요청하면, 먼저 작업 폴더를 선택해야 한다고 정중히 안내하라(그 전엔 로컬 도구가 잠겨 있다)."
+        )
+    if discord_ready:
+        stable_sys += (
+            "\n\n## 디스코드 서버 구성\n"
+            "디스코드 봇이 연결되어 있다. 사용자가 디스코드 서버의 채널 구성을 요청하면 "
+            "(1) discord_server_map으로 현재 구조를 조회하고, (2) 설계한 뒤 "
+            "(3) discord_server_apply(ops=[...])로 적용하라. 삭제(delete)는 사용자가 요청했을 때만 포함하라. "
+            "#aiso(명령 채널)는 보호되어 삭제·변경 목록에 넣어도 자동 제외된다. "
+            "역할(role) 관리는 아직 지원하지 않는다.\n"
+            "메시지 전송: discord_send(channel, message)로 채널에 바로 보낼 수 있다. "
+            "예약 전송: discord_schedule_add(channel, text, when, repeat, kind) — when은 'HH:MM' 또는 "
+            "'YYYY-MM-DD HH:MM', repeat는 once(1회)/daily(매일), kind는 message(고정 문구)/"
+            "briefing(그 시각에 웹 조사로 내용 생성 — 날씨·뉴스 브리핑용). 예약은 앱이 켜져 있는 동안만 발화된다. "
+            "목록은 discord_schedule_list, 삭제는 discord_schedule_remove(id).\n"
+            "**확인 방식 — 반드시 지켜라:** discord_send·discord_schedule_add·discord_server_apply는 호출하면 "
+            "사용자에게 승인 창이 자동으로 뜬다. 그러니 '~해도 될까요/진행할까요?'라고 텍스트로 되묻지 마라. "
+            "요청에 필요한 정보(채널·내용·시각)가 있으면 곧바로 도구를 호출하라 — 최종 확인은 승인 창이 대신한다. "
+            "정보가 부족할 때만 딱 한 번 물어라. 반복 여부가 불명확하면 once로 한다. "
+            "한국어 시각은 24시간제로 변환하라(오후 11시 45분=23:45, 오전 8시=08:00; 오전/오후가 없으면 다가오는 가장 가까운 시각).\n"
+            + discordops.DESIGN_GUIDE + "\n"
+            "ops의 각 항목은 반드시 이 필드명을 써라(op·parent·type 등 다른 이름은 인식 안 됨): "
+            'action, name, category, target, new_name, topic. 예: '
+            '{"action":"create_text_channel","name":"코드","category":"게임 개발","topic":"코드 리뷰·기술 논의"}.'
         )
     if rag_available:
         stable_sys += (
@@ -688,7 +733,10 @@ async def run_agent(
 
             # 파괴적 툴 → 승인 대기 (모드에 따라). 스킬을 이름으로 부르면 run_skill과 같은 등급(임의 실행).
             _approval_name = "run_skill" if name in skill_names else name
-            if needs_approval(_approval_name, approval_mode):
+            # 디스코드 서버 변경·메시지 전송·예약 등록은 외부 공유 서버로의 발신 —
+            # 자동(auto) 모드에서도 예외 없이 승인을 받는다(작업 폴더 파일과 달리 휴지통이 없다).
+            _force_approve = name in DISCORD_FORCE_APPROVE
+            if _force_approve or needs_approval(_approval_name, approval_mode):
                 key = f"{session_id}:{call_id}"
                 event = asyncio.Event()
                 _pending[key] = {"event": event, "approved": False}

@@ -42,6 +42,14 @@ export interface AppSettings {
   devMode: boolean
   /** 온보딩(첫 설치 안내) 강제 표시 — 모델을 지우지 않고도 최초 설치 화면을 테스트(개발용) */
   forceOnboarding: boolean
+  /** 디스코드 봇(MVP: 기본 채팅) — 켜고 토큰만 넣으면 소유자·채널·허용목록은 봇이 자동 처리한다.
+   *  봇 토큰은 여기 저장하지 않고 별도로 암호화(safeStorage) 보관한다. */
+  discordEnabled: boolean
+  /** 백그라운드 상주 — 켜지면 창을 닫아도 앱이 트레이에 남아 디스코드 봇·예약이 계속 작동한다.
+   *  꺼지면 창을 닫을 때 앱이 종료되어 봇도 멈춘다(트레이 '완전 종료'로 언제든 완전 종료 가능). */
+  trayResident: boolean
+  /** 윈도우 로그인 시 자동 실행 — 켜지면 부팅 후 앱이 트레이로 자동 실행돼 봇이 재연결된다. */
+  autoLaunch: boolean
 }
 
 /** 정리·분류 / 코딩·일반 고정 온도 — 사용자 조정 불가(코드 상수). */
@@ -110,5 +118,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   keepAlive: '30m',
   chatWebSearch: true,
   devMode: false,
-  forceOnboarding: false
+  forceOnboarding: false,
+  discordEnabled: false,
+  trayResident: false,
+  autoLaunch: false
 }

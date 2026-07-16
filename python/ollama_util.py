@@ -56,11 +56,15 @@ def is_tool_parse_error(body: str) -> bool:
     return "parsing tool" in b or ("tool call" in b and ("error" in b or "parse" in b))
 
 
-_layer_cache: dict[str, int] = {}
+_layer_cache: dict[str, int | None] = {}
 
 
 async def model_layers(host: str, model: str) -> int | None:
-    """모델 레이어(block) 수 — num_gpu 부분 오프로드 계산용. 실패하면 None."""
+    """모델 레이어(block) 수 — num_gpu 부분 오프로드 계산용. 실패하면 None.
+
+    확정 결과(성공 int, '조회됐으나 block_count 없음'=None)는 캐시한다 — 안 그러면 block_count가 없는
+    모델이 매 호출(디스코드 툴 루프는 생성 턴마다)마다 /api/show HTTP를 반복한다. 단, 예외(ollama 일시
+    미준비)는 캐시하지 않는다 — 시동 중 한 번의 실패가 세션 내내 오프로드를 영구히 끄지 않도록."""
     if model in _layer_cache:
         return _layer_cache[model]
     try:
@@ -68,13 +72,15 @@ async def model_layers(host: str, model: str) -> int | None:
             r = await c.post(f"{host}/api/show", json={"model": model})
             r.raise_for_status()
             info = r.json().get("model_info") or {}
-            for k, v in info.items():
-                if k.endswith(".block_count"):
-                    _layer_cache[model] = int(v)
-                    return int(v)
-    except Exception:  # noqa: BLE001 — 조회 실패해도 고정 폴백값으로 진행
-        pass
-    return None
+    except Exception:  # noqa: BLE001 — 조회 실패(일시적)는 캐시 없이 고정 폴백값으로 진행
+        return None
+    result: int | None = None
+    for k, v in info.items():
+        if k.endswith(".block_count"):
+            result = int(v)
+            break
+    _layer_cache[model] = result  # 확정 결과만 캐시(None 포함)
+    return result
 
 
 def build_attempts(base: dict, think_value: str, layers: int | None) -> list[dict]:

@@ -1,0 +1,137 @@
+import { app, safeStorage } from 'electron'
+import { join } from 'path'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { loadSettings } from './settings'
+import { backendInfo, backendToken } from './backend'
+
+/**
+ * 디스코드 봇(MVP-1: 기본 채팅) — Electron 메인 측 배선.
+ *
+ * 봇 토큰은 설정 JSON(평문)에 두지 않고 safeStorage(앱 바운드 암호화)로 별도 파일에 보관한다.
+ * 앱이 켜져 있을 때만 동작하는 MVP라 safeStorage로 충분하다(앱-오프 러너가 없어 교차복호 불필요).
+ * 실제 봇 구동은 사이드카(discordbot.py)가 하고, 토큰은 인증된 루프백 POST로 1회 전달돼
+ * 사이드카 메모리에만 상주한다(env·디스크에 재기록하지 않음).
+ */
+function tokenFile(): string {
+  return join(app.getPath('userData'), 'discord.token.enc')
+}
+
+/** 봇 토큰을 암호화 저장. 빈 값이면 파일을 지운다. */
+export function saveDiscordToken(token: string): void {
+  const f = tokenFile()
+  const t = (token || '').trim()
+  if (!t) {
+    try {
+      rmSync(f, { force: true })
+    } catch {
+      /* 없으면 무시 */
+    }
+    return
+  }
+  try {
+    mkdirSync(join(f, '..'), { recursive: true })
+    const enc = safeStorage.isEncryptionAvailable()
+      ? safeStorage.encryptString(t)
+      : Buffer.from(t, 'utf-8') // 암호화 불가 환경 폴백 — NTFS 사용자 ACL에 의존
+    writeFileSync(f, enc)
+  } catch (e) {
+    console.error('[discord] 토큰 저장 실패:', e)
+  }
+}
+
+function loadDiscordToken(): string {
+  const f = tokenFile()
+  if (!existsSync(f)) return ''
+  try {
+    const buf = readFileSync(f)
+    return safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(buf) : buf.toString('utf-8')
+  } catch {
+    return ''
+  }
+}
+
+export function hasDiscordToken(): boolean {
+  return existsSync(tokenFile())
+}
+
+export interface DiscordApplyResult {
+  ok: boolean
+  detail?: string
+}
+
+/** 현재 설정 + 저장된 토큰을 사이드카에 적용(봇 재시작/중지). 앱 준비 후·설정 변경 시 호출. */
+export async function applyDiscordConfig(): Promise<DiscordApplyResult> {
+  const info = backendInfo()
+  if (info.state !== 'ready' || !info.port) return { ok: false, detail: '백엔드가 아직 준비되지 않았습니다.' }
+  const s = loadSettings()
+  const token = loadDiscordToken()
+  // 소유자·채널·허용목록은 봇이 런타임에 자동 판별/관리한다. 동적 상태는 이 폴더에 영속.
+  const dataDir = join(app.getPath('userData'), 'discord')
+  try {
+    mkdirSync(dataDir, { recursive: true })
+  } catch {
+    /* 권한 등 실패 무시 */
+  }
+  try {
+    const r = await fetch(`http://127.0.0.1:${info.port}/discord/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Aiso-Token': backendToken() },
+      body: JSON.stringify({
+        enabled: s.discordEnabled,
+        token,
+        data_dir: dataDir,
+        model: s.model,
+        context_length: s.contextLength,
+        keep_alive: s.keepAlive,
+        ollama_host: s.ollamaHost
+      })
+    })
+    if (!r.ok) return { ok: false, detail: `사이드카 오류 HTTP ${r.status}` }
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, detail: `연결 실패: ${String(e)}` }
+  }
+}
+
+export async function discordStatus(): Promise<unknown> {
+  const info = backendInfo()
+  if (info.state !== 'ready' || !info.port) return { running: false, detail: '백엔드 준비 안 됨' }
+  try {
+    const r = await fetch(`http://127.0.0.1:${info.port}/discord/status`, {
+      headers: { 'X-Aiso-Token': backendToken() }
+    })
+    return await r.json()
+  } catch {
+    return { running: false }
+  }
+}
+
+/** 등록된 예약 목록 조회 — 설정 탭이 표시. */
+export async function discordSchedules(): Promise<unknown> {
+  const info = backendInfo()
+  if (info.state !== 'ready' || !info.port) return { jobs: [] }
+  try {
+    const r = await fetch(`http://127.0.0.1:${info.port}/discord/schedules`, {
+      headers: { 'X-Aiso-Token': backendToken() }
+    })
+    return await r.json()
+  } catch {
+    return { jobs: [] }
+  }
+}
+
+/** 예약 삭제(설정 탭 목록의 삭제 버튼). */
+export async function discordScheduleRemove(id: string): Promise<{ ok: boolean }> {
+  const info = backendInfo()
+  if (info.state !== 'ready' || !info.port) return { ok: false }
+  try {
+    const r = await fetch(`http://127.0.0.1:${info.port}/discord/schedules/remove`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Aiso-Token': backendToken() },
+      body: JSON.stringify({ id })
+    })
+    return (await r.json()) as { ok: boolean }
+  } catch {
+    return { ok: false }
+  }
+}

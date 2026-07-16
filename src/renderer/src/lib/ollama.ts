@@ -10,6 +10,26 @@ export function modelInstalled(models: string[], name: string): boolean {
   return models.some((m) => norm(m) === target)
 }
 
+export interface UnloadResult {
+  ok: boolean
+  unloaded: string[]
+  detail?: string
+}
+
+/** 로드된 Ollama 모델을 즉시 VRAM에서 내린다(긴급 GPU 확보). 내려간 모델 이름을 돌려준다. */
+export async function unloadModels(
+  port: number,
+  ollamaHost: string | undefined
+): Promise<UnloadResult> {
+  const res = await fetch(`http://127.0.0.1:${port}/ollama/unload`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ ollama_host: ollamaHost })
+  })
+  if (!res.ok) throw new Error(`언로드 백엔드 오류 (HTTP ${res.status})`)
+  return (await res.json()) as UnloadResult
+}
+
 export type PullEvent =
   | { type: 'progress'; status: string; total?: number; completed?: number }
   | { type: 'done'; model: string }

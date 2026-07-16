@@ -7,6 +7,7 @@ Electron 메인 프로세스가 앱 시작 시 이 서버를 스폰한다:
 import hmac
 import json
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -25,8 +26,15 @@ from ollama_util import (
     build_attempts,
     is_load_crash,
     is_think_unsupported,
+    is_tools_unsupported,
     model_layers,
 )
+
+# discord.py는 선택적 — 미설치/임포트 오류가 사이드카(채팅·에이전트) 전체를 죽이지 않게 가드한다.
+try:
+    import discordbot
+except Exception:  # noqa: BLE001
+    discordbot = None
 
 DEFAULT_OLLAMA = os.environ.get("AISO_OLLAMA_HOST", "http://localhost:11434")
 
@@ -36,7 +44,14 @@ DEFAULT_OLLAMA = os.environ.get("AISO_OLLAMA_HOST", "http://localhost:11434")
 # 렌더러만 아는 이 토큰을 X-Aiso-Token 헤더로 검사해 근본적으로 잠근다.
 AUTH_TOKEN = os.environ.get("AISO_AUTH_TOKEN", "")
 
-app = FastAPI(title="aiso-backend")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    yield
+    if discordbot is not None:
+        await discordbot.stop()  # 앱 종료 시 디스코드 봇 게이트웨이 정리
+
+
+app = FastAPI(title="aiso-backend", lifespan=_lifespan)
 
 # 토큰 인증에서 제외하는 경로: /f/ 정적 미리보기는 iframe 네비게이션이라 커스텀 헤더를
 # 실을 수 없다(작업폴더 내 읽기전용이라 위험이 낮다). OPTIONS 프리플라이트는 CORS가 처리.
@@ -191,6 +206,9 @@ async def _stream_ollama(host: str, payload: dict):
                 content = msg.get("content")
                 if content:
                     yield {"type": "content", "text": content}
+                # 툴콜 — tools를 넘긴 호출(디스코드 서버 구성 루프)에서만 발생. /chat은 tools가 없어 무영향.
+                if msg.get("tool_calls"):
+                    yield {"type": "tool_calls", "calls": msg["tool_calls"]}
                 if data.get("done"):
                     if data.get("done_reason") == "length":
                         yield {
@@ -267,6 +285,204 @@ async def chat(req: ChatRequest):
                 return
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+# ---- Discord 봇 (채팅 + 서버 구성) ----
+async def _discord_step(
+    messages: list,
+    *,
+    model: str,
+    context_length: int,
+    keep_alive: str,
+    host: str,
+    tools: list | None = None,
+) -> dict:
+    """디스코드 봇용 한 턴 생성 — 전체 텍스트와 툴 호출을 모아 돌려준다(오프로드 사다리 재사용)."""
+    base = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "keep_alive": keep_alive,
+        "options": {"temperature": 0.7, "num_ctx": context_length, "num_predict": MAX_GEN_TOKENS},
+    }
+    if tools:
+        base["tools"] = tools
+    layers = await model_layers(host, model)
+    attempts = build_attempts(base, "medium", layers)
+    for i, payload in enumerate(attempts):
+        try:
+            parts: list[str] = []
+            calls: list = []
+            async for chunk in _stream_ollama(host, payload):
+                if chunk.get("type") == "content":
+                    parts.append(chunk["text"])
+                elif chunk.get("type") == "tool_calls":
+                    calls.extend(chunk["calls"])
+            return {"content": "".join(parts).strip(), "tool_calls": calls}
+        except OllamaHTTPError as e:
+            # 모델이 도구를 지원하지 않으면(400) 도구 없이 한 번 더 시도한다 — 서버 구성은 못 하지만
+            # 일반 대화는 되어야 한다(도구를 못 붙인다고 봇 채팅 전체가 죽지 않도록).
+            if tools and is_tools_unsupported(e.body):
+                return await _discord_step(
+                    messages, model=model, context_length=context_length,
+                    keep_alive=keep_alive, host=host, tools=None,
+                )
+            if i < len(attempts) - 1 and (is_load_crash(e.body) or is_think_unsupported(e.body)):
+                continue  # 오프로드 사다리로 재시도
+            return {"content": f"(모델 오류 {e.status})", "tool_calls": []}
+        except Exception as e:  # noqa: BLE001
+            return {"content": f"(연결 실패: {e})", "tool_calls": []}
+    return {"content": "(응답 실패)", "tool_calls": []}
+
+
+async def _discord_generate(
+    messages: list, *, model: str, context_length: int, keep_alive: str, host: str
+) -> str:
+    """디스코드 봇용 — 전체 응답 텍스트만 필요할 때(_discord_step의 얇은 래퍼)."""
+    r = await _discord_step(
+        messages, model=model, context_length=context_length, keep_alive=keep_alive, host=host
+    )
+    return r["content"] or "(빈 응답)"
+
+
+async def _discord_research(
+    messages: list, *, model: str, context_length: int, keep_alive: str, host: str
+) -> str:
+    """브리핑 예약용 — 웹 조사 루프(run_research_chat)를 돌려 최종 본문 텍스트를 모아 돌려준다."""
+    parts: list[str] = []
+    try:
+        async for ev in run_research_chat(
+            host=host, model=model,
+            messages=[{"role": m["role"], "content": m["content"]} for m in messages],
+            context_length=context_length, keep_alive=keep_alive,
+        ):
+            t = ev.get("type")
+            if t == "content":
+                parts.append(ev.get("text", ""))
+            elif t == "reset_content":
+                # 리서치 루프가 '스니펫만 본 임시 답'을 폐기하라는 신호 — 누적분을 버린다
+                # (안 그러면 서두·폐기 초안·최종답이 뒤섞인 브리핑이 자율 전송된다).
+                parts.clear()
+    except Exception as e:  # noqa: BLE001
+        return f"(브리핑 생성 실패: {e})"
+    return "".join(parts).strip() or "(빈 브리핑)"
+
+
+class DiscordConfig(BaseModel):
+    enabled: bool = False
+    token: str = ""
+    # 소유자·채널·허용목록은 런타임 자동 판별/동적 관리 — 여기서 받지 않는다.
+    data_dir: str = ""  # 봇 동적 상태(guild·channel·allowlist) 영속 폴더
+    model: str = "gemma4:12b"
+    context_length: int = 16384
+    keep_alive: str = "30m"
+    ollama_host: str | None = None
+
+
+@app.post("/discord/config")
+async def discord_config_ep(req: DiscordConfig):
+    """디스코드 봇 설정을 적용(재시작/중지). Electron 메인이 앱 시작·설정변경 시 인증 호출.
+
+    봇 토큰은 여기서 받아 discordbot 프로세스 메모리에만 둔다(env·디스크 미기록)."""
+    if discordbot is None:
+        raise HTTPException(status_code=503, detail="discord.py가 설치되어 있지 않습니다.")
+    host = (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
+
+    async def gen(messages: list) -> str:
+        return await _discord_generate(
+            messages,
+            model=req.model,
+            context_length=req.context_length,
+            keep_alive=req.keep_alive,
+            host=host,
+        )
+
+    async def step(messages: list, tools: list | None = None) -> dict:
+        return await _discord_step(
+            messages,
+            model=req.model,
+            context_length=req.context_length,
+            keep_alive=req.keep_alive,
+            host=host,
+            tools=tools,
+        )
+
+    async def research(messages: list) -> str:
+        return await _discord_research(
+            messages,
+            model=req.model,
+            context_length=req.context_length,
+            keep_alive=req.keep_alive,
+            host=host,
+        )
+
+    await discordbot.apply_config(req.model_dump(), gen, step, research)
+    return {"ok": True, **discordbot.status()}
+
+
+@app.get("/discord/status")
+async def discord_status_ep():
+    if discordbot is None:
+        return {"running": False, "user": None, "last_error": "discord.py 미설치"}
+    return discordbot.status()
+
+
+@app.get("/discord/schedules")
+async def discord_schedules_ep():
+    """등록된 예약 목록 — 설정 탭이 조회. 봇 미연결이어도 저장소만 있으면 동작."""
+    try:
+        import discordsched
+        return {"jobs": discordsched.jobs()}
+    except Exception as e:  # noqa: BLE001
+        return {"jobs": [], "detail": str(e)}
+
+
+class ScheduleRemoveRequest(BaseModel):
+    id: str
+
+
+@app.post("/discord/schedules/remove")
+async def discord_schedule_remove_ep(req: ScheduleRemoveRequest):
+    # 조회 엔드포인트와 동일하게 실패를 우아하게 반환한다(인접 API의 실패 계약 통일).
+    try:
+        import discordsched
+        return {"ok": discordsched.remove(req.id)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "detail": str(e)}
+
+
+# ---- 긴급 GPU 확보: 로드된 Ollama 모델을 즉시 언로드 ----
+class UnloadRequest(BaseModel):
+    ollama_host: str | None = None
+
+
+@app.post("/ollama/unload")
+async def ollama_unload(req: UnloadRequest):
+    """로드된 Ollama 모델을 즉시 VRAM에서 내린다(긴급 GPU 확보).
+
+    /api/ps로 현재 로드된 모델을 찾아, 각 모델에 빈 프롬프트 + keep_alive:0을 보내 언로드한다.
+    생성 중인 모델은 그 요청이 끝난 뒤 내려간다(Ollama가 직렬 처리)."""
+    host = (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
+    unloaded: list[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=5)) as client:
+            r = await client.get(f"{host}/api/ps")
+            models = (r.json().get("models") or []) if r.status_code == 200 else []
+            for m in models:
+                name = m.get("name") or m.get("model")
+                if not name:
+                    continue
+                try:
+                    await client.post(
+                        f"{host}/api/generate",
+                        json={"model": name, "prompt": "", "keep_alive": 0},
+                    )
+                    unloaded.append(name)
+                except Exception:  # noqa: BLE001 — 개별 모델 실패는 넘기고 나머지 계속
+                    pass
+        return {"ok": True, "unloaded": unloaded}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "detail": str(e), "unloaded": unloaded}
 
 
 class AgentRequest(BaseModel):

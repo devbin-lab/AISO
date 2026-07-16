@@ -378,6 +378,10 @@
   margin: 0 auto;
   padding: 26px 30px 48px;
 }
+/* 설정은 좌측 네비 + 우측 컨텐츠 2단이라 더 넓게 — 넓은 창에서 옹졸해 보이지 않게 */
+.view--settings {
+  max-width: 1080px;
+}
 .view--chat {
   display: flex;
   flex-direction: column;
@@ -1234,6 +1238,8 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0; /* .row flex에서 눌려서 라벨이 줄바꿈되지 않게 */
+  white-space: nowrap; /* '자동'·'정리·분류'·'100개 (빠름)' 등 한글 라벨 세로 쪼개짐 방지 */
   height: 28px;
   padding: 0 9px;
   font: inherit;
@@ -1721,7 +1727,49 @@
 }
 
 /* ---------- settings ---------- */
-.settings section {
+/* 좌측 네비 + 우측 컨텐츠 (클로드 설정 스타일) */
+.settings-layout {
+  display: flex;
+  gap: 22px;
+  align-items: flex-start;
+}
+.settings-nav {
+  flex: 0 0 148px;
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-nav__item {
+  text-align: left;
+  padding: 8px 11px;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    color 0.12s;
+}
+.settings-nav__item:hover {
+  background: var(--bg-elev);
+  color: var(--text-muted);
+}
+.settings-nav__item--on {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+.settings-content {
+  flex: 1;
+  min-width: 0;
+}
+.settings section,
+.settings-content section {
   margin-bottom: 18px;
 }
 .group__title {
@@ -1755,8 +1803,99 @@
 }
 .row__hint {
   font-size: 11.5px;
+  line-height: 1.55; /* 여러 줄 안내문의 줄 간격을 고르고 편안하게 */
   color: var(--text-dim);
   margin-top: 2px;
+  word-break: keep-all; /* 한글은 어절(공백) 단위로만 줄바꿈 — 단어 중간 쪼개짐 방지 */
+  overflow-wrap: anywhere; /* 단, URL·환경변수 같은 아주 긴 토큰은 넘치지 않게 끊음 */
+}
+/* 디스코드 봇 만들기 안내 패널 */
+.dc-guide {
+  margin: 4px 0 10px;
+  padding: 12px 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.dc-guide__steps {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  line-height: 1.6;
+}
+.dc-guide__steps b {
+  color: var(--text);
+  font-weight: 600;
+}
+.dc-guide__steps a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.dc-guide__invite {
+  margin-top: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.dc-guide__url {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.dc-guide__pending {
+  color: var(--text-dim);
+  font-style: italic;
+}
+.sched-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sched-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.06));
+}
+.sched-item__main {
+  min-width: 0;
+  flex: 1;
+}
+.sched-item__tag {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.18);
+  color: var(--text-dim);
+  margin-right: 8px;
+}
+.sched-item__tag--brief {
+  background: rgba(99, 102, 241, 0.18);
+  color: #a5b4fc;
+}
+.sched-item__when {
+  font-size: 12px;
+  color: var(--text);
+}
+.sched-item__text {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .row__control {
   display: flex;

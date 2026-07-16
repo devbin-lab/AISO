@@ -10,10 +10,12 @@ import {
 import type { HealthInfo } from '../../../shared/backend'
 import type { UpdateStatus } from '../../../shared/update'
 import type { SkillMeta } from '../../../shared/skill'
+import type { DiscordStatus, DiscordSchedule } from '../../../shared/discord'
 import Select from '../components/Select'
 import Segmented from '../components/Segmented'
 import Dropdown from '../components/Dropdown'
 import { confirmDialog } from '../components/ConfirmDialog'
+import { unloadModels } from '../lib/ollama'
 
 const ONOFF = [
   { v: true, label: '켜짐' },
@@ -76,10 +78,22 @@ function rangeFill(pct: number): React.CSSProperties {
   return { background: `linear-gradient(to right, var(--accent) ${p}%, var(--track) ${p}%)` }
 }
 
+type SectionId =
+  | 'engine'
+  | 'generation'
+  | 'search'
+  | 'resource'
+  | 'appearance'
+  | 'skills'
+  | 'discord'
+  | 'updates'
+  | 'developer'
+
 function SettingsView({ settings, health, onSave, active }: Props): React.JSX.Element {
   const [form, setForm] = useState<AppSettings>(settings)
   const [saved, setSaved] = useState(false)
   const [manualModel, setManualModel] = useState(false)
+  const [activeSection, setActiveSection] = useState<SectionId>('engine')
 
   const modelOptions = health?.models ?? []
   const useDropdown = modelOptions.length > 0 && !manualModel
@@ -108,6 +122,30 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
   // ── 자동 업데이트 (GitHub 릴리스) ──
   const [appVersion, setAppVersion] = useState('')
   const [upd, setUpd] = useState<UpdateStatus>({ state: 'idle' })
+
+  // ── 긴급 GPU 확보: 로드된 AI 모델을 즉시 VRAM에서 내린다 ──
+  const [dropping, setDropping] = useState(false)
+  const [dropMsg, setDropMsg] = useState('')
+  const dropAI = async (): Promise<void> => {
+    setDropping(true)
+    setDropMsg('')
+    try {
+      const info = await window.api.backend.info()
+      if (info.state !== 'ready' || !info.port) {
+        setDropMsg('백엔드가 준비되지 않았습니다.')
+        return
+      }
+      const r = await unloadModels(info.port, form.ollamaHost)
+      if (!r.ok) setDropMsg(`실패: ${r.detail ?? '알 수 없는 오류'}`)
+      else if (r.unloaded.length === 0) setDropMsg('내릴 모델이 없습니다(이미 비어 있음).')
+      else setDropMsg(`${r.unloaded.length}개 모델을 내렸습니다. GPU를 비웠습니다.`)
+    } catch (e) {
+      setDropMsg(`오류: ${String(e)}`)
+    } finally {
+      setDropping(false)
+      window.setTimeout(() => setDropMsg(''), 6000)
+    }
+  }
   useEffect(() => {
     window.api.updates.version().then(setAppVersion).catch(() => {})
     return window.api.updates.onStatus(setUpd)
@@ -149,6 +187,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
   }, [active, onSave])
 
   const disableDevMode = (): void => {
+    setActiveSection('engine') // '개발자' 섹션이 사라지므로 다른 섹션으로 이동
     void onSave({ devMode: false, forceOnboarding: false })
   }
 
@@ -187,6 +226,87 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
     }
   }
 
+  // ── 디스코드 봇 (MVP: 기본 채팅) — 소유자·채널·허용목록은 봇이 자동 처리 ──
+  const [discordToken, setDiscordToken] = useState('')
+  const [discordHasToken, setDiscordHasToken] = useState(false)
+  const [discordApplying, setDiscordApplying] = useState(false)
+  const [discordStat, setDiscordStat] = useState<DiscordStatus | null>(null)
+  const [schedules, setSchedules] = useState<DiscordSchedule[]>([])
+  const refreshDiscord = (): void => {
+    window.api.discord.hasToken().then(setDiscordHasToken).catch(() => {})
+    window.api.discord.status().then(setDiscordStat).catch(() => {})
+    window.api.discord.schedules().then((r) => setSchedules(r.jobs ?? [])).catch(() => {})
+  }
+  const removeSchedule = async (id: string): Promise<void> => {
+    await window.api.discord.scheduleRemove(id)
+    refreshDiscord()
+  }
+  useEffect(() => {
+    if (active) refreshDiscord()
+  }, [active])
+  const applyDiscord = async (): Promise<void> => {
+    setDiscordApplying(true)
+    try {
+      await onSave(form) // 활성 토글 저장
+      if (discordToken.trim()) {
+        await window.api.discord.saveToken(discordToken.trim())
+        setDiscordToken('')
+      }
+      const r = await window.api.discord.apply()
+      if (!r.ok) setDiscordStat({ running: false, last_error: r.detail ?? '알 수 없음' })
+      // 봇 로그인 + 채널 생성까지 시간이 걸리므로 여러 번 뒤늦게 재조회
+      refreshDiscord()
+      window.setTimeout(refreshDiscord, 1500)
+      window.setTimeout(refreshDiscord, 4000)
+    } finally {
+      setDiscordApplying(false)
+    }
+  }
+  const discordStatusText = ((): string => {
+    const s = discordStat
+    if (!s) return '미확인'
+    if (s.running) {
+      const chan = s.channel_id
+        ? '#aiso 채널 준비됨'
+        : '⚠ 명령 채널 미생성 — 연결/적용을 다시 눌러 재시도하세요'
+      const err = s.last_error ? ` · ${s.last_error}` : ''
+      return `연결됨${s.user ? ` (${s.user})` : ''} · ${chan}${err}`
+    }
+    // 중지 상태의 사유: last_error(봇 오류) 또는 detail(백엔드 미준비 등)을 함께 노출한다.
+    const reason = s.last_error || s.detail
+    return reason ? `중지 · ${reason}` : '중지됨'
+  })()
+
+  // ── 디스코드 봇 만들기 안내 (설정탭 내 단계별 가이드) ──
+  const [showDcGuide, setShowDcGuide] = useState(false)
+  const [dcCopied, setDcCopied] = useState(false)
+  // 봇 토큰의 첫 세그먼트는 base64url(Application ID)이라, 토큰만으로 App ID를 얻어 초대 링크를 만든다.
+  // (별도 Application ID 입력 불필요. 이미 연결됐다면 봇 상태의 app_id로도 보완.)
+  const appIdFromToken = (token: string): string => {
+    const first = (token || '').trim().split('.')[0]
+    if (!first) return ''
+    try {
+      const decoded = atob(first.replace(/-/g, '+').replace(/_/g, '/'))
+      return /^\d{15,25}$/.test(decoded) ? decoded : ''
+    } catch {
+      return ''
+    }
+  }
+  const dcAppId = appIdFromToken(discordToken) || discordStat?.app_id || ''
+  // 봇 권한: 채널 보기(1024) + 메시지 보내기(2048) + 채널 관리(16) + 메시지 기록 읽기(65536) = 68624
+  // integration_type=0(GUILD_INSTALL) — '서버에 추가' 흐름을 강제해 서버 선택 드롭다운이 뜨게 한다
+  // (없으면 최근 Discord가 '내 앱에 추가(사용자 설치)' 화면으로 열려 서버 선택이 안 나옴).
+  const dcInviteUrl = /^\d{15,25}$/.test(dcAppId)
+    ? `https://discord.com/oauth2/authorize?client_id=${dcAppId}&permissions=68624&integration_type=0&scope=bot+applications.commands`
+    : ''
+  const copyDcInvite = (): void => {
+    if (!dcInviteUrl) return
+    void navigator.clipboard.writeText(dcInviteUrl).then(() => {
+      setDcCopied(true)
+      window.setTimeout(() => setDcCopied(false), 1500)
+    })
+  }
+
   const factoryReset = async (): Promise<void> => {
     const ok = await confirmDialog({
       title: '공장초기화',
@@ -222,14 +342,41 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
     }
   })()
 
+  const navItems: { id: SectionId; label: string }[] = [
+    { id: 'engine', label: '엔진' },
+    { id: 'generation', label: '생성' },
+    { id: 'search', label: '검색·RAG' },
+    { id: 'resource', label: '리소스' },
+    { id: 'appearance', label: '화면' },
+    { id: 'skills', label: '스킬' },
+    { id: 'discord', label: '디스코드' },
+    { id: 'updates', label: '업데이트' },
+    ...(form.devMode ? [{ id: 'developer' as SectionId, label: '개발자' }] : [])
+  ]
+
   return (
-    <div className="view">
+    <div className="view view--settings">
       <header className="view__head">
         <h1>설정</h1>
         <p className="view__desc">AI 엔진과 화면 설정</p>
       </header>
 
-      <div className="settings">
+      <div className="settings-layout">
+        <nav className="settings-nav">
+          {navItems.map((it) => (
+            <button
+              key={it.id}
+              type="button"
+              className={`settings-nav__item ${activeSection === it.id ? 'settings-nav__item--on' : ''}`}
+              onClick={() => setActiveSection(it.id)}
+            >
+              {it.label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="settings-content">
+        {activeSection === 'engine' && (
         <section>
           <div className="group__title">엔진</div>
           <div className="group">
@@ -238,8 +385,8 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
                 <div className="row__label">모델</div>
                 <div className="row__hint">
                   {modelOptions.length > 0
-                    ? 'Ollama에 설치된 모델 중 선택'
-                    : 'Ollama 연결 후 설치된 모델 목록이 표시됩니다'}
+                    ? '설치된 모델 중에서 선택합니다.'
+                    : 'Ollama를 연결하면 설치된 모델이 여기에 표시됩니다.'}
                 </div>
               </div>
               <div className="row__control">
@@ -271,7 +418,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
             <div className="row">
               <div>
                 <div className="row__label">Ollama 호스트</div>
-                <div className="row__hint">FastAPI 사이드카가 통신할 주소</div>
+                <div className="row__hint">Ollama 서버 주소이며, 보통 기본값을 그대로 사용합니다.</div>
               </div>
               <input
                 className="input"
@@ -282,14 +429,15 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
             </div>
           </div>
         </section>
-
+        )}
+        {activeSection === 'generation' && (
         <section>
           <div className="group__title">생성</div>
           <div className="group">
             <div className="row">
               <div>
                 <div className="row__label">추론 강도</div>
-                <div className="row__hint">모델 사고(think) 깊이 · Low 빠름 / High 정확</div>
+                <div className="row__hint">생각의 깊이를 정합니다. Low는 빠르게, High는 더 꼼꼼하게 답합니다.</div>
               </div>
               <Segmented
                 value={form.reasoningEffort}
@@ -301,7 +449,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
               <div>
                 <div className="row__label">생성 온도</div>
                 <div className="row__hint">
-                  자동이면 요청 내용을 보고 정리·분류/코딩·일반 온도를 매번 골라줍니다. 커스텀만 직접 조정합니다.
+                  자동은 요청에 맞춰 온도를 조절하고, 커스텀에서만 값을 직접 정합니다.
                 </div>
               </div>
               <Dropdown
@@ -316,7 +464,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
               <div className="row">
                 <div>
                   <div className="row__label">커스텀 온도</div>
-                  <div className="row__hint">0 결정적 · 1 창의적</div>
+                  <div className="row__hint">값이 낮으면 일관되게, 높으면 창의적으로 답합니다.</div>
                 </div>
                 <div className="temp">
                   <input
@@ -336,7 +484,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
             <div className="row">
               <div>
                 <div className="row__label">컨텍스트 길이</div>
-                <div className="row__hint">작업 기억(토큰 창) · 클수록 긴 작업 가능, VRAM↑ · 4K ~ 128K</div>
+                <div className="row__hint">모델이 한 번에 기억하는 양으로, 클수록 긴 대화가 가능하지만 VRAM을 더 사용합니다.</div>
               </div>
               <div className="temp">
                 <input
@@ -362,7 +510,9 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
             </div>
           </div>
         </section>
-
+        )}
+        {activeSection === 'search' && (
+        <>
         <section>
           <div className="group__title">웹 검색</div>
           <div className="group">
@@ -370,7 +520,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
               <div>
                 <div className="row__label">채팅 웹 검색</div>
                 <div className="row__hint">
-                  채팅에서 모르는 최신 정보·사실을 물으면 <b>자동으로</b> 인터넷을 조사해 답합니다(DuckDuckGo·여러 출처 교차 확인). 끄면 전부 로컬에서만 처리합니다.
+                  최신 정보가 필요하면 <b>자동으로</b> 인터넷에서 여러 출처를 확인해 답합니다. 끄면 모두 로컬에서만 처리합니다.
                 </div>
               </div>
               <Segmented
@@ -391,7 +541,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
             <div className="row">
               <div>
                 <div className="row__label">RAG 사용</div>
-                <div className="row__hint">에이전트가 색인된 작업 폴더에서 관련 코드·문서를 자동 참고</div>
+                <div className="row__hint">작업 폴더의 코드와 문서를 미리 읽어 두고, 관련 내용을 답변에 자동으로 참고합니다.</div>
               </div>
               <Segmented
                 value={form.ragEnabled}
@@ -406,7 +556,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
               <div>
                 <div className="row__label">임베딩 모델</div>
                 <div className="row__hint">
-                  색인·검색 전용 · 채팅 모델과 독립(바꿔도 재색인 불필요) · 한국어는 bge-m3 권장
+                  문서 검색 전용 모델로, 채팅 모델과 분리되어 있어 바꿔도 문제없습니다. 한국어는 bge-m3를 권장합니다.
                 </div>
               </div>
               <input
@@ -420,7 +570,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
               <div>
                 <div className="row__label">색인 범위 (최대 파일 수)</div>
                 <div className="row__hint">
-                  많을수록 더 많이 참고하지만 색인이 느려집니다 · 폴더가 커서 한계에 닿으면 늘리라고 안내합니다
+                  범위를 넓힐수록 더 많이 참고하지만 준비가 느려집니다. 폴더가 크면 값을 늘리도록 안내합니다.
                 </div>
               </div>
               <Dropdown
@@ -436,15 +586,29 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
             </div>
           </div>
         </section>
-
+        </>
+        )}
+        {activeSection === 'resource' && (
         <section>
-          <div className="group__title">성능</div>
+          <div className="group__title">리소스</div>
           <div className="group">
+            <div className="row">
+              <div>
+                <div className="row__label">AI 즉시 정지 (GPU 비우기)</div>
+                <div className="row__hint">
+                  {dropMsg ||
+                    'GPU가 급히 필요할 때, 메모리에 올라간 AI 모델을 지금 바로 내립니다. 생성 중이면 그 작업이 끝난 뒤 내려갑니다.'}
+                </div>
+              </div>
+              <button className="btn btn--stop" disabled={dropping} onClick={() => void dropAI()}>
+                {dropping ? '내리는 중…' : 'AI 언로드'}
+              </button>
+            </div>
             <div className="row">
               <div>
                 <div className="row__label">모델 상주 유지</div>
                 <div className="row__hint">
-                  유휴 시 모델 언로드로 인한 콜드 재로드(~5.8초) 방지 · 상주는 VRAM을 계속 점유
+                  사용하지 않을 때도 모델을 메모리에 유지합니다. 다시 쓸 때 로딩(약 5.8초)이 없어지지만 VRAM을 계속 사용합니다.
                 </div>
               </div>
               <Segmented
@@ -453,31 +617,24 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
                 onChange={(v) => set('keepAlive', v)}
               />
             </div>
-            <div className="row">
-              <div>
-                <div className="row__label">Ollama 서버 팁</div>
-                <div className="row__hint">
-                  <b>OLLAMA_NUM_PARALLEL=1</b>(기본) 유지를 권장합니다.
-                  <b> OLLAMA_KV_CACHE_TYPE</b>는 gpt-oss에서 미지원이니 gpt-oss 사용 시 설정하지 마세요.
-                </div>
-              </div>
-            </div>
           </div>
         </section>
-
+        )}
+        {activeSection === 'appearance' && (
         <section>
           <div className="group__title">화면</div>
           <div className="group">
             <div className="row">
               <div>
                 <div className="row__label">테마</div>
-                <div className="row__hint">시스템은 OS 설정을 따릅니다</div>
+                <div className="row__hint">시스템은 OS 설정을 따릅니다.</div>
               </div>
               <Segmented value={form.theme} options={THEMES} onChange={(v) => set('theme', v)} />
             </div>
           </div>
         </section>
-
+        )}
+        {activeSection === 'updates' && (
         <section>
           <div className="group__title">업데이트</div>
           <div className="group">
@@ -515,7 +672,8 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
             )}
           </div>
         </section>
-
+        )}
+        {activeSection === 'skills' && (
         <section>
           <div className="group__title">스킬</div>
           <div className="group">
@@ -523,7 +681,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
               <div>
                 <div className="row__label">만들어진 스킬</div>
                 <div className="row__hint">
-                  에이전트가 만든 재사용 자동화 도구입니다. 여기서 확인·삭제할 수 있습니다.
+                  에이전트가 만든 자동화 도구이며, 여기서 확인하거나 삭제할 수 있습니다.
                 </div>
               </div>
               <button className="btn btn--ghost2" onClick={loadSkills}>
@@ -533,8 +691,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
             {skills.length === 0 ? (
               <div className="row">
                 <div className="row__hint">
-                  아직 만들어진 스킬이 없습니다. 에이전트에게 반복 작업(예: 알람·브리핑)을
-                  자동화하는 스킬을 만들어 달라고 요청해 보세요.
+                  아직 만든 스킬이 없습니다. 에이전트에게 반복 작업(예: 알람, 브리핑)을 자동화해 달라고 하면 여기에 추가됩니다.
                 </div>
               </div>
             ) : (
@@ -555,8 +712,178 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
             )}
           </div>
         </section>
-
-        {form.devMode && (
+        )}
+        {activeSection === 'discord' && (
+        <section>
+          <div className="group__title">디스코드 봇 (기본 채팅)</div>
+          <div className="group">
+            <div className="row">
+              <div>
+                <div className="row__label">디스코드 봇</div>
+                <div className="row__hint">
+                  봇 토큰을 넣고 서버에 초대하면 <b>소유자, 명령 채널, 허용목록이 자동으로</b> 설정됩니다(초대 시
+                  전용 채널을 만들고 그 채널에서 대화합니다). 개발자 포털에서 <b>Message Content Intent</b>를 켜야 하며,
+                  초대 권한에 <b>Manage Channels</b>가 필요합니다. 기본적으로 앱이 켜져 있는 동안에만 동작하며,
+                  아래 <b>백그라운드 상주</b>를 켜면 창을 닫아도 계속 작동합니다.
+                </div>
+              </div>
+              <Segmented
+                value={form.discordEnabled}
+                options={ONOFF}
+                onChange={(v) => set('discordEnabled', v)}
+              />
+            </div>
+            <div className="row">
+              <div>
+                <div className="row__label">백그라운드 상주</div>
+                <div className="row__hint">
+                  창을 닫아도 앱이 트레이(작업표시줄 우측)에 남아 봇과 예약이 계속 작동합니다. 끄면 창을 닫을 때
+                  앱이 종료되어 봇도 멈춥니다. 완전히 끄려면 트레이 아이콘의 <b>완전 종료</b>를 사용합니다.
+                </div>
+              </div>
+              <Segmented
+                value={form.trayResident}
+                options={ONOFF}
+                onChange={(v) => set('trayResident', v)}
+              />
+            </div>
+            <div className="row">
+              <div>
+                <div className="row__label">로그인 시 자동 실행</div>
+                <div className="row__hint">
+                  윈도우에 로그인하면 앱이 트레이로 자동 실행되어 봇이 다시 연결됩니다. PC를 켜 두는 한 항상
+                  작동하게 하려면 백그라운드 상주와 함께 켜세요.
+                </div>
+              </div>
+              <Segmented
+                value={form.autoLaunch}
+                options={ONOFF}
+                onChange={(v) => set('autoLaunch', v)}
+              />
+            </div>
+            <div className="row">
+              <div>
+                <div className="row__label">봇 만들기 안내</div>
+                <div className="row__hint">처음이라면 아래 단계를 따라 하세요.</div>
+              </div>
+              <button className="btn btn--ghost2" onClick={() => setShowDcGuide((v) => !v)}>
+                {showDcGuide ? '닫기' : '안내 보기'}
+              </button>
+            </div>
+            {showDcGuide && (
+              <div className="dc-guide">
+                <ol className="dc-guide__steps">
+                  <li>
+                    <b>개발자 포털에서 앱 만들기</b> —{' '}
+                    <a
+                      href="https://discord.com/developers/applications"
+                      target="_blank"
+                      rel="noreferrer noopener"
+                    >
+                      개발자 포털 열기
+                    </a>{' '}
+                    → New Application → 이름을 정합니다.
+                  </li>
+                  <li>
+                    <b>봇 토큰 발급</b> — 좌측 <b>Bot</b> 메뉴에서 Reset Token으로 토큰을 복사해 아래 봇 토큰란에
+                    붙여넣습니다.
+                  </li>
+                  <li>
+                    <b>Message Content Intent 켜기 (필수)</b> — 같은 Bot 화면의 Privileged Gateway Intents에서
+                    MESSAGE CONTENT INTENT를 켭니다. <b>이걸 켜지 않으면 봇이 메시지를 읽지 못해 답하지 않습니다.</b>{' '}
+                    (Presence·Server Members는 켤 필요 없습니다.)
+                  </li>
+                  <li>
+                    <b>봇 초대</b> — 아래 봇 토큰란에 토큰을 넣으면 <b>초대 링크가 자동으로</b> 만들어집니다(토큰에
+                    Application ID가 들어 있어 따로 입력할 필요가 없습니다). 링크를 열어 서버를 고르고 승인합니다.
+                    <div className="dc-guide__invite">
+                      {dcInviteUrl ? (
+                        <div className="dc-guide__url">
+                          <a href={dcInviteUrl} target="_blank" rel="noreferrer noopener">
+                            초대 링크 열기
+                          </a>
+                          <button className="btn btn--ghost2" onClick={copyDcInvite}>
+                            {dcCopied ? '복사됨' : '링크 복사'}
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="dc-guide__pending">봇 토큰을 넣으면 초대 링크가 여기에 나타납니다.</span>
+                      )}
+                    </div>
+                  </li>
+                  <li>
+                    <b>연결</b> — 봇 토큰을 붙여넣었으면 <b>연결/적용</b>을 누릅니다.
+                  </li>
+                </ol>
+              </div>
+            )}
+            <div className="row">
+              <div>
+                <div className="row__label">봇 토큰</div>
+                <div className="row__hint">
+                  {discordHasToken ? '저장됨 · 새 값 입력 시 교체' : '아직 없음'} · 암호화 저장(설정에 평문 미보관)
+                </div>
+              </div>
+              <input
+                className="input"
+                type="password"
+                value={discordToken}
+                onChange={(e) => setDiscordToken(e.target.value)}
+                placeholder={discordHasToken ? '••••••(교체하려면 입력)' : '봇 토큰 붙여넣기'}
+              />
+            </div>
+            <div className="row">
+              <div>
+                <div className="row__label">연결 상태</div>
+                <div className="row__hint">
+                  {discordStatusText}
+                  {discordStat?.running && discordStat.allowlist ? (
+                    <>
+                      {' · '}허용 사용자 {discordStat.allowlist.length}명 (디스코드에서 <span className="mono">/allow</span>로 관리)
+                    </>
+                  ) : null}
+                </div>
+              </div>
+              <button className="btn" disabled={discordApplying} onClick={() => void applyDiscord()}>
+                {discordApplying ? '적용 중…' : '연결/적용'}
+              </button>
+            </div>
+            <div className="row">
+              <div style={{ width: '100%' }}>
+                <div className="row__label">예약</div>
+                <div className="row__hint">
+                  디스코드 #aiso 채널에서 &quot;오후 8시에 공지방에 회의 알림 보내&quot; 또는 &quot;매일 아침 8시에
+                  날씨 브리핑해줘&quot;처럼 자연어로 등록합니다. 예약은 앱이 켜져 있는 동안에만 발화됩니다.
+                </div>
+                {schedules.length === 0 ? (
+                  <div className="row__hint" style={{ marginTop: 8 }}>등록된 예약이 없습니다.</div>
+                ) : (
+                  <ul className="sched-list">
+                    {schedules.map((j) => (
+                      <li key={j.id} className="sched-item">
+                        <div className="sched-item__main">
+                          <span className={`sched-item__tag${j.kind === 'briefing' ? ' sched-item__tag--brief' : ''}`}>
+                            {j.kind === 'briefing' ? '브리핑' : '메시지'}
+                          </span>
+                          <span className="sched-item__when">
+                            {j.repeat === 'daily' ? '매일 ' : ''}
+                            {String(j.next_run ?? '').replace('T', ' ')} → #{j.channel_name}
+                          </span>
+                          <div className="sched-item__text">{j.text}</div>
+                        </div>
+                        <button className="btn btn--sm btn--stop" onClick={() => void removeSchedule(j.id)}>
+                          삭제
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+        )}
+        {activeSection === 'developer' && form.devMode && (
           <section>
             <div className="group__title">개발자</div>
             <div className="group">
@@ -564,7 +891,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
                 <div>
                   <div className="row__label">온보딩 미리보기</div>
                   <div className="row__hint">
-                    모델을 지우지 않고도 홈에서 최초 설치 안내 화면을 강제로 띄웁니다 · 저장 후 홈에서 확인
+                    모델을 지우지 않고 첫 설치 안내 화면을 다시 표시합니다(저장 후 홈에서 확인할 수 있습니다).
                   </div>
                 </div>
                 <Segmented
@@ -577,7 +904,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
                 <div>
                   <div className="row__label">공장초기화</div>
                   <div className="row__hint">
-                    설정·대화·사용량 기록을 모두 지우고 처음 상태로 되돌립니다 (되돌릴 수 없음)
+                    설정과 대화, 사용량 기록을 모두 지우고 처음 상태로 되돌립니다(되돌릴 수 없습니다).
                   </div>
                 </div>
                 <button className="btn btn--stop" onClick={() => void factoryReset()}>
@@ -588,7 +915,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
                 <div>
                   <div className="row__label">개발자 모드 끄기</div>
                   <div className="row__hint">
-                    다시 켜려면 이 화면에서 Ctrl+Shift+F1을 10회 누르세요
+                    다시 켜려면 이 화면에서 Ctrl+Shift+F1을 10회 누르세요.
                   </div>
                 </div>
                 <button className="btn btn--ghost2" onClick={disableDevMode}>
@@ -599,11 +926,12 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
           </section>
         )}
 
-        <div className="actions">
-          {saved && <span className="saved">저장됨</span>}
-          <button className="btn" disabled={!dirty} onClick={submit}>
-            저장
-          </button>
+          <div className="actions">
+            {saved && <span className="saved">저장됨</span>}
+            <button className="btn" disabled={!dirty} onClick={submit}>
+              저장
+            </button>
+          </div>
         </div>
       </div>
       {devToast && <div className="dev-toast">{devToast}</div>}

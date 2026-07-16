@@ -10,6 +10,7 @@ import type {
   ConversationSave
 } from '../shared/conversation'
 import type { SkillMeta } from '../shared/skill'
+import type { DiscordStatus, DiscordSchedule } from '../shared/discord'
 
 // 사이드카 인증 토큰 — preload 초기화 시 1회 동기 조회 후 캐시(세션 내 불변).
 // 렌더러 fetch는 이 값을 X-Aiso-Token 헤더로 실어 백엔드 인증을 통과한다.
@@ -60,6 +61,15 @@ const api = {
   skills: {
     list: (): Promise<SkillMeta[]> => ipcRenderer.invoke('skills:list'),
     remove: (name: string): Promise<void> => ipcRenderer.invoke('skills:delete', name)
+  },
+  discord: {
+    hasToken: (): Promise<boolean> => ipcRenderer.invoke('discord:has-token'),
+    saveToken: (token: string): Promise<void> => ipcRenderer.invoke('discord:save-token', token),
+    apply: (): Promise<{ ok: boolean; detail?: string }> => ipcRenderer.invoke('discord:apply'),
+    status: (): Promise<DiscordStatus> => ipcRenderer.invoke('discord:status'),
+    schedules: (): Promise<{ jobs: DiscordSchedule[] }> => ipcRenderer.invoke('discord:schedules'),
+    scheduleRemove: (id: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('discord:schedule-remove', id)
   },
   updates: {
     version: (): Promise<string> => ipcRenderer.invoke('app:version'),

@@ -10,6 +10,7 @@ import type {
   ConversationSave
 } from '../shared/conversation'
 import type { SkillMeta } from '../shared/skill'
+import type { DiscordStatus, DiscordSchedule } from '../shared/discord'
 
 export interface AisoAPI {
   ping: () => Promise<PingResult>
@@ -39,6 +40,14 @@ export interface AisoAPI {
   skills: {
     list: () => Promise<SkillMeta[]>
     remove: (name: string) => Promise<void>
+  }
+  discord: {
+    hasToken: () => Promise<boolean>
+    saveToken: (token: string) => Promise<void>
+    apply: () => Promise<{ ok: boolean; detail?: string }>
+    status: () => Promise<DiscordStatus>
+    schedules: () => Promise<{ jobs: DiscordSchedule[] }>
+    scheduleRemove: (id: string) => Promise<{ ok: boolean }>
   }
   updates: {
     version: () => Promise<string>

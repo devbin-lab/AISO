@@ -20,6 +20,18 @@ from enum import Enum
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from discordops import APPLY_SCHEMA as DISCORD_APPLY_SCHEMA
+from discordops import MAP_SCHEMA as DISCORD_MAP_SCHEMA
+from discordops import SEND_SCHEMA as DISCORD_SEND_SCHEMA
+from discordops import server_apply, server_map, server_send
+from discordsched import (
+    SCHEDULE_ADD_SCHEMA,
+    SCHEDULE_LIST_SCHEMA,
+    SCHEDULE_REMOVE_SCHEMA,
+    schedule_add,
+    schedule_list,
+    schedule_remove,
+)
 from rag import SEARCH_DOCS_SCHEMA, search_docs_tool
 from runcmd import RUN_COMMAND_SCHEMA, run_command
 from runcode import RUN_CODE_SCHEMA, run_code
@@ -138,13 +150,40 @@ def _build_registry() -> dict[str, ToolSpec]:
     # 4) search_docs — 색인 있을 때만 노출(AGENT_TOOLS 제외)이지만 실행 디스패치엔 필요
     reg["search_docs"] = ToolSpec("search_docs", SEARCH_DOCS_SCHEMA, CallKind.ASYNC_ROOT_HOST,
                                   handler=search_docs_tool)
+    # 5) 디스코드 서버 구성 — 봇이 연결돼 있을 때만 조건부 노출(search_docs와 동일 패턴, AGENT_TOOLS 제외).
+    #    apply는 외부 공유 서버를 즉시 바꾸고 삭제는 복구 불가 → DELETE 등급
+    #    (+ agent 루프가 자동(auto) 모드에서도 승인을 강제한다).
+    reg["discord_server_map"] = ToolSpec("discord_server_map", DISCORD_MAP_SCHEMA,
+                                         CallKind.ASYNC_PLAIN, handler=server_map)
+    reg["discord_server_apply"] = ToolSpec("discord_server_apply", DISCORD_APPLY_SCHEMA,
+                                           CallKind.ASYNC_PLAIN, approval=Approval.DELETE,
+                                           handler=server_apply)
+    # 메시지 전송·예약 — 외부(공유 서버)로 발신되므로 쓰기 등급(send·add는 agent 루프가 auto에서도 승인 강제).
+    reg["discord_send"] = ToolSpec("discord_send", DISCORD_SEND_SCHEMA,
+                                   CallKind.ASYNC_PLAIN, approval=Approval.DESTRUCTIVE,
+                                   handler=server_send)
+    reg["discord_schedule_add"] = ToolSpec("discord_schedule_add", SCHEDULE_ADD_SCHEMA,
+                                           CallKind.ASYNC_PLAIN, approval=Approval.DESTRUCTIVE,
+                                           handler=schedule_add)
+    reg["discord_schedule_list"] = ToolSpec("discord_schedule_list", SCHEDULE_LIST_SCHEMA,
+                                            CallKind.ASYNC_PLAIN, handler=schedule_list)
+    reg["discord_schedule_remove"] = ToolSpec("discord_schedule_remove", SCHEDULE_REMOVE_SCHEMA,
+                                              CallKind.ASYNC_PLAIN, approval=Approval.DESTRUCTIVE,
+                                              handler=schedule_remove)
     return reg
 
 
 REGISTRY: dict[str, ToolSpec] = _build_registry()
 
-# 모델에게 넘길 스키마 배열 — search_docs 제외, 등록 순서 유지 (기존 AGENT_TOOLS와 바이트 동일)
-AGENT_TOOLS: list[dict] = [spec.schema for name, spec in REGISTRY.items() if name != "search_docs"]
+# 조건부 노출 툴 — 상황이 갖춰졌을 때만 agent 루프가 tools에 얹는다(KV 프리픽스 스냅샷 불변).
+_CONDITIONAL_TOOLS = {
+    "search_docs",
+    "discord_server_map", "discord_server_apply", "discord_send",
+    "discord_schedule_add", "discord_schedule_list", "discord_schedule_remove",
+}
+
+# 모델에게 넘길 스키마 배열 — 조건부 툴 제외, 등록 순서 유지 (기존 AGENT_TOOLS와 바이트 동일)
+AGENT_TOOLS: list[dict] = [spec.schema for name, spec in REGISTRY.items() if name not in _CONDITIONAL_TOOLS]
 
 
 def is_meta(name: str) -> bool:
