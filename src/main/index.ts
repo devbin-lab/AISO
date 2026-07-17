@@ -13,7 +13,8 @@ import {
   applyDiscordConfig,
   discordStatus,
   discordSchedules,
-  discordScheduleRemove
+  discordScheduleRemove,
+  clearDiscordData
 } from './discord'
 import { freezeAppDataWrites } from './appdata-guard'
 import {
@@ -57,10 +58,17 @@ function quitApp(): void {
   app.quit()
 }
 
+/** 백그라운드 상주 여부 — 트레이 생성·창 닫기→숨김·종료 회피·숨겨 시작의 '단일 기준'.
+ *  자동 실행(autoLaunch)은 "부팅 후에도 봇을 유지"가 목적이므로 상주를 함의한다(트레이만 있고
+ *  창 닫으면 종료되는 불일치를 제거). 이 기준을 ensureTray/close/window-all-closed/ready-to-show가 공유한다. */
+function residencyOn(): boolean {
+  const s = loadSettings()
+  return s.trayResident || s.autoLaunch
+}
+
 /** 트레이 아이콘을 상황에 맞게 생성/제거한다(상주 또는 자동실행이 켜져 있으면 존재). */
 function ensureTray(): void {
-  const s = loadSettings()
-  const want = s.trayResident || s.autoLaunch
+  const want = residencyOn()
   if (want && !tray) {
     const img = nativeImage.createFromPath(trayIconAsset)
     tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img)
@@ -125,13 +133,13 @@ function createWindow(): void {
   mainWindow = win
 
   win.on('ready-to-show', () => {
-    // 로그인 자동 실행으로 켜진 첫 창은 숨긴 채 트레이로만 시작한다.
-    if (!(startedHidden && loadSettings().trayResident)) win.show()
+    // 로그인 자동 실행(--hidden)으로 켜진 첫 창은 상주 모드일 때 숨긴 채 트레이로만 시작한다.
+    if (!(startedHidden && residencyOn())) win.show()
   })
 
   // 상주 모드: 창 닫기(X)는 종료가 아니라 트레이로 숨기기. '완전 종료'만 실제 종료.
   win.on('close', (e) => {
-    if (!isQuitting && loadSettings().trayResident) {
+    if (!isQuitting && residencyOn()) {
       e.preventDefault()
       win.hide()
     }
@@ -216,6 +224,9 @@ app.whenReady().then(() => {
       ensureTray()
       applyStartupSettings()
     }
+    // 디스코드 봇 On/Off를 공용 '저장'으로 바꿔도 런타임 봇이 즉시 시작/중지되도록 재적용
+    // (예전엔 '연결/적용' 버튼으로만 반영돼, 토글 후 저장하면 플래그만 바뀌고 봇 상태는 그대로였다).
+    if ('discordEnabled' in patch) void applyDiscordConfig()
     return next
   })
 
@@ -238,8 +249,10 @@ app.whenReady().then(() => {
   })
   onBackendChange((i) => {
     BrowserWindow.getAllWindows().forEach((w) => w.webContents.send('backend:status', i))
-    // 백엔드가 준비되면 디스코드 봇을 자동 적용(활성 상태일 때만)
-    if (i.state === 'ready' && loadSettings().discordEnabled) {
+    // 백엔드가 준비되면 항상 디스코드 설정을 적용한다. enabled=false여도 apply는 예약 저장소를
+    // configure(data_dir)로 초기화하므로, 봇을 껐어도 설정 탭 예약 목록이 디스크값을 반영한다
+    // (봇 미활성 시 apply_config는 봇을 시작하지 않고 저장소만 준비하고 반환).
+    if (i.state === 'ready') {
       void applyDiscordConfig()
     }
   })
@@ -274,6 +287,9 @@ app.whenReady().then(() => {
     resetSettings()
     clearAllConversations()
     clearUsage()
+    // 디스코드 비밀·상태·예약도 지우고(리셋 후 설정은 기본값=봇 꺼짐), 실행 중 봇을 중지한다.
+    clearDiscordData()
+    void applyDiscordConfig() // 설정 기본값(discordEnabled=false)+토큰 삭제 → 사이드카 봇 중지
   })
 
   // ---- IPC: 자동 업데이트 (GitHub 릴리스 기반) ----
@@ -321,7 +337,7 @@ app.on('will-quit', () => {
 app.on('window-all-closed', () => {
   // 상주 모드에선 창을 닫아도(=숨겨도) 앱을 살려 봇·예약을 유지한다.
   // (close 핸들러가 창을 hide로 막으므로 상주 시엔 이 이벤트가 거의 안 오지만, 안전 가드로 둔다.)
-  if (loadSettings().trayResident) return
+  if (residencyOn()) return
   if (process.platform !== 'darwin') {
     app.quit()
   }

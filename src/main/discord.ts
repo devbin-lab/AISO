@@ -54,6 +54,17 @@ export function hasDiscordToken(): boolean {
   return existsSync(tokenFile())
 }
 
+/** 공장초기화용 — 암호화 봇 토큰과 동적 상태(state.json)·예약(schedules.json)을 모두 삭제한다.
+ *  '처음 설치 상태로 되돌린다'는 약속대로 가장 민감한 비밀(봇 토큰)과 PII(허용 ID·서버/채널)를 남기지 않는다. */
+export function clearDiscordData(): void {
+  saveDiscordToken('') // discord.token.enc 삭제
+  try {
+    rmSync(join(app.getPath('userData'), 'discord'), { recursive: true, force: true })
+  } catch {
+    /* 없으면 무시 */
+  }
+}
+
 export interface DiscordApplyResult {
   ok: boolean
   detail?: string

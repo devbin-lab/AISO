@@ -26,6 +26,7 @@ from ollama_util import (
     build_attempts,
     is_load_crash,
     is_think_unsupported,
+    is_tool_parse_error,
     is_tools_unsupported,
     model_layers,
 )
@@ -37,6 +38,7 @@ except Exception:  # noqa: BLE001
     discordbot = None
 
 DEFAULT_OLLAMA = os.environ.get("AISO_OLLAMA_HOST", "http://localhost:11434")
+MAX_DISCORD_PARSE_RETRIES = 2  # 디스코드 툴 루프의 툴콜 파싱오류 재생성 상한(agent 경로와 동일)
 
 # 세션 인증 토큰 — Electron 메인이 사이드카 스폰 시 환경변수로 넘긴다.
 # 백엔드는 127.0.0.1의 동적 포트에 붙지만 그것만으론 인증이 없어, 앱 실행 중
@@ -198,6 +200,8 @@ async def _stream_ollama(host: str, payload: dict):
                 if not line:
                     continue
                 data = json.loads(line)
+                if data.get("error"):  # 스트림 도중 오류(gpt-oss 툴콜 파싱 실패 등) → 상위에서 재시도/오류 처리
+                    raise OllamaHTTPError(500, str(data["error"]))
                 msg = data.get("message") or {}
                 # thinking(사고과정)과 content(최종답변)는 분리되어 온다 (gemma4·gpt-oss 등 think 지원 모델)
                 thinking = msg.get("thinking")
@@ -310,28 +314,33 @@ async def _discord_step(
     layers = await model_layers(host, model)
     attempts = build_attempts(base, "medium", layers)
     for i, payload in enumerate(attempts):
-        try:
-            parts: list[str] = []
-            calls: list = []
-            async for chunk in _stream_ollama(host, payload):
-                if chunk.get("type") == "content":
-                    parts.append(chunk["text"])
-                elif chunk.get("type") == "tool_calls":
-                    calls.extend(chunk["calls"])
-            return {"content": "".join(parts).strip(), "tool_calls": calls}
-        except OllamaHTTPError as e:
-            # 모델이 도구를 지원하지 않으면(400) 도구 없이 한 번 더 시도한다 — 서버 구성은 못 하지만
-            # 일반 대화는 되어야 한다(도구를 못 붙인다고 봇 채팅 전체가 죽지 않도록).
-            if tools and is_tools_unsupported(e.body):
-                return await _discord_step(
-                    messages, model=model, context_length=context_length,
-                    keep_alive=keep_alive, host=host, tools=None,
-                )
-            if i < len(attempts) - 1 and (is_load_crash(e.body) or is_think_unsupported(e.body)):
-                continue  # 오프로드 사다리로 재시도
-            return {"content": f"(모델 오류 {e.status})", "tool_calls": []}
-        except Exception as e:  # noqa: BLE001
-            return {"content": f"(연결 실패: {e})", "tool_calls": []}
+        parse_tries = 0
+        while True:  # 파싱오류는 같은 payload 재생성(에이전트 경로와 동일 회복 계약), 그 외는 아래에서 분기
+            try:
+                parts: list[str] = []
+                calls: list = []
+                async for chunk in _stream_ollama(host, payload):
+                    if chunk.get("type") == "content":
+                        parts.append(chunk["text"])
+                    elif chunk.get("type") == "tool_calls":
+                        calls.extend(chunk["calls"])
+                return {"content": "".join(parts).strip(), "tool_calls": calls}
+            except OllamaHTTPError as e:
+                # 모델이 도구를 지원하지 않으면(400) 도구 없이 한 번 더 시도(도구 못 붙인다고 채팅 전체가 죽지 않게).
+                if tools and is_tools_unsupported(e.body):
+                    return await _discord_step(
+                        messages, model=model, context_length=context_length,
+                        keep_alive=keep_alive, host=host, tools=None,
+                    )
+                # gpt-oss 툴콜 파싱 오류 → 같은 payload로 재생성(대개 회복). 안 그러면 서버구성이 무응답으로 실패.
+                if is_tool_parse_error(e.body) and parse_tries < MAX_DISCORD_PARSE_RETRIES:
+                    parse_tries += 1
+                    continue
+                if i < len(attempts) - 1 and (is_load_crash(e.body) or is_think_unsupported(e.body)):
+                    break  # 오프로드 사다리 다음 단계로
+                return {"content": f"(모델 오류 {e.status})", "tool_calls": []}
+            except Exception as e:  # noqa: BLE001
+                return {"content": f"(연결 실패: {e})", "tool_calls": []}
     return {"content": "(응답 실패)", "tool_calls": []}
 
 

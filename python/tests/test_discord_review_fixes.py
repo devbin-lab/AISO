@@ -67,6 +67,102 @@ def test_discord_research_discards_reset_content(monkeypatch):
     assert out == "실제 최종 브리핑"  # 서두·폐기초안이 섞이지 않음
 
 
+def test_discord_step_retries_on_tool_parse_error(monkeypatch):
+    """gpt-oss 툴콜 파싱오류(스트림 중간 error 라인)는 같은 payload로 재생성해 회복한다 —
+    예전엔 삼켜서 서버구성이 '(빈 응답)'으로 조용히 실패했다."""
+    calls = {"n": 0}
+
+    async def fake_layers(host, model):
+        return None
+
+    async def fake_stream(host, payload):
+        calls["n"] += 1
+        if calls["n"] == 1:  # 첫 시도 → 파싱오류(스트림 중간 error → _stream_ollama이 OllamaHTTPError로 올림)
+            raise OllamaHTTPError(500, "error parsing tool call: raw='We need...'")
+        yield {"type": "content", "text": "복구된 응답"}  # 재생성 → 성공
+
+    monkeypatch.setattr(main, "model_layers", fake_layers)
+    monkeypatch.setattr(main, "_stream_ollama", fake_stream)
+    out = asyncio.run(
+        main._discord_step(
+            [{"role": "user", "content": "팀 서버 꾸며줘"}],
+            model="m", context_length=4096, keep_alive="5m", host="h",
+            tools=[{"type": "function", "function": {"name": "discord_server_apply"}}],
+        )
+    )
+    assert out["content"] == "복구된 응답" and calls["n"] == 2  # 재생성 1회로 회복
+
+
+def test_stream_ollama_raises_on_mid_stream_error(monkeypatch):
+    """_stream_ollama이 스트림 중간의 {'error':...} 라인을 OllamaHTTPError로 올린다(삼키지 않음)."""
+    import json as _json
+
+    class _Resp:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def aiter_lines(self):
+            yield _json.dumps({"message": {"content": "부분"}})
+            yield _json.dumps({"error": "error parsing tool call: raw='x'"})
+
+        async def aread(self):
+            return b""
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, method, url, json=None):
+            return _Resp()
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", lambda *a, **k: _Client())
+
+    async def run():
+        with_err = False
+        try:
+            async for _ in main._stream_ollama("h", {"model": "m"}):
+                pass
+        except OllamaHTTPError as e:
+            with_err = "parsing tool" in e.body
+        return with_err
+
+    assert asyncio.run(run()) is True
+
+
+def test_lock_overwrites_includes_allowlist(monkeypatch):
+    """명령 채널 잠금 권한에 허용목록 사용자가 포함돼야 채널이 보인다(/allow가 실제 작동)."""
+    class FakeMember:
+        def __init__(self, mid):
+            self.id = mid
+
+    class FakeGuild:
+        default_role = "everyone"
+        me = "botself"
+        owner = None
+        owner_id = 0
+
+        def get_member(self, uid):
+            return FakeMember(uid)  # 캐시 히트로 가정
+
+        async def fetch_member(self, uid):
+            return FakeMember(uid)
+
+    discordbot._S.owner_id = "1"
+    discordbot._S.allowlist = {"555", "666"}
+    ow = asyncio.run(discordbot._lock_overwrites(FakeGuild()))
+    ids = {k.id if isinstance(k, FakeMember) else k for k in ow.keys()}
+    assert 555 in ids and 666 in ids  # 허용목록 멤버가 view 권한 키로 포함됨
+    discordbot._S.allowlist = set()  # 다른 테스트 오염 방지
+
+
 def test_discord_step_other_400_does_not_loop(monkeypatch):
     """tools 미지원이 아닌 다른 400은 폴백하지 않고 오류를 반환한다(무한 재귀 방지)."""
     async def fake_layers(host, model):

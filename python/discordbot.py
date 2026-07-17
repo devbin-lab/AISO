@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 from collections import defaultdict, deque
@@ -39,6 +40,9 @@ STATE_FILE = "state.json"      # data_dir 안에 봇 동적 상태 영속
 MAX_TOOL_TURNS = 6             # 서버 구성 루프의 생성 턴 상한(폭주 방지)
 APPROVAL_TIMEOUT_S = 120       # 서버 구성 승인 버튼 대기 시간(초) — 지나면 자동 취소
 SYSTEM_PROMPT = "너는 Aiso, 사용자 PC에서 로컬로 도는 도우미다. 한국어로 간결하고 친근하게 답한다."
+
+
+@functools.lru_cache(maxsize=1)  # 완전 정적 문자열 — 매 메시지 재조립하지 않고 1회 계산해 캐시
 def _tools_prompt() -> str:
     import discordops  # noqa: PLC0415 — 설계 기준·형식은 discordops가 단일 출처
 
@@ -96,7 +100,6 @@ class _State:
     def __init__(self) -> None:
         self.client: "discord.Client | None" = None
         self.task: "asyncio.Task | None" = None
-        self.config: dict = {}
         self.generate: GenerateFn | None = None
         self.step: StepFn | None = None    # 툴콜 지원 한 턴 생성(서버 구성 루프용)
         self.research: ResearchFn | None = None  # 웹 조사 생성(브리핑 예약용)
@@ -204,18 +207,40 @@ async def _resolve_member(guild: "discord.Guild", uid: str):
 
 
 async def _lock_overwrites(guild: "discord.Guild") -> dict:
-    """명령 채널 잠금 권한 — @everyone 숨김, 봇·소유자·서버주인만 열람."""
+    """명령 채널 잠금 권한 — @everyone 숨김, 봇·소유자·서버주인·허용목록 사용자만 열람.
+
+    허용목록 사용자에게 view를 주지 않으면 is_authorized가 인가해도 채널이 안 보여 말을 걸 수 없다
+    (/allow가 응답만 하고 실제로 작동 안 하던 문제). 허용목록 변경 시 _refresh_command_overwrites로 갱신."""
     ow = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
     }
+    view_send = discord.PermissionOverwrite(view_channel=True, send_messages=True)
     owner_m = await _resolve_member(guild, _S.owner_id)
     if owner_m is not None:
-        ow[owner_m] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        ow[owner_m] = view_send
     guild_owner = guild.owner or await _resolve_member(guild, str(guild.owner_id or ""))
     if guild_owner is not None:
-        ow[guild_owner] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        ow[guild_owner] = view_send
+    for uid in list(_S.allowlist):
+        m = await _resolve_member(guild, uid)
+        if m is not None:
+            ow[m] = view_send
     return ow
+
+
+async def _refresh_command_overwrites() -> None:
+    """허용목록이 바뀌면 명령 채널 권한을 다시 적용해 새 허용자가 채널을 볼 수 있게 한다."""
+    guild = bound_guild()
+    if guild is None or not _S.channel_id.isdigit():
+        return
+    ch = guild.get_channel(int(_S.channel_id))
+    if ch is None:
+        return
+    try:
+        await ch.edit(overwrites=await _lock_overwrites(guild), reason="Aiso 허용목록 갱신")
+    except Exception:  # noqa: BLE001 — 권한 부족 등은 조용히 무시(다음 재연결 시 반영)
+        pass
 
 
 async def _ensure_command_channel(guild: "discord.Guild") -> None:
@@ -481,6 +506,7 @@ def _build_client(generate: GenerateFn) -> "discord.Client":
             return
         _S.allowlist.add(str(user.id))
         _save_state()
+        await _refresh_command_overwrites()  # 새 허용자가 #aiso 채널을 볼 수 있게 권한 갱신
         await interaction.response.send_message(f"✅ 허용 추가: {user} (`{user.id}`)", ephemeral=True)
 
     @allow.command(name="remove", description="허용 사용자를 제거합니다")
@@ -491,6 +517,7 @@ def _build_client(generate: GenerateFn) -> "discord.Client":
             return
         _S.allowlist.discard(str(user.id))
         _save_state()
+        await _refresh_command_overwrites()  # 제거된 사용자의 채널 접근 회수
         await interaction.response.send_message(f"🗑 허용 제거: {user} (`{user.id}`)", ephemeral=True)
 
     @allow.command(name="list", description="허용 사용자 목록을 봅니다")
@@ -662,7 +689,6 @@ async def apply_config(
     step이 주어지면 채팅이 서버 구성·전송·예약 도구를 쓰는 툴 루프로 동작하고,
     research가 주어지면 브리핑 예약이 발화 시각에 웹 조사로 내용을 생성한다."""
     await stop()
-    _S.config = dict(config)
     _S.generate = generate
     _S.step = step
     _S.research = research
@@ -688,10 +714,20 @@ async def apply_config(
             _S.last_error = "Message Content Intent가 꺼져 있습니다 — 개발자 포털에서 켜세요."
             print("[discord] " + _S.last_error)
         except asyncio.CancelledError:
-            raise
+            raise  # stop()이 취소한 경우 — 거기서 이미 client.close() 처리
         except Exception as e:  # noqa: BLE001
             _S.last_error = f"봇 종료: {e}"
             print("[discord] " + _S.last_error)
+        # 취소가 아닌 종료(로그인 실패·정상 종료)에 도달. 로그인 단계 실패는 client.close()를 부르지
+        # 않아 is_closed()가 False로 남아 is_running()/status()가 '실행 중'으로 오보하고 세션이 상주한다.
+        # 여기서 확실히 닫고 참조를 되돌린다(취소 경로는 위에서 raise로 건너뜀).
+        try:
+            if not client.is_closed():
+                await client.close()
+        except Exception:  # noqa: BLE001
+            pass
+        if _S.client is client:
+            _S.client = None
 
     _S.task = asyncio.create_task(_runner())
     _S.sched_task = asyncio.create_task(_sched_runner(client))  # 예약 러너(클라이언트 준비 후 동작)

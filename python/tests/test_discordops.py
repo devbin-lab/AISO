@@ -222,6 +222,31 @@ def test_one_bad_op_rejects_whole_batch():
 
 
 # ── 렌더링 ─────────────────────────────────────────────────────────────
+def test_preview_shows_set_topic_new_text():
+    """승인 미리보기는 set_topic의 새 주제 내용을 반드시 노출한다(소유자가 보고 승인하도록)."""
+    snap = _snap()
+    clean, errs = ops.validate_ops(
+        [{"action": "set_topic", "target": "일반", "topic": "공지 전용 채널입니다"}], snap
+    )
+    assert errs == []
+    text = ops.render_ops_preview(clean, snap)
+    assert "공지 전용 채널입니다" in text  # 새 주제가 미리보기에 보인다
+
+
+def test_package_bundle_keeps_busybox():
+    """[회귀 가드] 패키징 필터가 busybox.exe를 제외하면 안 된다 — grep/sed/sh 등 unix 유틸이
+    전부 busybox 포워더라 제외 시 프로덕션에서 run_command가 전멸한다(과거 SEV-5 회귀)."""
+    import json as _json
+
+    pkg = Path(__file__).resolve().parent.parent.parent / "package.json"
+    data = _json.loads(pkg.read_text(encoding="utf-8"))
+    tools_entry = next(
+        e for e in data["build"]["extraResources"] if e.get("from") == "tools"
+    )
+    joined = " ".join(tools_entry.get("filter", []))
+    assert "busybox.exe" not in joined, "busybox.exe를 번들에서 제외하면 grep/sed/sh가 깨진다"
+
+
 def test_preview_emphasizes_irreversible_delete():
     clean, errs = ops.validate_ops(
         [{"action": "delete", "target": "일반"}, {"action": "create_category", "name": "QA"}], _snap()

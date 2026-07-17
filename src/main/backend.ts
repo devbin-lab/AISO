@@ -26,6 +26,14 @@ let proc: ChildProcess | null = null
 let info: BackendInfo = { state: 'stopped', port: null }
 const listeners = new Set<(i: BackendInfo) => void>()
 
+// 크래시 자동 복구 — 트레이 상주로 장시간 무인 가동 중 사이드카가 죽으면 봇·예약도 함께 죽는다.
+// 비정상 종료(의도된 stopBackend가 아닌) 시 지수 백오프로 재기동하고, 'ready'가 되면 카운터를 리셋한다.
+// 재기동 성공 시 onBackendChange('ready')가 디스코드 설정을 자동 재적용해 봇이 되살아난다.
+const MAX_CRASH_RESTARTS = 5
+let crashRestarts = 0
+let lastOllamaHost = ''
+let restartTimer: ReturnType<typeof setTimeout> | null = null
+
 function set(patch: Partial<BackendInfo>): void {
   info = { ...info, ...patch }
   listeners.forEach((f) => f(info))
@@ -72,6 +80,11 @@ function resolvePython(codeDir: string): string {
 
 export async function startBackend(ollamaHost: string): Promise<void> {
   if (proc) return
+  lastOllamaHost = ollamaHost // 크래시 재기동 시 재사용
+  if (restartTimer) {
+    clearTimeout(restartTimer)
+    restartTimer = null
+  }
   // 앱 코드(main.py 등)는 extraResources로 복사된다: 패키징=resources/python, 개발=<repo>/python.
   const dir = app.isPackaged ? join(process.resourcesPath, 'python') : join(app.getAppPath(), 'python')
   const py = resolvePython(dir)
@@ -110,8 +123,20 @@ export async function startBackend(ollamaHost: string): Promise<void> {
   proc.on('exit', (code) => {
     console.log(`[backend] 종료 code=${code}`)
     proc = null
+    // state==='stopped'는 의도된 종료(stopBackend/앱 종료) → 재기동 안 함.
     if (info.state !== 'stopped') {
       set({ state: 'error', detail: stderrTail || `프로세스 종료 (code ${code})` })
+      if (crashRestarts < MAX_CRASH_RESTARTS) {
+        crashRestarts += 1
+        const backoff = Math.min(30_000, 1000 * 2 ** (crashRestarts - 1)) // 1s→2s→4s…최대 30s
+        console.log(`[backend] 비정상 종료 — ${backoff}ms 후 재기동 (${crashRestarts}/${MAX_CRASH_RESTARTS})`)
+        restartTimer = setTimeout(() => {
+          restartTimer = null
+          if (info.state !== 'stopped') void startBackend(lastOllamaHost)
+        }, backoff)
+      } else {
+        console.error('[backend] 재기동 상한 도달 — 자동 복구 중단')
+      }
     }
   })
   proc.on('error', (err) => {
@@ -129,6 +154,7 @@ export async function startBackend(ollamaHost: string): Promise<void> {
         headers: { 'X-Aiso-Token': AUTH_TOKEN }
       })
       if (r.ok) {
+        crashRestarts = 0 // 정상 준비 → 크래시 카운터 리셋
         set({ state: 'ready' })
         console.log('[backend] 준비 완료')
         return
@@ -142,6 +168,10 @@ export async function startBackend(ollamaHost: string): Promise<void> {
 }
 
 export function stopBackend(): void {
+  if (restartTimer) {
+    clearTimeout(restartTimer)
+    restartTimer = null
+  }
   if (proc && proc.pid) {
     set({ state: 'stopped' })
     const pid = proc.pid

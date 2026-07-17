@@ -432,7 +432,8 @@ def render_ops_preview(ops: list[dict], snapshot: dict) -> str:
             dest = op.get("category") or "무소속"
             lines.append(f"{i}. 📁 이동: {_disp(op.get('target'))} → {dest}")
         elif a == "set_topic":
-            lines.append(f"{i}. ✏ 주제 설정: #{_disp(op.get('target'))}")
+            t = op.get("topic")
+            lines.append(f"{i}. ✏ 주제 설정: #{_disp(op.get('target'))} → {t if t else '(주제 비움)'}")
         elif a == "delete":
             deletes += 1
             lines.append(f"{i}. 🗑 **삭제(복구 불가)**: {_disp(op.get('target'))}")

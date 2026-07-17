@@ -253,7 +253,11 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
         setDiscordToken('')
       }
       const r = await window.api.discord.apply()
-      if (!r.ok) setDiscordStat({ running: false, last_error: r.detail ?? '알 수 없음' })
+      if (!r.ok) {
+        // 적용 자체가 실패하면 그 사유를 표시하고, status 폴링이 이 메시지를 덮지 않도록 재조회를 건너뛴다.
+        setDiscordStat({ running: false, last_error: r.detail ?? '알 수 없음' })
+        return
+      }
       // 봇 로그인 + 채널 생성까지 시간이 걸리므로 여러 번 뒤늦게 재조회
       refreshDiscord()
       window.setTimeout(refreshDiscord, 1500)
