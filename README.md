@@ -10,7 +10,7 @@
 
 <br/>
 
-![version](https://img.shields.io/badge/version-0.2.0-F16522?style=flat-square)
+![version](https://img.shields.io/badge/version-0.2.1-F16522?style=flat-square)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square&logo=windows)
 ![license](https://img.shields.io/badge/license-Apache--2.0-4c9a2a?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-47848F?style=flat-square&logo=electron&logoColor=white)
@@ -109,7 +109,7 @@
 | 필수 | [Ollama](https://ollama.com/download) 설치 | — |
 
 ### 설치 단계
-1. [Releases](https://github.com/devbin-lab/AISO/releases/latest) 페이지에서 **`Aiso-0.2.0-Setup.exe`** 다운로드
+1. [Releases](https://github.com/devbin-lab/AISO/releases/latest) 페이지에서 **`Aiso-0.2.1-Setup.exe`** 다운로드
 2. 설치 파일 실행 → 설치 경로 선택 후 설치
 3. Aiso 실행
 
