@@ -159,3 +159,6 @@ dist/
 python/.venv/
 __pycache__/
 *.pyc
+
+# Local development documents
+/개발 관련 문서/
