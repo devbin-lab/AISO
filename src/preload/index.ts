@@ -11,6 +11,15 @@ import type {
 } from '../shared/conversation'
 import type { SkillMeta } from '../shared/skill'
 import type { DiscordStatus, DiscordSchedule } from '../shared/discord'
+import type { ComfyLaunchResult, ComfySurfaceRequest } from '../shared/comfy'
+import type {
+  ComfyModelImportProgress,
+  ComfyModelImportRequest,
+  ComfyModelImportResult,
+  ComfyModelProfile,
+  ComfyModelProfilePatch,
+  ComfyModelRegistry
+} from '../shared/comfy-model'
 
 // 사이드카 인증 토큰 — preload 초기화 시 1회 동기 조회 후 캐시(세션 내 불변).
 // 렌더러 fetch는 이 값을 X-Aiso-Token 헤더로 실어 백엔드 인증을 통과한다.
@@ -42,6 +51,29 @@ const api = {
     }
   },
   pickWorkspace: (): Promise<string | null> => ipcRenderer.invoke('workspace:pick'),
+  comfy: {
+    pickInstall: (): Promise<string | null> => ipcRenderer.invoke('comfy:pick-install'),
+    start: (): Promise<ComfyLaunchResult> => ipcRenderer.invoke('comfy:start'),
+    setSurface: (request: ComfySurfaceRequest): Promise<void> =>
+      ipcRenderer.invoke('comfy:surface:set', request),
+    reloadSurface: (): Promise<void> => ipcRenderer.invoke('comfy:surface:reload'),
+    models: {
+      list: (): Promise<ComfyModelRegistry> => ipcRenderer.invoke('comfy:models:list'),
+      importAssets: (request: ComfyModelImportRequest): Promise<ComfyModelImportResult> =>
+        ipcRenderer.invoke('comfy:models:import', request),
+      update: (id: string, patch: ComfyModelProfilePatch): Promise<ComfyModelProfile> =>
+        ipcRenderer.invoke('comfy:models:update', id, patch),
+      unregister: (id: string): Promise<boolean> =>
+        ipcRenderer.invoke('comfy:models:unregister', id),
+      onImportProgress: (cb: (progress: ComfyModelImportProgress) => void) => {
+        const listener = (_e: unknown, progress: ComfyModelImportProgress): void => cb(progress)
+        ipcRenderer.on('comfy:model-import-progress', listener)
+        return () => {
+          ipcRenderer.removeListener('comfy:model-import-progress', listener)
+        }
+      }
+    }
+  },
   setWindowTheme: (mode: 'dark' | 'light') => ipcRenderer.invoke('window:set-theme', mode),
   /** 공장초기화 — 설정·대화·사용량 등 앱 데이터 삭제(개발자 모드). 호출 후 창을 리로드하면 최초 상태. */
   factoryReset: (): Promise<void> => ipcRenderer.invoke('app:factory-reset'),

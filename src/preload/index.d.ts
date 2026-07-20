@@ -11,6 +11,15 @@ import type {
 } from '../shared/conversation'
 import type { SkillMeta } from '../shared/skill'
 import type { DiscordStatus, DiscordSchedule } from '../shared/discord'
+import type { ComfyLaunchResult, ComfySurfaceRequest } from '../shared/comfy'
+import type {
+  ComfyModelImportProgress,
+  ComfyModelImportRequest,
+  ComfyModelImportResult,
+  ComfyModelProfile,
+  ComfyModelProfilePatch,
+  ComfyModelRegistry
+} from '../shared/comfy-model'
 
 export interface AisoAPI {
   ping: () => Promise<PingResult>
@@ -24,6 +33,19 @@ export interface AisoAPI {
     onStatus: (cb: (info: BackendInfo) => void) => () => void
   }
   pickWorkspace: () => Promise<string | null>
+  comfy: {
+    pickInstall: () => Promise<string | null>
+    start: () => Promise<ComfyLaunchResult>
+    setSurface: (request: ComfySurfaceRequest) => Promise<void>
+    reloadSurface: () => Promise<void>
+    models: {
+      list: () => Promise<ComfyModelRegistry>
+      importAssets: (request: ComfyModelImportRequest) => Promise<ComfyModelImportResult>
+      update: (id: string, patch: ComfyModelProfilePatch) => Promise<ComfyModelProfile>
+      unregister: (id: string) => Promise<boolean>
+      onImportProgress: (cb: (progress: ComfyModelImportProgress) => void) => () => void
+    }
+  }
   setWindowTheme: (mode: 'dark' | 'light') => Promise<void>
   factoryReset: () => Promise<void>
   usage: {

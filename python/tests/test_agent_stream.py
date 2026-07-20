@@ -281,6 +281,52 @@ def test_dirty_triggers_reindex(env):
     assert len(env.reindex_calls) >= 1  # dirty + indexed → _fire_reindex 호출
 
 
+def test_dirty_reindexes_when_next_model_turn_fails(env):
+    env.mp.setattr(agent, "rag_status", lambda root: {"indexed": True, "embed_model": "e", "count": 1})
+
+    async def fake_search(root, host, q, k):
+        return []
+
+    env.mp.setattr(agent, "rag_search", fake_search)
+    env.mp.setattr(agent, "format_context", lambda results: "")
+    events = env.run(
+        FakeChat(
+            [
+                {"calls": [("write_file", {"path": "a.md", "content": "hi"})]},
+                {"raise": ConnectionError("refused")},
+            ]
+        ),
+        approval_mode="auto",
+    )
+    assert "error" in types(events)
+    assert len(env.reindex_calls) >= 1
+
+
+def test_dirty_reindexes_when_agent_stream_is_cancelled(env):
+    import asyncio as _aio
+
+    import pytest
+
+    env.mp.setattr(agent, "rag_status", lambda root: {"indexed": True, "embed_model": "e", "count": 1})
+
+    async def fake_search(root, host, q, k):
+        return []
+
+    env.mp.setattr(agent, "rag_search", fake_search)
+    env.mp.setattr(agent, "format_context", lambda results: "")
+    with pytest.raises(_aio.CancelledError):
+        env.run(
+            FakeChat(
+                [
+                    {"calls": [("write_file", {"path": "a.md", "content": "hi"})]},
+                    {"raise": _aio.CancelledError()},
+                ]
+            ),
+            approval_mode="auto",
+        )
+    assert len(env.reindex_calls) >= 1
+
+
 # ── 치명적 오류: 잘못된 워크스페이스 / 연결 실패 ────────────
 def test_fatal_bad_workspace(env, tmp_path):
     # 존재하지 않는 폴더를 '지정'하면 치명적 오류. (빈 문자열=미지정은 무폴더 모드로 별도 테스트)

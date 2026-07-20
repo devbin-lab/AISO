@@ -9,6 +9,7 @@ import { ConfirmHost } from './components/ConfirmDialog'
 import HomeView from './views/HomeView'
 import ChatView from './views/ChatView'
 import AgentView from './views/AgentView'
+import ComfyView from './views/ComfyView'
 import SettingsView from './views/SettingsView'
 import { applyTheme } from './lib/theme'
 import { authHeaders } from './lib/backend'
@@ -146,6 +147,14 @@ function App(): React.JSX.Element {
               onPickWorkspace={pickWorkspace}
               onSaveSettings={saveSettings}
               convCollapsed={agentConvCollapsed}
+            />
+          </div>
+          <div className={wrap('comfy')}>
+            <ComfyView
+              settings={settings}
+              backend={backend}
+              active={view === 'comfy'}
+              onSaveSettings={saveSettings}
             />
           </div>
           <div className={wrap('settings')}>

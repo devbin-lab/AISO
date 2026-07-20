@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AppSettings, ReasoningEffort } from '../../../shared/settings'
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
-import type { AgentEvent, ApprovalMode, PlanStep } from '../../../shared/agent'
+import type {
+  AgentEvent,
+  ApprovalMode,
+  ComfyGeneratedImage,
+  PlanStep
+} from '../../../shared/agent'
 import type { ConversationMeta } from '../../../shared/conversation'
 import { TOOL_LABEL, APPROVAL_MODES } from '../../../shared/agent'
 import { streamAgent, approveAgent, type AgentMessage } from '../lib/agent'
@@ -26,6 +31,8 @@ import {
   TerminalIcon
 } from '../components/icons'
 import Dropdown, { type DropdownOption } from '../components/Dropdown'
+import GeneratedImage from '../components/GeneratedImage'
+import { ensureComfyReadyForAgent, looksLikeImageGenerationRequest } from '../lib/comfy'
 
 const EFFORT_OPTIONS: DropdownOption[] = [
   { value: 'low', label: '낮음', hint: '빠름' },
@@ -52,6 +59,7 @@ type Item =
       output?: string
       screenshot?: string
     }
+  | { kind: 'image'; image: ComfyGeneratedImage }
   | { kind: 'meta'; tokens: number; seconds: number } // 실행 완료 후 토큰·소요시간 요약줄
 
 interface Props {
@@ -293,6 +301,8 @@ function AgentView({
         return next.map((i) =>
           i.kind === 'tool' && i.callId === ev.id ? { ...i, screenshot: ev.data } : i
         )
+      } else if (ev.type === 'image_result') {
+        next.push({ kind: 'image', image: ev.image })
       } else if (ev.type === 'done') {
         if (openAsst) next[li] = { ...openAsst, streaming: false }
       }
@@ -343,6 +353,24 @@ function AgentView({
         : String(Math.random())
 
     try {
+      const comfyProfiles = await window.api.comfy.models
+        .list()
+        .then((registry) => registry.profiles.filter((profile) => profile.agentEnabled))
+        .catch(() => [])
+      const previousAssistant = [...historyRef.current]
+        .slice(0, -1)
+        .reverse()
+        .find((message) => message.role === 'assistant')?.content ?? ''
+      if (comfyProfiles.length > 0 && looksLikeImageGenerationRequest(text, previousAssistant)) {
+        setNote('ComfyUI 실행 상태를 확인하고 있습니다…')
+        await ensureComfyReadyForAgent(
+          backend.port!,
+          settings.comfyBaseUrl,
+          settings.comfyInstallPath,
+          ac.signal
+        )
+        setNote(null)
+      }
       await streamAgent(
         backend.port!,
         settings,
@@ -350,10 +378,12 @@ function AgentView({
         historyRef.current,
         sessionRef.current,
         approvalMode,
+        comfyProfiles,
         reduce,
         ac.signal
       )
     } catch (err) {
+      setNote(null)
       if ((err as Error).name !== 'AbortError') reduce({ type: 'error', error: (err as Error).message })
     } finally {
       setRunning(false)
@@ -568,6 +598,8 @@ function AgentView({
                   {fmtTokens(it.tokens)} 토큰 · {fmtDuration(it.seconds)}
                 </div>
               )
+            if (it.kind === 'image')
+              return <GeneratedImage key={i} image={it.image} backendPort={backend.port} />
             // tool
             const path = argPath(it.args)
             const ToolIcon =

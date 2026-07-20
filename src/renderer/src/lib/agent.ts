@@ -1,5 +1,6 @@
 import { type AppSettings, resolveTemperature } from '../../../shared/settings'
 import type { AgentEvent, ApprovalMode } from '../../../shared/agent'
+import type { ComfyModelProfile } from '../../../shared/comfy-model'
 import { authHeaders } from './backend'
 
 export interface AgentMessage {
@@ -15,6 +16,7 @@ export async function streamAgent(
   messages: AgentMessage[],
   sessionId: string,
   approvalMode: ApprovalMode,
+  comfyProfiles: ComfyModelProfile[],
   onEvent: (e: AgentEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {
@@ -34,7 +36,9 @@ export async function streamAgent(
       ollama_host: settings.ollamaHost,
       rag_enabled: settings.ragEnabled,
       rag_top_k: settings.ragTopK,
-      keep_alive: settings.keepAlive
+      keep_alive: settings.keepAlive,
+      comfy_base_url: settings.comfyBaseUrl,
+      comfy_profiles: comfyProfiles
     }),
     signal
   })

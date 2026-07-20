@@ -8,7 +8,7 @@
 
 파일과 문서를 내 PC에서 다루고, 필요한 작업은 실행 결과로 확인합니다.
 
-![version](https://img.shields.io/badge/version-0.2.1-F16522?style=flat-square)
+![version](https://img.shields.io/badge/version-0.3.0-F16522?style=flat-square)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-47848F?style=flat-square&logo=electron&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama-local%20LLM-black?style=flat-square&logo=ollama)
@@ -127,6 +127,16 @@ Aiso는 범용 코딩 에이전트가 아닙니다. 사용자의 프로그램이
 
 Discord 봇 토큰은 Electron `safeStorage`를 사용해 별도로 보관합니다. 서버 변경, 발신, 예약 등록은 적용 전에 승인을 받습니다.
 
+### ComfyUI 로컬 이미지 생성
+
+- Aiso 내부에서 사용자가 설치한 로컬 ComfyUI 화면을 열어 직접 작업
+- Windows Portable ComfyUI의 시작·연결 상태와 GPU 정보를 설정에서 확인
+- 사용자가 보유한 모델 파일을 ComfyUI의 지정 모델 폴더로 복사·등록하고 모델 프로필 관리
+- 명확한 이미지 요청에서만 Agent가 등록된 모델과 검증된 워크플로를 선택해 생성
+- 결과 카드에 선택 모델, seed, 생성값, 실제 프롬프트와 ComfyUI 노드 그래프 표시
+
+모델 파일은 Aiso에 번들하지 않으며 사용자의 ComfyUI 설치본에 보관합니다. Agent 자동 생성은 현재 검증된 SD 1.5·SDXL·FLUX.1 split 템플릿만 지원합니다.
+
 ### 데스크톱 기능
 
 - 채팅과 에이전트 대화의 다중 대화방
@@ -205,12 +215,12 @@ Discord 봇 토큰은 Electron `safeStorage`를 사용해 별도로 보관합니
 
 최신 Windows 설치본은 [GitHub Releases](https://github.com/devbin-lab/AISO/releases/latest)에서 받을 수 있습니다.
 
-현재 버전: `0.2.1`
+현재 버전: `0.3.0`
 
 설치 파일:
 
 ```text
-Aiso-0.2.1-Setup.exe
+Aiso-0.3.0-Setup.exe
 ```
 
 ### 시스템 요구사항
@@ -268,6 +278,7 @@ ollama pull bge-m3
 - 문서 의미 검색이 필요하면 `bge-m3`를 설치하고 RAG를 활성화합니다.
 - Discord 기능이 필요하면 봇 토큰을 저장하고 연동을 활성화합니다.
 - 예약과 봇을 창을 닫은 뒤에도 유지하려면 트레이 상주를 켭니다.
+- 이미지 생성을 사용하려면 별도로 설치한 ComfyUI의 주소와 Windows Portable 경로를 설정하고, 사용할 모델을 ComfyUI 모델 폴더에 등록합니다.
 
 ## 아키텍처
 
@@ -286,6 +297,7 @@ flowchart LR
     Sidecar --> Workspace["Selected Workspace"]
     Sidecar --> Web["Public Web"]
     Sidecar --> Discord["Discord API"]
+    Sidecar --> ComfyUI["User-installed ComfyUI"]
 ```
 
 ### 구성 요소
@@ -304,6 +316,8 @@ flowchart LR
 | `python/websearch.py`, `python/webfetch.py` | 웹 검색과 안전한 본문 수집 |
 | `python/runskill.py` | 자동화 스킬 생성 및 실행 |
 | `python/discord*.py` | Discord 봇, 서버 작업, 예약 관리 |
+| `python/comfy_*.py` | ComfyUI 상태 조회, 안전한 워크플로 생성, 작업 추적, 출력 프록시 |
+| `src/main/comfy*.ts` | ComfyUI 설정, Portable 실행, 모델 프로필·파일 등록 |
 | `pyruntime` | 설치본에 포함되는 Python 런타임 |
 | `tools` | 검증에 사용하는 Windows 도구 체인 |
 
@@ -320,6 +334,7 @@ Electron 메인 프로세스는 실행 시 사용 가능한 로컬 포트를 확
 | 문서 처리 | pypdf, openpyxl, python-docx, olefile |
 | 웹 검증 | Playwright |
 | Discord | discord.py |
+| 이미지 생성 | 사용자가 설치한 로컬 ComfyUI |
 | 저장소 | Node.js SQLite, JSON, NumPy 인덱스 |
 | 패키징 | electron-builder, NSIS, 임베디드 Python 런타임 |
 
@@ -366,7 +381,8 @@ python/.venv/Scripts/python.exe -m pytest python/tests -q
 - 코드 실행은 제한된 검증 기능이며 완전한 보안 샌드박스가 아닙니다.
 - 자동 모드에서는 작업 폴더 내부 파일을 사용자 확인 없이 변경할 수 있습니다.
 - Discord 예약은 Aiso 백엔드가 실행 중일 때만 처리됩니다.
-- ComfyUI 이미지 생성은 아직 구현되어 있지 않습니다.
+- ComfyUI 이미지 생성은 선택 기능이며, ComfyUI와 모델 파일은 사용자가 별도로 설치해야 합니다.
+- Agent 자동 생성은 현재 SD 1.5·SDXL·FLUX.1 split의 검증된 텍스트→이미지 워크플로만 지원합니다. FLUX.2, custom·외부 워크플로, img2img, inpaint, ControlNet, 업스케일은 후속 범위입니다.
 - `.xls` 같은 일부 구형 문서 형식은 직접 지원하지 않습니다.
 
 ## 데이터와 네트워크
@@ -388,6 +404,7 @@ python/.venv/Scripts/python.exe -m pytest python/tests -q
 | 모델 설치 | Ollama 모델 저장소 | 사용자가 설치를 실행할 때 |
 | 웹 조사 | DuckDuckGo 및 선택한 공개 웹 페이지 | 웹 검색이 활성화된 경우 |
 | Discord | Discord API | 연동을 활성화한 경우 |
+| 이미지 생성 | 사용자가 설정한 로컬 ComfyUI | `127.0.0.1` 또는 `localhost` 주소만 허용 |
 | 업데이트 | GitHub Releases | 설치본의 업데이트 확인 시 |
 
 Aiso는 공개 웹 페이지를 읽을 때 내부 네트워크 주소와 로컬 서비스를 차단합니다. 다만 외부 서비스 기능을 활성화하면 요청 내용이나 생성된 메시지가 해당 서비스로 전송될 수 있으므로 사용 전에 기능별 동작을 확인해야 합니다.
@@ -402,6 +419,17 @@ Aiso는 공개 웹 페이지를 읽을 때 내부 네트워크 주소와 로컬 
 ## 버전 변천사
 
 아래 기록은 저장소에 남아 있는 Git 릴리스 태그를 기준으로 정리했습니다.
+
+### v0.3.0 — 2026-07-20
+
+사용자가 준비한 로컬 ComfyUI와 모델을 Aiso에서 안전하게 연결하고, 검증된 텍스트→이미지 워크플로를 Agent가 실행할 수 있게 한 기능 릴리스입니다.
+
+- Aiso 내부 ComfyUI 화면과 Windows Portable 시작·연결 관리
+- ComfyUI 모델 파일 등록, 해시 검증, 프로필·기본 생성값 관리
+- 명확한 이미지 요청에만 실행되는 Agent 이미지 생성 도구와 모델 자동 선택
+- SD 1.5·SDXL·FLUX.1 split용 신뢰 워크플로, 작업 상태·재시도·취소 계약
+- 인증된 출력 프록시, 이미지 결과 카드, 실제 ComfyUI 노드 그래프 확인
+- ComfyUI 미설치·오프라인 상태가 기존 채팅·Agent 동작을 방해하지 않도록 분리
 
 ### v0.2.1 — 2026-07-18
 

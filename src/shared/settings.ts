@@ -50,6 +50,10 @@ export interface AppSettings {
   trayResident: boolean
   /** 윈도우 로그인 시 자동 실행 — 켜지면 부팅 후 앱이 트레이로 자동 실행돼 봇이 재연결된다. */
   autoLaunch: boolean
+  /** 사용자가 설치한 로컬 ComfyUI 서버 주소. 원격 주소는 연동 계층에서 거부한다. */
+  comfyBaseUrl: string
+  /** ComfyUI Windows Portable의 최상위 폴더. 비어 있으면 사용자가 직접 실행한 서버에만 연결한다. */
+  comfyInstallPath: string
 }
 
 /** 정리·분류 / 코딩·일반 고정 온도 — 사용자 조정 불가(코드 상수). */
@@ -121,5 +125,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   forceOnboarding: false,
   discordEnabled: false,
   trayResident: false,
-  autoLaunch: false
+  autoLaunch: false,
+  comfyBaseUrl: 'http://127.0.0.1:8188',
+  comfyInstallPath: ''
 }

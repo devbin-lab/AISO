@@ -1,12 +1,13 @@
 import { useLayoutEffect, useRef, useState } from 'react'
-import { HomeIcon, ChatIcon, AgentIcon, SlidersIcon } from './icons'
+import { HomeIcon, ChatIcon, AgentIcon, ComfyIcon, SlidersIcon } from './icons'
 
-export type ViewKey = 'home' | 'chat' | 'agent' | 'settings'
+export type ViewKey = 'home' | 'chat' | 'agent' | 'comfy' | 'settings'
 
 const NAV: { key: ViewKey; label: string; Icon: typeof HomeIcon }[] = [
   { key: 'home', label: '홈', Icon: HomeIcon },
   { key: 'chat', label: '채팅', Icon: ChatIcon },
   { key: 'agent', label: '에이전트', Icon: AgentIcon },
+  { key: 'comfy', label: 'ComfyUI', Icon: ComfyIcon },
   { key: 'settings', label: '설정', Icon: SlidersIcon }
 ]
 

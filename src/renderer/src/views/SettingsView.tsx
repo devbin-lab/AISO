@@ -15,6 +15,7 @@ import Select from '../components/Select'
 import Segmented from '../components/Segmented'
 import Dropdown from '../components/Dropdown'
 import { confirmDialog } from '../components/ConfirmDialog'
+import ComfyModelManager from '../components/ComfyModelManager'
 import { unloadModels } from '../lib/ollama'
 
 const ONOFF = [
@@ -80,6 +81,7 @@ function rangeFill(pct: number): React.CSSProperties {
 
 type SectionId =
   | 'engine'
+  | 'comfy'
   | 'generation'
   | 'search'
   | 'resource'
@@ -117,6 +119,15 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
     await onSave(form)
     setSaved(true)
     window.setTimeout(() => setSaved(false), 1800)
+  }
+
+  const pickComfyInstall = async (): Promise<void> => {
+    try {
+      const selected = await window.api.comfy.pickInstall()
+      if (selected) set('comfyInstallPath', selected)
+    } catch {
+      // 대화상자 취소나 IPC 오류는 현재 입력값을 보존한다.
+    }
   }
 
   // ── 자동 업데이트 (GitHub 릴리스) ──
@@ -348,6 +359,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
 
   const navItems: { id: SectionId; label: string }[] = [
     { id: 'engine', label: '엔진' },
+    { id: 'comfy', label: 'ComfyUI' },
     { id: 'generation', label: '생성' },
     { id: 'search', label: '검색·RAG' },
     { id: 'resource', label: '리소스' },
@@ -432,6 +444,59 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
               />
             </div>
           </div>
+        </section>
+        )}
+        {activeSection === 'comfy' && (
+        <section>
+          <div className="group__title">ComfyUI 연결</div>
+          <div className="group">
+            <div className="row">
+              <div>
+                <div className="row__label">로컬 서버 주소</div>
+                <div className="row__hint">
+                  Aiso는 보안을 위해 이 PC의 127.0.0.1, localhost 또는 ::1 주소만 연결합니다.
+                </div>
+              </div>
+              <input
+                className="input"
+                value={form.comfyBaseUrl}
+                onChange={(e) => set('comfyBaseUrl', e.target.value)}
+                placeholder="http://127.0.0.1:8188"
+                spellCheck={false}
+              />
+            </div>
+            <div className="row">
+              <div>
+                <div className="row__label">Windows Portable 폴더</div>
+                <div className="row__hint">
+                  <code>python_embeded</code>와 <code>ComfyUI</code> 폴더가 들어 있는 최상위 폴더를 선택합니다.
+                  비워 두면 직접 실행한 서버에만 연결합니다.
+                </div>
+              </div>
+              <div className="row__control comfy-setting-path">
+                <input
+                  className="input"
+                  value={form.comfyInstallPath}
+                  readOnly
+                  placeholder="선택되지 않음"
+                  title={form.comfyInstallPath || undefined}
+                />
+                <button className="btn btn--ghost2 btn--sm" type="button" onClick={() => void pickComfyInstall()}>
+                  폴더 선택
+                </button>
+              </div>
+            </div>
+            <div className="row">
+              <div>
+                <div className="row__label">연동 방식</div>
+                <div className="row__hint">
+                  ComfyUI는 Aiso에 포함되지 않으며 별도 프로세스로 실행됩니다. 모델 설치·업데이트·삭제도 사용자가 직접 관리합니다.
+                </div>
+              </div>
+              <span className="model-chip">사용자 설치본 연결</span>
+            </div>
+          </div>
+          <ComfyModelManager installPath={settings.comfyInstallPath} />
         </section>
         )}
         {activeSection === 'generation' && (

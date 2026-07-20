@@ -9,14 +9,23 @@ import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent import MAX_GEN_TOKENS, resolve_approval, run_agent, run_research_chat
+from comfy_client import (
+    ComfyAPIError,
+    DEFAULT_COMFY_BASE_URL,
+    InvalidComfyURL,
+    fetch_output_image as fetch_comfy_output_image,
+    get_checkpoints as get_comfy_checkpoints,
+    get_health as get_comfy_health,
+)
 from rag import RagError, build_index
 from rag import search as rag_search
 from rag import status as rag_status
@@ -185,6 +194,55 @@ async def health(host: str | None = None):
         return {"status": "ok", "ollama": True, "models": models}
     except Exception as e:  # noqa: BLE001 — 도달 실패 사유를 그대로 전달
         return {"status": "ok", "ollama": False, "models": [], "detail": str(e)[:200]}
+
+
+@app.get("/comfy/health")
+async def comfy_health(base_url: str = DEFAULT_COMFY_BASE_URL):
+    """사용자가 연결한 로컬 ComfyUI의 버전·장치 상태를 조회한다."""
+    try:
+        return await get_comfy_health(base_url)
+    except InvalidComfyURL as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+
+
+@app.get("/comfy/checkpoints")
+async def comfy_checkpoints(base_url: str = DEFAULT_COMFY_BASE_URL):
+    """로컬 ComfyUI에 등록된 체크포인트 이름 목록을 조회한다."""
+    try:
+        return await get_comfy_checkpoints(base_url)
+    except InvalidComfyURL as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except ComfyAPIError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from None
+
+
+@app.get("/comfy/image")
+async def comfy_image(
+    filename: str,
+    subfolder: str = "",
+    storage_type: str = Query(default="output", alias="type"),
+    base_url: str = DEFAULT_COMFY_BASE_URL,
+):
+    """ComfyUI 결과 참조를 검증한 뒤 이미지 바이트만 인증된 렌더러에 중계한다."""
+    try:
+        data, media_type = await fetch_comfy_output_image(
+            base_url,
+            filename,
+            subfolder,
+            storage_type,
+        )
+        return Response(
+            content=data,
+            media_type=media_type,
+            headers={
+                "Cache-Control": "private, max-age=86400",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+    except InvalidComfyURL as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except ComfyAPIError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from None
 
 
 async def _stream_ollama(host: str, payload: dict):
@@ -507,6 +565,8 @@ class AgentRequest(BaseModel):
     rag_enabled: bool = True
     rag_top_k: int = 5
     keep_alive: str = "30m"
+    comfy_base_url: str | None = None
+    comfy_profiles: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
 
 
 class ApprovalRequest(BaseModel):
@@ -539,6 +599,8 @@ async def agent(req: AgentRequest):
             rag_enabled=req.rag_enabled,
             rag_top_k=req.rag_top_k,
             keep_alive=req.keep_alive,
+            comfy_base_url=req.comfy_base_url,
+            comfy_profiles=req.comfy_profiles,
         ):
             yield json.dumps(ev, ensure_ascii=False) + "\n"
 

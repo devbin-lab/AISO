@@ -1,7 +1,7 @@
 {
   "name": "aiso",
-  "version": "0.2.1",
-  "description": "로컬에서 도는, 스스로 검증하는 코딩·개발 크리에이터 도구",
+  "version": "0.3.0",
+  "description": "로컬 작업·조사·자동화·검증 에이전트",
   "main": "./out/main/index.js",
   "author": "devbin-lab",
   "license": "Apache-2.0",

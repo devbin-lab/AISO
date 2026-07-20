@@ -57,6 +57,18 @@ export function AgentIcon({ size = 17 }: IconProps): React.JSX.Element {
   )
 }
 
+export function ComfyIcon({ size = 17 }: IconProps): React.JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
+      <rect x="3" y="4" width="6" height="5" rx="1.3" />
+      <rect x="15" y="15" width="6" height="5" rx="1.3" />
+      <circle cx="6" cy="17.5" r="2.5" />
+      <circle cx="18" cy="6.5" r="2.5" />
+      <path d="M9 6.5h6M8.2 9l7.5 6.2M8.5 16.2 15.5 7.8" />
+    </svg>
+  )
+}
+
 export function FolderIcon({ size = 14 }: IconProps): React.JSX.Element {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>

@@ -12,6 +12,49 @@ export interface PlanStep {
   status: PlanStatus
 }
 
+export interface ComfyWorkflowNodeSnapshot {
+  class_type: string
+  inputs: Record<string, unknown>
+}
+
+export type ComfyWorkflowSnapshot = Record<string, ComfyWorkflowNodeSnapshot>
+
+export interface ComfyPromptPolicySnapshot {
+  id: string
+  label: string
+  description: string
+  addedPositive: string[]
+  addedNegative: string[]
+}
+
+export interface ComfyGeneratedImage {
+  jobId: string
+  filename: string
+  subfolder: string
+  storageType: 'output' | 'temp'
+  baseUrl: string
+  profileId: string
+  profileName: string
+  modelName: string
+  selectionReason: string
+  prompt: string
+  negativePrompt: string
+  seed: string
+  width: number
+  height: number
+  steps: number
+  cfg: number
+  sampler: string
+  scheduler: string
+  /** ComfyUI /prompt에 실제로 제출한 API 그래프. 구형 결과에는 없다. */
+  workflow?: ComfyWorkflowSnapshot
+  /** 사용자 요청을 생성 프롬프트로 바꿀 때 적용한 결정론적 정책 기록. */
+  promptPolicy?: ComfyPromptPolicySnapshot
+  originalPrompt?: string
+  effectivePrompt?: string
+  effectiveNegativePrompt?: string
+}
+
 export type AgentEvent =
   | { type: 'thinking'; text: string }
   | { type: 'content'; text: string }
@@ -19,6 +62,7 @@ export type AgentEvent =
   | { type: 'approval_request'; id: string; name: string; args: Record<string, unknown> }
   | { type: 'tool_result'; id: string; ok: boolean; output: string; rejected?: boolean }
   | { type: 'screenshot'; id: string; data: string }
+  | { type: 'image_result'; id: string; image: ComfyGeneratedImage }
   | { type: 'plan'; steps: PlanStep[] }
   | { type: 'notice'; text: string }
   | { type: 'usage'; total: number }
@@ -46,5 +90,6 @@ export const TOOL_LABEL: Record<string, string> = {
   create_skill: '스킬 만들기',
   run_skill: '스킬 실행',
   search_docs: '문서 검색 (RAG)',
-  update_plan: '계획 갱신'
+  update_plan: '계획 갱신',
+  generate_image: '이미지 생성'
 }

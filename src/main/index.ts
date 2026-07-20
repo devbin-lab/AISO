@@ -18,6 +18,20 @@ import {
 } from './discord'
 import { freezeAppDataWrites } from './appdata-guard'
 import {
+  destroyComfySurface,
+  reloadComfySurface,
+  setComfySurface,
+  startComfyUI,
+  stopManagedComfyUI
+} from './comfy'
+import {
+  clearComfyModelRegistry,
+  listComfyModelProfiles,
+  pickAndImportComfyModelAssets,
+  unregisterComfyModelProfile,
+  updateComfyModelProfile
+} from './comfy-models'
+import {
   listConversations,
   getConversation,
   saveConversation,
@@ -26,6 +40,7 @@ import {
   clearAllConversations
 } from './conversations'
 import type { AppSettings } from '../shared/settings'
+import type { ComfySurfaceRequest } from '../shared/comfy'
 import type { ConversationKind, ConversationSave } from '../shared/conversation'
 
 // 로컬 LLM 앱: Chromium GPU 합성이 VRAM ~2.7GB를 점유해 16GB 카드에서
@@ -241,6 +256,52 @@ app.whenReady().then(() => {
     return res.filePaths[0]
   })
 
+  // ---- IPC: 사용자가 설치한 ComfyUI Windows Portable 선택·실행 ----
+  ipcMain.handle('comfy:pick-install', async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    const res = await dialog.showOpenDialog(win!, {
+      title: 'ComfyUI Windows Portable 폴더 선택',
+      properties: ['openDirectory']
+    })
+    if (res.canceled || res.filePaths.length === 0) return null
+    return res.filePaths[0]
+  })
+  ipcMain.handle('comfy:start', () => {
+    const settings = loadSettings()
+    return startComfyUI(settings.comfyInstallPath, settings.comfyBaseUrl)
+  })
+  ipcMain.handle('comfy:surface:set', (e, request: ComfySurfaceRequest) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win !== mainWindow) throw new Error('ComfyUI 화면을 표시할 창을 찾을 수 없습니다.')
+    setComfySurface(win, request)
+  })
+  ipcMain.handle('comfy:surface:reload', () => reloadComfySurface())
+  ipcMain.handle('comfy:models:list', (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win !== mainWindow) throw new Error('모델 목록을 요청한 Aiso 창을 확인할 수 없습니다.')
+    return listComfyModelProfiles()
+  })
+  ipcMain.handle('comfy:models:import', async (e, request: unknown) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win !== mainWindow) throw new Error('모델을 가져올 Aiso 창을 확인할 수 없습니다.')
+    const settings = loadSettings()
+    return pickAndImportComfyModelAssets(win, settings.comfyInstallPath, request, (progress) => {
+      if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+        win.webContents.send('comfy:model-import-progress', progress)
+      }
+    })
+  })
+  ipcMain.handle('comfy:models:update', (e, id: unknown, patch: unknown) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win !== mainWindow) throw new Error('모델을 변경할 Aiso 창을 확인할 수 없습니다.')
+    return updateComfyModelProfile(id, patch)
+  })
+  ipcMain.handle('comfy:models:unregister', (e, id: unknown) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win !== mainWindow) throw new Error('모델 등록을 해제할 Aiso 창을 확인할 수 없습니다.')
+    return unregisterComfyModelProfile(id)
+  })
+
   // ---- IPC: FastAPI 사이드카 상태 ----
   ipcMain.handle('backend:info', () => backendInfo())
   // 사이드카 인증 토큰 — preload가 초기화 시 동기 조회해 렌더러 fetch 헤더에 싣는다.
@@ -287,6 +348,7 @@ app.whenReady().then(() => {
     resetSettings()
     clearAllConversations()
     clearUsage()
+    clearComfyModelRegistry() // Aiso 메타데이터만 삭제하며 ComfyUI의 실제 모델 파일은 보존한다.
     // 디스코드 비밀·상태·예약도 지우고(리셋 후 설정은 기본값=봇 꺼짐), 실행 중 봇을 중지한다.
     clearDiscordData()
     void applyDiscordConfig() // 설정 기본값(discordEnabled=false)+토큰 삭제 → 사이드카 봇 중지
@@ -331,6 +393,8 @@ app.on('before-quit', () => {
 })
 
 app.on('will-quit', () => {
+  destroyComfySurface()
+  stopManagedComfyUI()
   stopBackend()
 })
 

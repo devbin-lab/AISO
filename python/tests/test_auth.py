@@ -11,10 +11,13 @@ main.py는 import 시점에 AISO_AUTH_TOKEN을 읽으므로, main import보다 �
 from __future__ import annotations
 
 import os
+import asyncio
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
+from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # python/ 를 import 경로에
 
@@ -22,6 +25,7 @@ TOKEN = "test-token-abc123"
 os.environ["AISO_AUTH_TOKEN"] = TOKEN
 
 import main  # noqa: E402  (토큰 심은 뒤 import — 미들웨어가 이 토큰으로 잠긴다)
+import comfy_client  # noqa: E402
 
 try:
     from fastapi.testclient import TestClient  # noqa: E402
@@ -46,6 +50,21 @@ def test_agent_without_token_is_401(client):
 
 def test_preview_without_token_is_401(client):
     r = client.post("/preview", json={"workspace": BOGUS_WS})
+    assert r.status_code == 401
+
+
+def test_comfy_health_without_token_is_401(client):
+    r = client.get("/comfy/health")
+    assert r.status_code == 401
+
+
+def test_comfy_checkpoints_without_token_is_401(client):
+    r = client.get("/comfy/checkpoints")
+    assert r.status_code == 401
+
+
+def test_comfy_image_without_token_is_401(client):
+    r = client.get("/comfy/image", params={"filename": "result.png"})
     assert r.status_code == 401
 
 
@@ -108,3 +127,71 @@ def test_cors_wraps_auth_401(client):
     r = client.post("/preview", headers={"Origin": "http://localhost:5173"}, json={"workspace": BOGUS_WS})
     assert r.status_code == 401
     assert r.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
+# ── ComfyUI 라우트 오류 매핑(인증 환경을 구성한 이 모듈에서 main 라우트를 검증) ──
+def test_comfy_checkpoints_api_failure_maps_to_safe_502(monkeypatch):
+    request = httpx.Request("GET", "http://127.0.0.1:8188/models/checkpoints")
+
+    async def fake_get_json(_base_url, _route):
+        response = httpx.Response(500, request=request, text="secret server body")
+        raise httpx.HTTPStatusError("secret server body", request=request, response=response)
+
+    monkeypatch.setattr(comfy_client, "_get_json", fake_get_json)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(main.comfy_checkpoints())
+    assert exc.value.status_code == 502
+    assert exc.value.detail == "ComfyUI가 HTTP 500 오류를 반환했습니다."
+    assert "secret" not in exc.value.detail
+
+
+def test_comfy_route_invalid_url_maps_to_400_without_network(monkeypatch):
+    called = False
+
+    async def fake_get_json(_base_url, _route):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr(comfy_client, "_get_json", fake_get_json)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(main.comfy_health("http://evil.example:8188"))
+    assert exc.value.status_code == 400
+    assert called is False
+
+
+def test_comfy_image_proxy_returns_only_validated_bytes(monkeypatch):
+    async def fake_fetch(base_url, filename, subfolder, storage_type):
+        assert base_url == "http://127.0.0.1:8188"
+        assert (filename, subfolder, storage_type) == ("result.png", "Aiso/job", "output")
+        return b"\x89PNG\r\n", "image/png"
+
+    monkeypatch.setattr(main, "fetch_comfy_output_image", fake_fetch)
+    response = asyncio.run(
+        main.comfy_image(
+            filename="result.png",
+            subfolder="Aiso/job",
+            storage_type="output",
+            base_url="http://127.0.0.1:8188",
+        )
+    )
+    assert response.body == b"\x89PNG\r\n"
+    assert response.media_type == "image/png"
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_comfy_image_proxy_maps_safe_client_error_to_502(monkeypatch):
+    async def fake_fetch(*_args):
+        raise comfy_client.ComfyAPIError("ComfyUI 결과 이미지 경로가 올바르지 않습니다.")
+
+    monkeypatch.setattr(main, "fetch_comfy_output_image", fake_fetch)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            main.comfy_image(
+                filename="../secret.png",
+                storage_type="output",
+                base_url="http://127.0.0.1:8188",
+            )
+        )
+    assert exc.value.status_code == 502
+    assert "secret" not in exc.value.detail
