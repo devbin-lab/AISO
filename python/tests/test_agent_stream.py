@@ -33,7 +33,7 @@ def test_no_workspace_restricts_tools_and_blocks_file_ops(env, monkeypatch, tmp_
         ]},
         {"content": "완료"},
     ])
-    evs = env.run(fc, workspace="", approval_mode="auto")
+    evs = env.drive(fc, approve=True, workspace="", approval_mode="auto")
     # (1) 모델에 넘긴 도구 목록에서 로컬 도구가 빠져 있다(웹·스킬만)
     tool_names = {t["function"]["name"] for t in fc.payloads[0]["tools"]}
     assert "write_file" not in tool_names and "run_command" not in tool_names
@@ -55,7 +55,7 @@ def test_no_workspace_unknown_tool_is_proper_error(env, monkeypatch, tmp_path):
         {"calls": [("nonexistent_tool", {})]},
         {"content": "완료"},
     ])
-    evs = env.run(fc, workspace="", approval_mode="auto")
+    evs = env.drive(fc, approve=True, workspace="", approval_mode="auto")
     id2name = {e["id"]: e["name"] for e in evs if e.get("type") == "tool_call"}
     results = {id2name[e["id"]]: e for e in evs if e.get("type") == "tool_result"}
     out = results["nonexistent_tool"]["output"]
@@ -73,7 +73,7 @@ def test_created_skill_callable_by_name_without_workspace(env, monkeypatch, tmp_
         {"calls": [("get_current_time", {})]},  # 이름으로 직접 호출(모델의 자연스러운 방식)
         {"content": "지금은 21시 21분입니다"},
     ])
-    evs = env.run(fc, workspace="", approval_mode="auto")
+    evs = env.drive(fc, approve=True, workspace="", approval_mode="auto")
     # (1) 스킬이 도구 목록에 노출됐다
     tool_names = {t["function"]["name"] for t in fc.payloads[0]["tools"]}
     assert "get_current_time" in tool_names
@@ -233,10 +233,10 @@ def test_screenshot_after_tool_result(env):
 
     fake_spec = dataclasses.replace(toolspec.REGISTRY["run_web"], handler=fake_run_web)
     env.mp.setitem(toolspec.REGISTRY, "run_web", fake_spec)
-    evs = env.run(FakeChat([
+    evs = env.drive(FakeChat([
         {"calls": [("run_web", {"path": "x.html"})]},
         {"content": "검증 완료."},
-    ]))
+    ]), approve=True)
     t = types(evs)
     i_tr = t.index("tool_result")
     i_shot = t.index("screenshot")
@@ -327,6 +327,47 @@ def test_dirty_reindexes_when_agent_stream_is_cancelled(env):
     assert len(env.reindex_calls) >= 1
 
 
+def test_dirty_reindexes_when_mutating_tool_is_cancelled_mid_execution(env):
+    """도구 반환 전 취소돼도 이미 쓴 파일과 RAG 색인을 다시 맞춘다."""
+    import asyncio as _aio
+
+    import pytest
+
+    env.mp.setattr(agent, "rag_status", lambda root: {"indexed": True, "embed_model": "e", "count": 1})
+
+    async def fake_search(root, host, q, k):
+        return []
+
+    started = _aio.Event()
+
+    async def mutating_execute(spec, root, host, args):
+        assert spec.mutates is True
+        (root / "partial.md").write_text("partial", encoding="utf-8")
+        started.set()
+        await _aio.Future()
+
+    env.mp.setattr(agent, "rag_search", fake_search)
+    env.mp.setattr(agent, "format_context", lambda results: "")
+    env.mp.setattr(agent, "execute", mutating_execute)
+    chat = FakeChat([{"calls": [("write_file", {"path": "a.md", "content": "hi"})]}])
+    env.mp.setattr(agent, "_chat_turn", chat)
+
+    async def cancel_during_execution():
+        stream = env._agen(chat, approval_mode="auto")
+        iterator = stream.__aiter__()
+        assert (await iterator.__anext__())["type"] == "tool_call"
+        pending_event = _aio.create_task(iterator.__anext__())
+        await _aio.wait_for(started.wait(), timeout=1)
+        pending_event.cancel()
+        with pytest.raises(_aio.CancelledError):
+            await pending_event
+        await stream.aclose()
+
+    _aio.run(cancel_during_execution())
+    assert (env.ws / "partial.md").read_text(encoding="utf-8") == "partial"
+    assert len(env.reindex_calls) >= 1
+
+
 # ── 치명적 오류: 잘못된 워크스페이스 / 연결 실패 ────────────
 def test_fatal_bad_workspace(env, tmp_path):
     # 존재하지 않는 폴더를 '지정'하면 치명적 오류. (빈 문자열=미지정은 무폴더 모드로 별도 테스트)
@@ -342,7 +383,7 @@ def test_fatal_connection(env):
     assert "done" not in types(evs)
 
 
-# ── RAG 컨텍스트가 안정적 프리픽스에 주입되고 search_docs가 맨 앞 ──
+# ── RAG 컨텍스트는 시스템 지시와 분리되고 search_docs가 맨 앞 ──
 def test_rag_context_injected(env):
     env.mp.setattr(agent, "rag_status", lambda root: {"indexed": True, "embed_model": "e", "count": 3})
 
@@ -356,5 +397,41 @@ def test_rag_context_injected(env):
     env.run(fake)
     payload = fake.payloads[0]
     sys_content = payload["messages"][0]["content"]
-    assert "[[RAGCTX]]" in sys_content and "search_docs를 사용하라" in sys_content
+    assert "[[RAGCTX]]" not in sys_content and "search_docs를 사용하라" in sys_content
+    assert payload["messages"][1]["content"] == "[[RAGCTX]]"
     assert payload["tools"][0]["function"]["name"] == "search_docs"  # 맨 앞에 prepend
+
+
+def test_workspace_context_requires_approval_before_web_egress(env):
+    """A workspace read makes a later web call visible even in auto mode."""
+    (env.ws / "note.txt").write_text("workspace data", encoding="utf-8")
+    fake = FakeChat([
+        {"calls": [
+            ("read_file", {"path": "note.txt"}),
+            ("web_search", {"query": "safe public documentation"}),
+        ]},
+        {"content": "done"},
+    ])
+    events = env.drive(fake, approve=False, approval_mode="auto")
+    approvals = [event for event in events if event.get("type") == "approval_request"]
+    assert [event["name"] for event in approvals] == ["web_search"]
+    web_result = next(
+        event for event in events
+        if event.get("type") == "tool_result" and event.get("id") == approvals[0]["id"]
+    )
+    assert web_result["rejected"] is True
+
+
+def test_automatic_rag_requires_approval_before_web_egress(env):
+    """Automatic RAG counts as workspace data before the first tool call."""
+    env.mp.setattr(agent, "rag_status", lambda root: {"indexed": True})
+
+    async def fake_search(root, host, q, k):
+        return [{"file": "note.txt", "start": 1, "end": 1, "text": "private", "score": 1.0}]
+
+    env.mp.setattr(agent, "rag_search", fake_search)
+    env.mp.setattr(agent, "format_context", lambda results: "[UNTRUSTED_WORKSPACE_CONTEXT]")
+    fake = FakeChat([{"calls": [("web_search", {"query": "public docs"})]}, {"content": "done"}])
+    events = env.drive(fake, approve=False, approval_mode="auto")
+    approvals = [event for event in events if event.get("type") == "approval_request"]
+    assert [event["name"] for event in approvals] == ["web_search"]

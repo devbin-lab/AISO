@@ -38,13 +38,38 @@ BOGUS_WS = "C:/definitely/not/a/real/workspace"
 
 
 @pytest.fixture
-def client():
-    return TestClient(main.app)
+def client(monkeypatch):
+    """Build the auth stack deterministically even when another test imported main first.
+
+    Pytest collection order is not an application contract: several test modules
+    import ``main`` before this module can seed ``AISO_AUTH_TOKEN``.  Reconfigure
+    the registered middleware for this TestClient and discard the built stack
+    afterwards, rather than relying on import order.
+    """
+    auth_middleware = next(
+        middleware
+        for middleware in main.app.user_middleware
+        if middleware.cls is main.TokenAuthMiddleware
+    )
+    monkeypatch.setattr(main, "AUTH_TOKEN", TOKEN)
+    monkeypatch.setitem(auth_middleware.kwargs, "token", TOKEN)
+    main.app.middleware_stack = None
+    try:
+        yield TestClient(main.app)
+    finally:
+        # The monkeypatch fixture restores the token values; force Starlette to
+        # rebuild instead of leaking this test's token to a later module.
+        main.app.middleware_stack = None
 
 
 # ── 토큰 없는 민감 엔드포인트는 잠긴다 ─────────────────────────
 def test_agent_without_token_is_401(client):
     r = client.post("/agent", json={"messages": [], "workspace": BOGUS_WS})
+    assert r.status_code == 401
+
+
+def test_agent_tools_without_token_is_401(client):
+    r = client.get("/agent/tools")
     assert r.status_code == 401
 
 
@@ -78,6 +103,14 @@ def test_correct_token_reaches_handler(client):
     r = client.post("/preview", headers={"X-Aiso-Token": TOKEN}, json={"workspace": BOGUS_WS})
     assert r.status_code == 200
     assert r.json()["ok"] is False  # 잘못된 경로 → 핸들러가 ok:False로 반환(인증은 통과)
+
+
+def test_agent_tools_returns_the_authenticated_builtin_catalog(client):
+    r = client.get("/agent/tools", headers={"X-Aiso-Token": TOKEN})
+    assert r.status_code == 200
+    by_name = {tool["name"]: tool for tool in r.json()["tools"]}
+    assert {"update_plan", "search_docs", "discord_send", "generate_image"} <= set(by_name)
+    assert by_name["generate_image"]["availability"] == "image"
 
 
 # ── /f/ 정적 미리보기는 예외(iframe은 헤더를 못 실음) ──────────

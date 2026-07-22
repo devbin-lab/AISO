@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   type AppSettings,
+  type ComfyModelSelectionMode,
   type ReasoningEffort,
   type ThemeMode,
   type TempPreset,
   TEMP_MODE_OPTIONS,
   RAG_MAX_FILES_OPTIONS
 } from '../../../shared/settings'
-import type { HealthInfo } from '../../../shared/backend'
+import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import type { UpdateStatus } from '../../../shared/update'
 import type { SkillMeta } from '../../../shared/skill'
 import type { DiscordStatus, DiscordSchedule } from '../../../shared/discord'
@@ -16,6 +17,7 @@ import Segmented from '../components/Segmented'
 import Dropdown from '../components/Dropdown'
 import { confirmDialog } from '../components/ConfirmDialog'
 import ComfyModelManager from '../components/ComfyModelManager'
+import AgentToolCatalog from '../components/AgentToolCatalog'
 import { unloadModels } from '../lib/ollama'
 
 const ONOFF = [
@@ -25,8 +27,9 @@ const ONOFF = [
 
 interface Props {
   settings: AppSettings
+  backend: BackendInfo
   health: HealthInfo | null
-  onSave: (patch: Partial<AppSettings>) => Promise<void>
+  onSave: (patch: Partial<AppSettings>) => Promise<boolean>
   /** 지금 이 화면이 실제로 보이는 탭인지 — 개발자 모드 단축키 감지 범위를 설정 탭에 한정한다.
    *  (뷰는 항상 마운트 상태로 유지되므로 이 플래그 없이는 다른 탭에서도 단축키가 먹힌다.) */
   active: boolean
@@ -80,43 +83,61 @@ function rangeFill(pct: number): React.CSSProperties {
 }
 
 type SectionId =
-  | 'engine'
+  | 'llm'
+  | 'tools'
   | 'comfy'
-  | 'generation'
-  | 'search'
-  | 'resource'
   | 'appearance'
   | 'skills'
   | 'discord'
   | 'updates'
   | 'developer'
 
-function SettingsView({ settings, health, onSave, active }: Props): React.JSX.Element {
+function SettingsView({ settings, backend, health, onSave, active }: Props): React.JSX.Element {
   const [form, setForm] = useState<AppSettings>(settings)
   const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [dirtyFields, setDirtyFields] = useState<Set<keyof AppSettings>>(() => new Set())
   const [manualModel, setManualModel] = useState(false)
-  const [activeSection, setActiveSection] = useState<SectionId>('engine')
+  const [activeSection, setActiveSection] = useState<SectionId>('llm')
 
   const modelOptions = health?.models ?? []
   const useDropdown = modelOptions.length > 0 && !manualModel
 
-  // 외부 설정이 로드/변경되면 폼 동기화
+  // 외부 설정이 로드/변경되면 동기화하되, 사용자가 아직 저장하지 않은 필드는 보존한다.
+  // 예: 개발자 모드 토글 저장이 ComfyUI 주소 입력 초안을 지우면 안 된다.
   useEffect(() => {
-    setForm(settings)
-  }, [settings])
+    setForm((current) => {
+      const merged = { ...settings }
+      dirtyFields.forEach((field) => {
+        ;(merged as Record<string, unknown>)[field] = current[field]
+      })
+      return merged
+    })
+  }, [settings, dirtyFields])
 
   const dirty = useMemo(
     () => (Object.keys(form) as (keyof AppSettings)[]).some((k) => form[k] !== settings[k]),
     [form, settings]
   )
+  const comfyConnectionDirty = form.comfyBaseUrl !== settings.comfyBaseUrl ||
+    form.comfyInstallPath !== settings.comfyInstallPath
+  const comfyInstallPathDirty = form.comfyInstallPath !== settings.comfyInstallPath
 
   const set = <K extends keyof AppSettings,>(k: K, v: AppSettings[K]): void => {
     setForm((f) => ({ ...f, [k]: v }))
+    setDirtyFields((fields) => new Set(fields).add(k))
     setSaved(false)
+    setSaveError('')
   }
 
   const submit = async (): Promise<void> => {
-    await onSave(form)
+    const ok = await onSave(form)
+    if (!ok) {
+      setSaveError('설정을 저장하지 못했습니다. 권한·디스크 상태를 확인한 뒤 다시 시도해 주세요.')
+      return
+    }
+    setSaveError('')
+    setDirtyFields(new Set())
     setSaved(true)
     window.setTimeout(() => setSaved(false), 1800)
   }
@@ -188,9 +209,15 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
       if (taps.length >= DEV_UNLOCK_TAPS) {
         tapsRef.current = []
         devModeRef.current = true // 라운드트립 끝나기 전 재연타로 다시 트리거되는 것 방지
-        void onSave({ devMode: true })
-        setDevToast('🔓 개발자 모드가 활성화되었습니다')
-        window.setTimeout(() => setDevToast(null), 2500)
+        void onSave({ devMode: true }).then((saved) => {
+          if (!saved) {
+            devModeRef.current = false
+            setSaveError('개발자 모드 설정을 저장하지 못했습니다.')
+            return
+          }
+          setDevToast('🔓 개발자 모드가 활성화되었습니다')
+          window.setTimeout(() => setDevToast(null), 2500)
+        })
       }
     }
     document.addEventListener('keydown', onKeyDown)
@@ -198,8 +225,10 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
   }, [active, onSave])
 
   const disableDevMode = (): void => {
-    setActiveSection('engine') // '개발자' 섹션이 사라지므로 다른 섹션으로 이동
-    void onSave({ devMode: false, forceOnboarding: false })
+    setActiveSection('llm') // '개발자' 섹션이 사라지므로 다른 섹션으로 이동
+    void onSave({ devMode: false, forceOnboarding: false }).then((saved) => {
+      if (!saved) setSaveError('개발자 모드 설정을 저장하지 못했습니다.')
+    })
   }
 
   // ── 스킬 관리 (에이전트가 만든 자동화 도구) ──
@@ -258,7 +287,11 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
   const applyDiscord = async (): Promise<void> => {
     setDiscordApplying(true)
     try {
-      await onSave(form) // 활성 토글 저장
+      if (!await onSave(form)) {
+        setSaveError('설정을 저장하지 못해 Discord 연결을 적용하지 않았습니다.')
+        return
+      }
+      setDirtyFields(new Set())
       if (discordToken.trim()) {
         await window.api.discord.saveToken(discordToken.trim())
         setDiscordToken('')
@@ -358,14 +391,12 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
   })()
 
   const navItems: { id: SectionId; label: string }[] = [
-    { id: 'engine', label: '엔진' },
+    { id: 'llm', label: 'LLM' },
     { id: 'comfy', label: 'ComfyUI' },
-    { id: 'generation', label: '생성' },
-    { id: 'search', label: '검색·RAG' },
-    { id: 'resource', label: '리소스' },
-    { id: 'appearance', label: '화면' },
-    { id: 'skills', label: '스킬' },
     { id: 'discord', label: '디스코드' },
+    { id: 'appearance', label: '화면' },
+    { id: 'tools', label: '도구' },
+    { id: 'skills', label: '스킬' },
     { id: 'updates', label: '업데이트' },
     ...(form.devMode ? [{ id: 'developer' as SectionId, label: '개발자' }] : [])
   ]
@@ -392,7 +423,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
         </nav>
 
         <div className="settings-content">
-        {activeSection === 'engine' && (
+        {activeSection === 'llm' && (
         <section>
           <div className="group__title">엔진</div>
           <div className="group">
@@ -446,31 +477,14 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
           </div>
         </section>
         )}
-        {activeSection === 'comfy' && (
-        <section>
-          <div className="group__title">ComfyUI 연결</div>
+        <section hidden={activeSection !== 'comfy'} aria-hidden={activeSection !== 'comfy'}>
+          <div className="group__title">ComfyUI 연결 및 모델 등록</div>
           <div className="group">
             <div className="row">
               <div>
-                <div className="row__label">로컬 서버 주소</div>
+                <div className="row__label">ComfyUI 설치 폴더</div>
                 <div className="row__hint">
-                  Aiso는 보안을 위해 이 PC의 127.0.0.1, localhost 또는 ::1 주소만 연결합니다.
-                </div>
-              </div>
-              <input
-                className="input"
-                value={form.comfyBaseUrl}
-                onChange={(e) => set('comfyBaseUrl', e.target.value)}
-                placeholder="http://127.0.0.1:8188"
-                spellCheck={false}
-              />
-            </div>
-            <div className="row">
-              <div>
-                <div className="row__label">Windows Portable 폴더</div>
-                <div className="row__hint">
-                  <code>python_embeded</code>와 <code>ComfyUI</code> 폴더가 들어 있는 최상위 폴더를 선택합니다.
-                  비워 두면 직접 실행한 서버에만 연결합니다.
+                  Windows Portable의 최상위 폴더를 선택하세요. 이 경로를 저장하면 Aiso가 ComfyUI를 자동으로 실행하고 모델 파일을 연결할 수 있습니다.
                 </div>
               </div>
               <div className="row__control comfy-setting-path">
@@ -488,18 +502,60 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
             </div>
             <div className="row">
               <div>
+                <div className="row__label">ComfyUI 서버 주소</div>
+                <div className="row__hint">
+                  기본값은 이 PC에서 실행되는 ComfyUI입니다. Aiso는 보안을 위해 127.0.0.1, localhost 또는 ::1 주소만 연결합니다.
+                </div>
+              </div>
+              <input
+                className="input"
+                value={form.comfyBaseUrl}
+                onChange={(e) => set('comfyBaseUrl', e.target.value)}
+                placeholder="http://127.0.0.1:8188"
+                spellCheck={false}
+              />
+            </div>
+            <div className="row">
+              <div>
                 <div className="row__label">연동 방식</div>
                 <div className="row__hint">
                   ComfyUI는 Aiso에 포함되지 않으며 별도 프로세스로 실행됩니다. 모델 설치·업데이트·삭제도 사용자가 직접 관리합니다.
                 </div>
               </div>
-              <span className="model-chip">사용자 설치본 연결</span>
+              <span className="model-chip">사용자 설치 ComfyUI</span>
+            </div>
+            <div className="row">
+              <div>
+                <div className="row__label">이미지 모델 선택</div>
+                <div className="row__hint">
+                  {form.comfyModelSelectionMode === 'auto'
+                    ? '자동: Agent가 요청과 등록된 모델 특성을 비교해 사용할 모델을 선택합니다.'
+                    : '수동: Agent 입력창 아래에서 이미지 생성에 사용할 등록 모델을 직접 선택합니다.'}
+                </div>
+              </div>
+              <Segmented
+                value={form.comfyModelSelectionMode}
+                options={[
+                  { v: 'auto', label: '자동' },
+                  { v: 'manual', label: '수동' }
+                ]}
+                onChange={(v) => set('comfyModelSelectionMode', v as ComfyModelSelectionMode)}
+              />
             </div>
           </div>
-          <ComfyModelManager installPath={settings.comfyInstallPath} />
+          {comfyConnectionDirty && (
+            <div className="comfy-setting-notice">
+              {comfyInstallPathDirty
+                ? <>설치 폴더를 변경하면 안전을 위해 기존 모델의 Agent 자동 선택이 꺼집니다. 새 설치본에서 모델을 확인한 뒤 다시 켜 주세요.</>
+                : <>ComfyUI 서버 주소가 변경되었습니다. 화면 오른쪽 아래의 <b>저장</b>을 누르면 자동 실행과 Agent 연결에 적용됩니다.</>}
+            </div>
+          )}
+          <ComfyModelManager
+            installPath={settings.comfyInstallPath}
+            hasUnsavedInstallPathChange={comfyInstallPathDirty}
+          />
         </section>
-        )}
-        {activeSection === 'generation' && (
+        {activeSection === 'llm' && (
         <section>
           <div className="group__title">생성</div>
           <div className="group">
@@ -580,7 +636,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
           </div>
         </section>
         )}
-        {activeSection === 'search' && (
+        {activeSection === 'llm' && (
         <>
         <section>
           <div className="group__title">웹 검색</div>
@@ -657,7 +713,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
         </section>
         </>
         )}
-        {activeSection === 'resource' && (
+        {activeSection === 'llm' && (
         <section>
           <div className="group__title">리소스</div>
           <div className="group">
@@ -687,6 +743,11 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
               />
             </div>
           </div>
+        </section>
+        )}
+        {activeSection === 'tools' && (
+        <section>
+          <AgentToolCatalog backend={backend} active={active} />
         </section>
         )}
         {activeSection === 'appearance' && (
@@ -997,6 +1058,7 @@ function SettingsView({ settings, health, onSave, active }: Props): React.JSX.El
 
           <div className="actions">
             {saved && <span className="saved">저장됨</span>}
+            {saveError && <span className="form-error" role="alert">{saveError}</span>}
             <button className="btn" disabled={!dirty} onClick={submit}>
               저장
             </button>

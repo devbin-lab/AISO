@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 import socket
-from urllib.parse import urlparse
+from urllib.parse import unquote_plus, urlparse
 
 from tools import ToolError
 
@@ -22,6 +23,60 @@ MAX_FETCH_CHARS = 30000   # 반환 텍스트 상한(문자)
 # URL 길이 상한 — 정상 웹 주소는 이보다 짧다(관용 한계 ~2048자). 이를 넘는 요청은
 # 대화/문맥을 쿼리스트링에 실어 외부로 보내는 유출(프롬프트 인젝션) 시도일 수 있어 차단한다.
 MAX_URL_LEN = 2048
+MAX_URL_QUERY_CHARS = 512
+MAX_URL_QUERY_PARAMS = 20
+
+# High-confidence secret formats. This is intentionally a safety net rather than
+# a full DLP engine: normal prose about an API key remains valid, while values
+# that look like credentials are never sent as a search query or URL parameter.
+_SECRET_PATTERNS = (
+    re.compile(r"-----BEGIN [A-Z0-9 ][A-Z0-9 -]*PRIVATE KEY-----", re.IGNORECASE),
+    re.compile(r"\b(?:ghp|gho|ghu|ghs)_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bxox(?:a|b|p|r|s)-[A-Za-z0-9-]{10,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+    re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{16,}\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|client[_-]?secret|"
+        r"secret|password|passwd|cookie|session(?:[_-]?id)?)\b\s*(?:=|:)\s*['\"]?[^\s&]{8,}",
+        re.IGNORECASE,
+    ),
+)
+
+
+def outbound_text_block_reason(value: str) -> str | None:
+    """Return a reason when text appears to contain a credential-like value.
+
+    URL query strings are percent-decoded before matching so encoded credentials
+    cannot bypass the guard. Callers choose their own length limits.
+    """
+    try:
+        candidate = unquote_plus(value)
+    except Exception:  # noqa: BLE001
+        candidate = value
+    if any(pattern.search(candidate) for pattern in _SECRET_PATTERNS):
+        return "비밀값·인증 토큰처럼 보이는 값은 외부 요청에 포함할 수 없습니다."
+    return None
+
+
+def _outbound_url_block_reason(url: str) -> str | None:
+    """Reject URL forms commonly used to exfiltrate workspace content."""
+    try:
+        parsed = urlparse(url)
+    except Exception:  # noqa: BLE001
+        return "URL 형식이 올바르지 않습니다."
+    if parsed.username or parsed.password:
+        return "사용자 이름·비밀번호가 포함된 URL은 허용하지 않습니다."
+    if len(parsed.query) > MAX_URL_QUERY_CHARS:
+        return (
+            f"URL 쿼리가 너무 깁니다({len(parsed.query)}자 > {MAX_URL_QUERY_CHARS}자). "
+            "작업 폴더 데이터를 URL에 실어 보내는 요청은 차단됩니다."
+        )
+    if parsed.query and parsed.query.count("&") + 1 > MAX_URL_QUERY_PARAMS:
+        return f"URL 쿼리 매개변수는 최대 {MAX_URL_QUERY_PARAMS}개까지 허용됩니다."
+    return outbound_text_block_reason(parsed.query)
 
 WEB_FETCH_SCHEMA = {
     "type": "function",
@@ -207,4 +262,7 @@ async def web_fetch(url: str = "", **_ignore) -> str:
             f"[차단] URL이 너무 깁니다({len(u)}자 > {MAX_URL_LEN}). 정상 웹 주소는 이보다 짧습니다 — "
             "대화 내용 등을 URL에 담아 외부로 보내는 유출 시도로 판단해 차단했습니다."
         )
+    outbound_block = _outbound_url_block_reason(u)
+    if outbound_block:
+        return f"[차단] {outbound_block}"
     return await asyncio.to_thread(_fetch_sync, u)

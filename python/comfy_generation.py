@@ -4,20 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import secrets
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Iterable, Literal, Mapping
 
 import comfy_client
 from comfy_workflows import (
     ARCH_FLUX1_SPLIT,
+    ARCH_FLUX2_KLEIN_4B,
     MAX_PROMPT_LENGTH,
     WorkflowValidationError,
     apply_prompt_policy,
     build_workflow,
     inventory_folders,
-    node_contracts_for_architecture,
+    node_classes_for_profile,
     normalize_profiles,
     primary_model_name,
     required_assets,
@@ -30,6 +33,54 @@ from comfy_workflows import (
 
 POLL_INTERVAL_SECONDS = 0.5
 GENERATION_TIMEOUT_SECONDS = 30 * 60
+# Global /free evicts the models used by the user's own ComfyUI window too.
+# Keep it opt-in for constrained/headless deployments; interactive Aiso never
+# unloads models behind a user's back.
+RELEASE_MODELS_AFTER_AISO_JOB = os.environ.get("AISO_COMFY_RELEASE_MODELS", "").strip() == "1"
+
+
+@dataclass
+class _GenerationCoordinator:
+    lock: asyncio.Lock
+    active_jobs: int = 0
+
+
+_GENERATION_COORDINATORS: dict[tuple[int, str], _GenerationCoordinator] = {}
+
+
+def _coordinator_for(base_url: str) -> _GenerationCoordinator:
+    # Tests may create more than one asyncio.run() loop in one Python process.
+    # Keeping the lock scoped to the running loop prevents cross-loop lock use.
+    key = (id(asyncio.get_running_loop()), base_url)
+    coordinator = _GENERATION_COORDINATORS.get(key)
+    if coordinator is None:
+        coordinator = _GenerationCoordinator(lock=asyncio.Lock())
+        _GENERATION_COORDINATORS[key] = coordinator
+    return coordinator
+
+
+async def _begin_generation(base_url: str) -> _GenerationCoordinator:
+    coordinator = _coordinator_for(base_url)
+    async with coordinator.lock:
+        coordinator.active_jobs += 1
+    return coordinator
+
+
+async def _finish_generation(
+    base_url: str,
+    coordinator: _GenerationCoordinator,
+    *,
+    submission_attempted: bool,
+) -> None:
+    """Release only after Aiso's last active job, and only when explicitly opted in."""
+    async with coordinator.lock:
+        coordinator.active_jobs = max(0, coordinator.active_jobs - 1)
+        if (
+            submission_attempted
+            and coordinator.active_jobs == 0
+            and RELEASE_MODELS_AFTER_AISO_JOB
+        ):
+            await _release_without_masking(base_url)
 
 
 class GenerationError(RuntimeError):
@@ -78,7 +129,7 @@ GENERATE_IMAGE_SCHEMA = {
                 },
                 "negative_prompt": {
                     "type": "string",
-                    "description": "피하고 싶은 요소. FLUX.1 split 기본 템플릿에서는 사용하지 않음",
+                    "description": "피하고 싶은 요소. FLUX.1 split 및 FLUX.2 Klein 기본 템플릿에서는 사용하지 않음",
                     "maxLength": MAX_PROMPT_LENGTH,
                 },
                 "model_hint": {
@@ -148,6 +199,7 @@ async def generate_image(
     prompt: str,
     negative_prompt: str = "",
     model_hint: str = "",
+    selected_profile_id: str | None = None,
     selection_context: str = "",
     width: int | None = None,
     height: int | None = None,
@@ -176,15 +228,26 @@ async def generate_image(
 
     try:
         await comfy_client.get_jobs_capability(normalized_url)
-        normalized_profiles = normalize_profiles(profiles)
-        inventory = await comfy_client.get_models_inventory(
-            normalized_url, inventory_folders(normalized_profiles)
+        # In automatic mode only profiles explicitly opted into Agent selection
+        # are candidates.  A manual exact ID may use an otherwise ready,
+        # registered profile whose `agentEnabled` switch is off; it is still
+        # subjected to the same asset, workflow, inventory and node checks.
+        normalized_profiles = normalize_profiles(
+            profiles,
+            require_agent_enabled=selected_profile_id is None,
+        )
+        folders = inventory_folders(normalized_profiles)
+        inventory = (
+            await comfy_client.get_models_inventory(normalized_url, folders)
+            if folders
+            else {}
         )
         selected, selection_reason = select_profile(
             normalized_profiles,
             inventory,
             prompt=f"{selection_context}\n{prompt}" if selection_context else prompt,
             model_hint=model_hint,
+            selected_profile_id=selected_profile_id,
         )
         prompt_application = apply_prompt_policy(
             selected,
@@ -207,9 +270,9 @@ async def generate_image(
             sampler=sampler,
             scheduler=scheduler,
         )
-        node_infos: dict[str, Mapping[str, Any]] = {}
-        for node_class in node_contracts_for_architecture(selected.architecture):
-            node_infos[node_class] = await comfy_client.get_node_info(normalized_url, node_class)
+        node_infos = await comfy_client.get_node_infos(
+            normalized_url, node_classes_for_profile(selected)
+        )
         validate_runtime_options(selected, options, node_infos)
     except WorkflowValidationError as exc:
         raise GenerationError(str(exc), kind="input") from exc
@@ -223,8 +286,11 @@ async def generate_image(
     prompt_id = str(uuid.uuid4())
     client_id = str(uuid.uuid4())
     workflow = build_workflow(selected, options, prompt_id=prompt_id)
-    workflow_snapshot = snapshot_workflow(workflow)
+    workflow_snapshot = snapshot_workflow(
+        workflow, allow_user_template=selected.workflow_template is not None
+    )
     submission_attempted = False
+    coordinator = await _begin_generation(normalized_url)
     try:
         try:
             # 응답이 끊겨도 서버가 prompt를 접수했을 수 있다. UUID 단일 취소는 unknown이면 no-op이므로
@@ -270,9 +336,16 @@ async def generate_image(
         summary = f"이미지 생성 완료: {selected.name} ({model_name}), seed {options.seed}"
         if prompt_application["promptPolicy"]["id"] != "none":
             summary += f". {prompt_application['promptPolicy']['label']} 적용"
-        if selected.architecture == ARCH_FLUX1_SPLIT and options.negative_prompt:
-            summary += ". FLUX.1 split 기본 템플릿은 부정 프롬프트를 사용하지 않았습니다"
-        ignored_count = len(selected.assets) - len(required_assets(selected))
+        uses_negative_prompt = (
+            selected.workflow_template is not None
+            and bool(selected.workflow_template.bindings["negativePrompt"])
+        ) or selected.architecture not in (ARCH_FLUX1_SPLIT, ARCH_FLUX2_KLEIN_4B)
+        if not uses_negative_prompt and options.negative_prompt:
+            summary += ". 이 모델의 기본 템플릿은 부정 프롬프트를 사용하지 않았습니다"
+        ignored_count = (
+            0 if selected.workflow_template is not None
+            else len(selected.assets) - len(required_assets(selected))
+        )
         if ignored_count:
             summary += f". 등록된 추가 자산 {ignored_count}개는 이번 기본 생성에 적용하지 않았습니다"
         image = {
@@ -289,7 +362,7 @@ async def generate_image(
             "originalPrompt": prompt_application["originalPrompt"],
             "effectivePrompt": options.prompt,
             "effectiveNegativePrompt": (
-                "" if selected.architecture == ARCH_FLUX1_SPLIT else options.negative_prompt
+                options.negative_prompt if uses_negative_prompt else ""
             ),
             "promptPolicy": prompt_application["promptPolicy"],
             "workflow": workflow_snapshot,
@@ -304,10 +377,11 @@ async def generate_image(
         }
         return {"summary": summary, "image": image}
     finally:
-        if submission_attempted:
-            # 다음 Agent LLM 턴에서 Ollama를 다시 적재하기 전에 성공·실패·취소
-            # 모두 ComfyUI 체크포인트와 캐시를 해제한다.
-            await _release_without_masking(normalized_url)
+        await _finish_generation(
+            normalized_url,
+            coordinator,
+            submission_attempted=submission_attempted,
+        )
 
 
 def result_to_tool_text(result: Mapping[str, Any]) -> str:

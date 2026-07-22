@@ -5,7 +5,7 @@
 2) create_skill: 문법 검증 후 앱 스킬 폴더에 main.py+skill.json 저장(잘못된 문법은 거부).
 3) run_skill: 저장된 스킬을 실제 실행해 표준출력을 돌려주고, args를 JSON으로 전달.
 4) 스킬 이름 검증: 경로 구분자·상위참조는 거부(스킬 폴더 밖으로 새지 않음).
-5) 승인 등급: run_skill=임의 실행(읽기·수동 승인/자동 무승인), create_skill=쓰기 등급.
+5) 승인 등급: run_skill/create_skill=임의 실행·영속 코드(모든 모드 승인).
 """
 from __future__ import annotations
 
@@ -293,11 +293,11 @@ def test_run_skill_timeout_kills_process_tree(tmp_path, monkeypatch):
 
 
 def test_skill_approval_grades():
-    # run_skill = 임의 실행: 읽기·수동 승인, 자동 무승인 (run_command와 동급)
+    # Skills are persistent arbitrary code, so every mode requires a gate.
     assert agent.needs_approval("run_skill", "read") is True
     assert agent.needs_approval("run_skill", "manual") is True
-    assert agent.needs_approval("run_skill", "auto") is False
-    # create_skill = 쓰기(코드 산출): 읽기·수동 승인, 자동 무승인
+    assert agent.needs_approval("run_skill", "auto") is True
+    # Creating a skill stores executable code outside the workspace as well.
     assert agent.needs_approval("create_skill", "read") is True
     assert agent.needs_approval("create_skill", "manual") is True
-    assert agent.needs_approval("create_skill", "auto") is False
+    assert agent.needs_approval("create_skill", "auto") is True

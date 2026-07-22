@@ -8,17 +8,166 @@ Windows + uvicorn 루프에서 asyncio 서브프로세스가 막히므로(NotImp
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+from dataclasses import dataclass
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import uuid
 from pathlib import Path
 
 from tools import ToolError, _resolve
 
 RUN_TIMEOUT = 25   # 실행 상한(초)
 BUILD_TIMEOUT = 90  # 빌드+실행 상한(초, dotnet 첫 실행 대비)
+MAX_PROCESS_OUTPUT_BYTES = 64 * 1024
+
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_CREATE_NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+
+
+class _BoundedBytes:
+    """Drain a pipe completely while retaining only a bounded head and tail."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = max(1024, int(limit))
+        self._head_limit = self.limit // 2
+        self._tail_limit = self.limit - self._head_limit
+        self._head = bytearray()
+        self._tail: deque[bytes] = deque()
+        self._tail_size = 0
+        self.total = 0
+
+    def append(self, chunk: bytes) -> None:
+        self.total += len(chunk)
+        remaining = chunk
+        head_space = self._head_limit - len(self._head)
+        if head_space > 0:
+            self._head.extend(remaining[:head_space])
+            remaining = remaining[head_space:]
+        if remaining:
+            self._tail.append(remaining)
+            self._tail_size += len(remaining)
+            while self._tail_size > self._tail_limit:
+                first = self._tail[0]
+                overflow = self._tail_size - self._tail_limit
+                if len(first) <= overflow:
+                    self._tail.popleft()
+                    self._tail_size -= len(first)
+                else:
+                    self._tail[0] = first[overflow:]
+                    self._tail_size -= overflow
+
+    def result(self) -> tuple[bytes, bool]:
+        tail = b"".join(self._tail)
+        retained = bytes(self._head) + tail
+        if self.total <= self.limit:
+            return retained, False
+        omitted = max(0, self.total - len(retained))
+        marker = f"\n... [{omitted} bytes omitted; output limit reached] ...\n".encode("utf-8")
+        return bytes(self._head) + marker + tail, True
+
+
+@dataclass(frozen=True)
+class CapturedProcess:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+    timed_out: bool
+    stdout_truncated: bool
+    stderr_truncated: bool
+
+
+def _drain_pipe(pipe, sink: _BoundedBytes) -> None:
+    try:
+        while True:
+            chunk = pipe.read(8192)
+            if not chunk:
+                break
+            sink.append(chunk)
+    finally:
+        try:
+            pipe.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Terminate the process and children without retaining their output."""
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=_CREATE_NO_WINDOW,
+                timeout=10,
+            )
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def run_process_capped(
+    command: list[str] | str,
+    *,
+    cwd: str,
+    env: dict | None,
+    timeout: int,
+    max_output_bytes: int = MAX_PROCESS_OUTPUT_BYTES,
+    creationflags: int = 0,
+) -> CapturedProcess:
+    """Run a child process without letting unbounded output consume backend RAM."""
+    proc = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=creationflags | _CREATE_NO_WINDOW | _CREATE_NEW_GROUP,
+    )
+    assert proc.stdout is not None and proc.stderr is not None
+    stdout_sink = _BoundedBytes(max_output_bytes)
+    stderr_sink = _BoundedBytes(max_output_bytes)
+    readers = [
+        threading.Thread(target=_drain_pipe, args=(proc.stdout, stdout_sink), daemon=True),
+        threading.Thread(target=_drain_pipe, args=(proc.stderr, stderr_sink), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_process_tree(proc)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    finally:
+        for reader in readers:
+            reader.join(timeout=5)
+
+    stdout, stdout_truncated = stdout_sink.result()
+    stderr, stderr_truncated = stderr_sink.result()
+    return CapturedProcess(
+        returncode=proc.returncode if proc.returncode is not None else -1,
+        stdout=stdout,
+        stderr=stderr,
+        timed_out=timed_out,
+        stdout_truncated=stdout_truncated,
+        stderr_truncated=stderr_truncated,
+    )
 
 RUN_CODE_SCHEMA = {
     "type": "function",
@@ -119,16 +268,29 @@ def _run_sync(target: Path, rel: str) -> str:
         "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
     }
 
-    def runp(cmd: list[str], timeout: int, env_override: dict | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=timeout, env=env_override or env
+    def runp(cmd: list[str], timeout: int, env_override: dict | None = None) -> CapturedProcess:
+        return run_process_capped(
+            cmd,
+            cwd=cwd,
+            env=env_override or env,
+            timeout=timeout,
+        )
+
+    def report(label: str, captured: CapturedProcess) -> str:
+        if captured.timed_out:
+            return f"⏱ {rel} {label}이(가) 시간을 초과했습니다 (무한 루프·입력 대기 등을 확인하세요)."
+        return _fmt(
+            rel,
+            label,
+            captured.returncode,
+            captured.stdout.decode("utf-8", errors="replace"),
+            captured.stderr.decode("utf-8", errors="replace"),
         )
 
     try:
         if ext == ".py":
             r = runp([_find_python(), str(target)], RUN_TIMEOUT)
-            return _fmt(rel, "Python", r.returncode, r.stdout, r.stderr)
+            return report("Python", r)
 
         if ext in (".cpp", ".cc", ".cxx", ".c"):
             is_c = ext == ".c"
@@ -142,41 +304,39 @@ def _run_sync(target: Path, rel: str) -> str:
             cenv = env
             if cxx_bin:
                 cenv = {**env, "PATH": cxx_bin + os.pathsep + env.get("PATH", "")}
-            exe = str(Path(tempfile.gettempdir()) / f"aiso_run_{os.getpid()}.exe")
-            std = [] if is_c else ["-std=c++17"]
-            comp = runp([cxx, str(target), *std, "-O0", "-o", exe], BUILD_TIMEOUT, cenv)
-            if comp.returncode != 0:
-                return _fmt(rel, "컴파일", comp.returncode, comp.stdout, comp.stderr)
-            # 컴파일·링크 성공. 실행을 시도하되, Windows Smart App Control(SAC)이
-            # 갓 빌드된 무서명 exe 실행을 막으면(WinError 4551) 빌드 검증까지를 결과로 인정한다.
+            exe = str(Path(tempfile.gettempdir()) / f"aiso_run_{os.getpid()}_{uuid.uuid4().hex}.exe")
             try:
-                r = subprocess.run(
-                    [exe], cwd=cwd, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace", timeout=RUN_TIMEOUT, env=cenv
-                )
-                result = _fmt(rel, "C/C++ 실행", r.returncode, r.stdout, r.stderr)
-            except OSError as e:
-                if getattr(e, "winerror", None) == 4551:
-                    result = (
-                        f"✅ {rel} 컴파일·링크 성공 (C/C++). "
-                        "이 PC의 Smart App Control(SAC) 정책이 갓 빌드된 실행 파일의 실행을 차단해 "
-                        "런타임 검증은 생략했습니다 — 코드는 정상적으로 빌드됩니다."
-                    )
-                else:
-                    result = f"❌ {rel} 실행기 오류: {e}"
+                std = [] if is_c else ["-std=c++17"]
+                comp = runp([cxx, str(target), *std, "-O0", "-o", exe], BUILD_TIMEOUT, cenv)
+                if comp.timed_out:
+                    return report("컴파일", comp)
+                if comp.returncode != 0:
+                    return report("컴파일", comp)
+                # 컴파일·링크 성공. 실행을 시도하되, Windows Smart App Control(SAC)이
+                # 갓 빌드된 무서명 exe 실행을 막으면(WinError 4551) 빌드 검증까지를 결과로 인정한다.
+                try:
+                    r = runp([exe], RUN_TIMEOUT, cenv)
+                    return report("C/C++ 실행", r)
+                except OSError as e:
+                    if getattr(e, "winerror", None) == 4551:
+                        return (
+                            f"✅ {rel} 컴파일·링크 성공 (C/C++). "
+                            "이 PC의 Smart App Control(SAC) 정책이 갓 빌드된 실행 파일의 실행을 차단해 "
+                            "런타임 검증은 생략했습니다 — 코드는 정상적으로 빌드됩니다."
+                        )
+                    return f"❌ {rel} 실행기 오류: {e}"
             finally:
                 try:
                     os.remove(exe)
                 except OSError:
                     pass
-            return result
 
         if ext == ".cs":
             dn = _find_dotnet()
             if not dn:
                 return "[검증 불가] .NET SDK가 설치되어 있지 않습니다."
             r = runp([dn, "run", str(target)], BUILD_TIMEOUT)
-            return _fmt(rel, "C#", r.returncode, r.stdout, r.stderr)
+            return report("C#", r)
 
         return f"[검증 불가] 실행 검증을 지원하지 않는 확장자입니다: {ext} (지원: .py, .c, .cpp, .cs)"
     except subprocess.TimeoutExpired:

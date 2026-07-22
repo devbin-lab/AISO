@@ -1,5 +1,7 @@
 import { app, shell, BrowserWindow, ipcMain, nativeTheme, dialog, Tray, Menu, nativeImage } from 'electron'
 import { join } from 'path'
+import { mkdirSync } from 'fs'
+import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import trayIconAsset from '../../build/icon.png?asset'
 import { loadSettings, saveSettings, resetSettings } from './settings'
@@ -25,9 +27,14 @@ import {
   stopManagedComfyUI
 } from './comfy'
 import {
+  cancelComfyModelImport,
   clearComfyModelRegistry,
+  cleanupStaleComfyModelPartials,
+  disableComfyAgentProfiles,
   listComfyModelProfiles,
   pickAndImportComfyModelAssets,
+  pickAndImportComfyWorkflowTemplate,
+  removeComfyWorkflowTemplate,
   unregisterComfyModelProfile,
   updateComfyModelProfile
 } from './comfy-models'
@@ -49,6 +56,25 @@ import type { ConversationKind, ConversationSave } from '../shared/conversation'
 // (기본 모델 gemma4:12b는 여유가 있으나, 사용자가 gpt-oss로 바꿔도 안전하도록 상시 비활성.)
 app.disableHardwareAcceleration()
 
+// Chromium은 userData와 별개로 HTTP/GPU 캐시를 초기화한다. 기존 기본 cache 경로는
+// 다른 Electron 인스턴스·보안 프로그램과 경합할 때 Windows 접근 거부(0x5)로 cache 이동에
+// 실패했고, 개발 중에는 단일 인스턴스 잠금도 의도적으로 쓰지 않는다. 앱 데이터(설정·대화)는
+// 그대로 두고 Chromium 세션 캐시만 Aiso 전용 경로로 분리한다.
+// 개발 인스턴스는 PID별로 나눠 동시 실행 시에도 cache lock을 공유하지 않는다.
+const chromiumSessionRoot = join(
+  app.getPath(is.dev ? 'temp' : 'userData'),
+  is.dev ? `aiso-chromium-${process.pid}` : 'chromium-session'
+)
+try {
+  mkdirSync(chromiumSessionRoot, { recursive: true })
+  app.setPath('sessionData', chromiumSessionRoot)
+  app.commandLine.appendSwitch('disk-cache-dir', join(chromiumSessionRoot, 'Cache'))
+  // 하드웨어 가속은 이미 꺼져 있지만, Chromium이 별도의 GPU disk cache를 만들지 않게 한다.
+  app.commandLine.appendSwitch('disable-gpu-shader-disk-cache')
+} catch {
+  // 경로 초기화 실패 시 Electron 기본 경로를 사용한다. 앱 시작 자체를 막지는 않는다.
+}
+
 // ── 백그라운드 상주(트레이) + 로그인 자동 실행 ───────────────────────────
 // 창을 닫아도 앱(=사이드카=디스코드 봇·예약)이 트레이에 남아 계속 돌게 한다.
 // '완전 종료'(트레이 메뉴/자동 업데이트)만 실제로 앱을 끝낸다.
@@ -57,6 +83,15 @@ let tray: Tray | null = null
 let isQuitting = false
 // 로그인 자동 실행으로 켜졌으면 창을 띄우지 않고 트레이로만 시작한다.
 const startedHidden = process.argv.includes('--hidden') || app.getLoginItemSettings().wasOpenedAtLogin
+
+function isExternalHttpUrl(value: string): boolean {
+  try {
+    const protocol = new URL(value).protocol
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
+  }
+}
 
 function showMainWindow(): void {
   if (mainWindow) {
@@ -165,20 +200,28 @@ function createWindow(): void {
 
   // 외부 링크는 기본 브라우저로
   win.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    if (isExternalHttpUrl(details.url)) {
+      void shell.openExternal(details.url).catch(() => {})
+    }
     return { action: 'deny' }
   })
 
   // 최상위 창은 앱 화면 밖으로 절대 네비게이트되지 않는다 — 프리뷰 iframe 등이 top 프레임을
   // 악성 페이지로 이동시켜 window.api(대화기록·설정 IPC)를 노출하는 것을 원천 차단한다.
+  const dev = process.env['ELECTRON_RENDERER_URL']
+  const rendererFileUrl = pathToFileURL(join(__dirname, '../renderer/index.html')).href
   const isAppUrl = (url: string): boolean => {
-    const dev = process.env['ELECTRON_RENDERER_URL']
-    return (!!dev && url.startsWith(dev)) || url.startsWith('file://')
+    try {
+      if (dev) return new URL(url).origin === new URL(dev).origin
+      return url === rendererFileUrl
+    } catch {
+      return false
+    }
   }
   const blockOffAppNav = (e: Electron.Event, url: string): void => {
     if (isAppUrl(url)) return
     e.preventDefault()
-    if (url.startsWith('http://') || url.startsWith('https://')) {
+    if (isExternalHttpUrl(url)) {
       void shell.openExternal(url).catch(() => {})
     }
   }
@@ -196,6 +239,9 @@ function createWindow(): void {
 // 단일 인스턴스 — 트레이 상주 중 아이콘을 다시 눌러 두 번째 인스턴스가 뜨면 사이드카·봇이
 // 중복 기동(같은 토큰으로 게이트웨이 충돌)된다. 두 번째 실행은 기존 창을 띄우고 종료한다.
 // 개발(npm run dev)에선 락을 걸지 않는다 — 사용자의 재실행 워크플로를 방해하지 않도록.
+// 개발 서버는 설치본과 병렬로 실행할 수 있어야 한다. 그렇지 않으면 설치본이 가진
+// Windows 단일 인스턴스 잠금에 개발 프로세스가 연결되어, 현재 소스 대신 설치본 창만
+// 다시 활성화되고 개발 프로세스는 바로 종료된다. 배포본만 단일 인스턴스를 강제한다.
 const gotSingleInstanceLock = is.dev ? true : app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
   app.quit()
@@ -206,6 +252,9 @@ if (!gotSingleInstanceLock) {
 app.whenReady().then(() => {
   if (!gotSingleInstanceLock) return
   electronApp.setAppUserModelId('com.aiso.app')
+  // An interrupted SafeTensors copy can leave only Aiso-owned partial files.
+  // Clean those old files once at startup; ordinary model files are never touched.
+  cleanupStaleComfyModelPartials(loadSettings().comfyInstallPath)
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
@@ -233,7 +282,13 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('settings:set', (_e, patch: Partial<AppSettings>) => {
     console.log('[ipc] settings:set', Object.keys(patch ?? {}))
+    const previous = loadSettings()
     const next = saveSettings(patch)
+    if ('comfyInstallPath' in patch && next.comfyInstallPath !== previous.comfyInstallPath) {
+      // 설치본이 바뀌면 이전 ComfyUI에만 있던 파일을 새 설치본에도 있다고 가정할 수 없다.
+      // 실제 파일은 건드리지 않고, 재확인 전 Agent 자동 선택만 해제한다.
+      disableComfyAgentProfiles()
+    }
     // 상주/자동실행 토글이 바뀌면 트레이·로그인 항목을 즉시 반영(재시작 불필요).
     if ('trayResident' in patch || 'autoLaunch' in patch) {
       ensureTray()
@@ -289,12 +344,33 @@ app.whenReady().then(() => {
       if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
         win.webContents.send('comfy:model-import-progress', progress)
       }
-    })
+    }, () => loadSettings().comfyInstallPath === settings.comfyInstallPath)
+  })
+  ipcMain.handle('comfy:models:import:cancel', (e, operationId: unknown) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win !== mainWindow) throw new Error('모델 가져오기를 취소할 Aiso 창을 확인할 수 없습니다.')
+    return cancelComfyModelImport(operationId)
   })
   ipcMain.handle('comfy:models:update', (e, id: unknown, patch: unknown) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win || win !== mainWindow) throw new Error('모델을 변경할 Aiso 창을 확인할 수 없습니다.')
-    return updateComfyModelProfile(id, patch)
+    const settings = loadSettings()
+    return updateComfyModelProfile(
+      id,
+      patch,
+      settings.comfyInstallPath,
+      () => loadSettings().comfyInstallPath === settings.comfyInstallPath
+    )
+  })
+  ipcMain.handle('comfy:models:workflow:import', async (e, id: unknown) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win !== mainWindow) throw new Error('워크플로를 연결할 Aiso 창을 확인할 수 없습니다.')
+    return pickAndImportComfyWorkflowTemplate(win, id)
+  })
+  ipcMain.handle('comfy:models:workflow:remove', (e, id: unknown) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win !== mainWindow) throw new Error('워크플로를 변경할 Aiso 창을 확인할 수 없습니다.')
+    return removeComfyWorkflowTemplate(id)
   })
   ipcMain.handle('comfy:models:unregister', (e, id: unknown) => {
     const win = BrowserWindow.fromWebContents(e.sender)

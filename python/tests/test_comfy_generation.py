@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -59,6 +61,106 @@ def raw_profile(
     }
 
 
+def raw_flux2_klein_profile() -> dict:
+    return {
+        "id": "flux2_klein",
+        "name": "FLUX.2 Klein 4B",
+        "family": "flux2",
+        "capabilities": ["txt2img"],
+        "tags": ["illustration", "character", "general-purpose"],
+        "assets": [
+            {
+                "id": "flux2_model",
+                "kind": "diffusion_model",
+                "slot": "diffusion_model",
+                "fileName": "flux-2-klein-4b-fp8.safetensors",
+                "comfyName": "flux-2-klein-4b-fp8.safetensors",
+                "relativePath": "diffusion_models/flux-2-klein-4b-fp8.safetensors",
+                "size": 4_000_000_000,
+                "sha256": "c" * 64,
+                "importedAt": 1,
+            },
+            {
+                "id": "flux2_qwen",
+                "kind": "text_encoder",
+                "slot": "qwen3",
+                "fileName": "qwen_3_4b.safetensors",
+                "comfyName": "qwen_3_4b.safetensors",
+                "relativePath": "text_encoders/qwen_3_4b.safetensors",
+                "size": 8_000_000_000,
+                "sha256": "d" * 64,
+                "importedAt": 1,
+            },
+            {
+                "id": "flux2_vae",
+                "kind": "vae",
+                "slot": "vae",
+                "fileName": "flux2-vae.safetensors",
+                "comfyName": "flux2-vae.safetensors",
+                "relativePath": "vae/flux2-vae.safetensors",
+                "size": 336_000_000,
+                "sha256": "e" * 64,
+                "importedAt": 1,
+            },
+        ],
+        "workflowTemplateId": "flux2.txt2img.v1",
+        "defaults": {"width": 1024, "height": 1024, "steps": 4, "cfg": 1.0, "sampler": "euler"},
+        "agentEnabled": True,
+        "priority": 10,
+        "createdAt": 1,
+        "updatedAt": 1,
+    }
+
+
+def raw_user_workflow_profile() -> dict:
+    raw = raw_profile(ident="user_workflow", name="User API Workflow")
+    base = cw.normalize_profile(raw)
+    options = cw.resolve_generation_options(
+        base, prompt="template prompt", negative_prompt="template negative", seed=1
+    )
+    graph = cw.build_workflow(
+        base, options, prompt_id="55555555-5555-4555-8555-555555555555"
+    )
+    bindings = {
+        "positivePrompt": [{"nodeId": "2", "input": "text"}],
+        "negativePrompt": [{"nodeId": "3", "input": "text"}],
+        "seed": [{"nodeId": "5", "input": "seed"}],
+        "width": [{"nodeId": "4", "input": "width"}],
+        "height": [{"nodeId": "4", "input": "height"}],
+        "steps": [{"nodeId": "5", "input": "steps"}],
+        "cfg": [{"nodeId": "5", "input": "cfg"}],
+        "sampler": [{"nodeId": "5", "input": "sampler_name"}],
+        "scheduler": [{"nodeId": "5", "input": "scheduler"}],
+        "filenamePrefix": [{"nodeId": "7", "input": "filename_prefix"}],
+    }
+    asset = raw["assets"][0]
+    asset_bindings = [{
+        "nodeId": "1",
+        "input": "ckpt_name",
+        "assetId": asset["id"],
+        "sha256": asset["sha256"],
+        "relativePath": asset["relativePath"],
+        "comfyName": graph["1"]["inputs"]["ckpt_name"],
+    }]
+    digest = hashlib.sha256(json.dumps(
+        {"graph": graph, "bindings": bindings, "assetBindings": asset_bindings}, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    template_id = f"user.{digest[:20]}.txt2img.v1"
+    raw["workflowTemplateId"] = template_id
+    raw["workflowTemplate"] = {
+        "schemaVersion": 1,
+        "id": template_id,
+        "sourceFileName": "user-api.json",
+        "sha256": digest,
+        "graph": graph,
+        "bindings": bindings,
+        "assetBindings": asset_bindings,
+        "importedAt": 1,
+    }
+    return raw
+
+
 def sd_node_info(profile: cw.ModelProfile, node_class: str) -> dict:
     contract = cw.node_contracts_for_architecture(profile.architecture)[node_class]
     required = {name: ["MODEL", {}] for name in contract.required_inputs}
@@ -85,8 +187,51 @@ def sd_node_info(profile: cw.ModelProfile, node_class: str) -> dict:
     return info
 
 
-def install_success_fakes(monkeypatch, profiles: list[dict], *, seed_output: int = 42) -> dict:
-    normalized = [cw.normalize_profile(profile) for profile in profiles]
+def flux2_node_info(profile: cw.ModelProfile, node_class: str) -> dict:
+    contract = cw.node_contracts_for_architecture(profile.architecture)[node_class]
+    required = {name: ["MODEL", {}] for name in contract.required_inputs}
+    info = {"name": node_class, "python_module": contract.module, "input": {"required": required}}
+    assets = cw.required_assets(profile)
+    if node_class == "UNETLoader":
+        required.update({
+            "unet_name": [[assets["diffusion_model"].comfy_name], {}],
+            "weight_dtype": [["default"], {}],
+        })
+    elif node_class == "CLIPLoader":
+        required.update({"clip_name": [[assets["qwen3"].comfy_name], {}], "type": [["flux2"], {}]})
+    elif node_class == "VAELoader":
+        required["vae_name"] = [[assets["vae"].comfy_name], {}]
+    elif node_class == "KSamplerSelect":
+        required["sampler_name"] = ["COMBO", {"options": ["euler"]}]
+    elif node_class == "Flux2Scheduler":
+        required.update({
+            "steps": ["INT", {"min": 1, "max": 4096}],
+            "width": ["INT", {"min": 16, "max": 16384}],
+            "height": ["INT", {"min": 16, "max": 16384}],
+        })
+    elif node_class == "EmptyFlux2LatentImage":
+        required.update({
+            "width": ["INT", {"min": 16, "max": 16384}],
+            "height": ["INT", {"min": 16, "max": 16384}],
+        })
+    elif node_class == "RandomNoise":
+        required["noise_seed"] = ["INT", {"min": 0, "max": cw.MAX_SEED}]
+    elif node_class == "CFGGuider":
+        required["cfg"] = ["FLOAT", {"min": 0.0, "max": 100.0}]
+    return info
+
+
+def install_success_fakes(
+    monkeypatch,
+    profiles: list[dict],
+    *,
+    seed_output: int = 42,
+    allow_manual_only_profiles: bool = False,
+) -> dict:
+    normalized = [
+        cw.normalize_profile(profile, require_agent_enabled=not allow_manual_only_profiles)
+        for profile in profiles
+    ]
     inventory = {
         "checkpoints": [cw.primary_model_name(profile) for profile in normalized],
     }
@@ -151,6 +296,50 @@ def install_success_fakes(monkeypatch, profiles: list[dict], *, seed_output: int
     return captured
 
 
+def install_flux2_success_fakes(monkeypatch, profile: dict) -> dict:
+    normalized = cw.normalize_profile(profile)
+    captured: dict = {}
+
+    async def capability(_base_url):
+        return {"supported": True}
+
+    async def get_inventory(_base_url, folders):
+        assert folders == frozenset({"diffusion_models", "text_encoders", "vae"})
+        return {
+            "diffusion_models": ["flux-2-klein-4b-fp8.safetensors"],
+            "text_encoders": ["qwen_3_4b.safetensors"],
+            "vae": ["flux2-vae.safetensors"],
+        }
+
+    async def get_node_info(_base_url, node_class):
+        return flux2_node_info(normalized, node_class)
+
+    async def submit(_base_url, workflow, *, client_id, prompt_id):
+        captured["workflow"] = workflow
+        captured["prompt_id"] = prompt_id
+        return {"promptId": prompt_id, "queueNumber": 1, "nodeErrors": {}}
+
+    async def get_job(_base_url, prompt_id):
+        return {
+            "promptId": prompt_id,
+            "status": "completed",
+            "terminal": True,
+            "outputs": [{"nodeId": "13", "index": 0, "filename": "klein.png", "subfolder": "Aiso", "storageType": "output"}],
+            "error": None,
+        }
+
+    async def release_models(_base_url):
+        return {"requested": True}
+
+    monkeypatch.setattr(comfy_client, "get_jobs_capability", capability)
+    monkeypatch.setattr(comfy_client, "get_models_inventory", get_inventory)
+    monkeypatch.setattr(comfy_client, "get_node_info", get_node_info)
+    monkeypatch.setattr(comfy_client, "submit_prompt", submit)
+    monkeypatch.setattr(comfy_client, "get_job", get_job)
+    monkeypatch.setattr(comfy_client, "release_models", release_models)
+    return captured
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -176,7 +365,7 @@ def test_generate_image_uses_typescript_profile_defaults_and_returns_reference_o
     )
     image = result["image"]
     assert captured["order"][:3] == ["capability", "inventory", "submit"]
-    assert captured["order"][-1] == "release"
+    assert "release" not in captured["order"]
     assert image["profileId"] == "anime_model"
     assert image["modelName"] == "user-anime.safetensors"
     assert (image["width"], image["height"], image["steps"], image["cfg"]) == (832, 1216, 30, 6.0)
@@ -196,9 +385,131 @@ def test_generate_image_uses_typescript_profile_defaults_and_returns_reference_o
     assert "작업 ID" in generation.result_to_tool_text(result)
 
 
+def test_generate_image_manual_profile_id_overrides_prompt_and_model_hint(monkeypatch):
+    manual = raw_profile(
+        ident="manual_anime",
+        name="Manual Anime",
+        tag="anime",
+        priority=1,
+        checkpoint="manual-anime.safetensors",
+    )
+    automatic = raw_profile(
+        ident="automatic_texture",
+        name="Automatic Texture",
+        tag="texture",
+        priority=100,
+        checkpoint="automatic-texture.safetensors",
+    )
+    # This profile is deliberately not an automatic Agent candidate. Manual
+    # selection may still use it after all normal workflow/asset checks pass.
+    manual["agentEnabled"] = False
+    captured = install_success_fakes(
+        monkeypatch,
+        [manual, automatic],
+        allow_manual_only_profiles=True,
+    )
+
+    result = run(
+        generation.generate_image(
+            base_url="http://127.0.0.1:8188",
+            profiles=[manual, automatic],
+            prompt="photorealistic texture",
+            model_hint="Automatic Texture",
+            selected_profile_id="manual_anime",
+        )
+    )
+
+    assert captured["selected_model"] == "manual-anime.safetensors"
+    assert result["image"]["profileId"] == "manual_anime"
+    assert "수동" in result["image"]["selectionReason"]
+
+
+def test_generate_image_compiles_and_submits_flux2_klein_official_contract(monkeypatch):
+    profile = raw_flux2_klein_profile()
+    captured = install_flux2_success_fakes(monkeypatch, profile)
+    result = run(
+        generation.generate_image(
+            base_url="http://127.0.0.1:8188",
+            profiles=[profile],
+            prompt="a silver bob-haired character in a navy futuristic jacket",
+            negative_prompt="ignored",
+            seed="7",
+        )
+    )
+    workflow = captured["workflow"]
+    assert workflow["2"]["inputs"] == {"clip_name": "qwen_3_4b.safetensors", "type": "flux2"}
+    assert workflow["9"]["inputs"] == {"steps": 4, "width": 1024, "height": 1024}
+    assert workflow["5"]["class_type"] == "ConditioningZeroOut"
+    assert result["image"]["profileId"] == "flux2_klein"
+    assert result["image"]["effectiveNegativePrompt"] == ""
+    assert result["image"]["workflow"] == workflow
+
+
+def test_generate_image_runs_user_api_workflow_without_family_inventory_assumptions(monkeypatch):
+    profile = raw_user_workflow_profile()
+    normalized = cw.normalize_profile(profile)
+    captured: dict = {"inventory_called": False}
+
+    async def capability(_base_url):
+        return {"supported": True}
+
+    async def inventory(*_args, **_kwargs):
+        captured["inventory_called"] = True
+        raise AssertionError("사용자 워크플로는 family 폴더 inventory를 추측하면 안 됩니다.")
+
+    async def contracted_inventory(*_args, **_kwargs):
+        captured["inventory_called"] = True
+        return {"checkpoints": ["user-anime.safetensors"]}
+
+    async def node_info(_base_url, node_class):
+        base = cw.normalize_profile(raw_profile())
+        return sd_node_info(base, node_class)
+
+    async def submit(_base_url, workflow, *, client_id, prompt_id):
+        captured["workflow"] = workflow
+        return {"promptId": prompt_id, "queueNumber": 1, "nodeErrors": {}}
+
+    async def job(_base_url, prompt_id):
+        return {
+            "promptId": prompt_id,
+            "status": "completed",
+            "terminal": True,
+            "outputs": [{
+                "nodeId": "7", "index": 0, "filename": "user.png",
+                "subfolder": "Aiso", "storageType": "output",
+            }],
+            "error": None,
+        }
+
+    async def release(_base_url):
+        return {"requested": True}
+
+    monkeypatch.setattr(comfy_client, "get_jobs_capability", capability)
+    monkeypatch.setattr(comfy_client, "get_models_inventory", contracted_inventory)
+    monkeypatch.setattr(comfy_client, "get_node_info", node_info)
+    monkeypatch.setattr(comfy_client, "submit_prompt", submit)
+    monkeypatch.setattr(comfy_client, "get_job", job)
+    monkeypatch.setattr(comfy_client, "release_models", release)
+
+    result = run(generation.generate_image(
+        base_url="http://127.0.0.1:8188",
+        profiles=[profile],
+        prompt="new architecture prompt",
+        negative_prompt="artifact",
+        seed="77",
+    ))
+    assert captured["inventory_called"] is True
+    assert captured["workflow"]["2"]["inputs"]["text"] == "new architecture prompt"
+    assert captured["workflow"]["3"]["inputs"]["text"] == "artifact"
+    assert captured["workflow"]["5"]["inputs"]["seed"] == 77
+    assert result["image"]["workflow"] == captured["workflow"]
+    assert result["image"]["modelName"] == "user-anime.safetensors"
+
+
 def test_release_failure_does_not_hide_completed_image(monkeypatch, caplog):
     profile = raw_profile()
     install_success_fakes(monkeypatch, [profile])
+    monkeypatch.setattr(generation, "RELEASE_MODELS_AFTER_AISO_JOB", True)
 
     async def fail_release(_base_url):
         raise comfy_client.ComfyAPIError("해제 실패")
@@ -213,6 +524,31 @@ def test_release_failure_does_not_hide_completed_image(monkeypatch, caplog):
     )
     assert result["image"]["filename"] == "result_00001_.png"
     assert "VRAM 해제 요청 실패" in caplog.text
+
+
+def test_generation_coordinator_only_releases_after_its_last_aiso_job(monkeypatch):
+    releases = []
+
+    async def release(base_url):
+        releases.append(base_url)
+        return {"requested": True}
+
+    monkeypatch.setattr(generation, "RELEASE_MODELS_AFTER_AISO_JOB", True)
+    monkeypatch.setattr(comfy_client, "release_models", release)
+
+    async def scenario():
+        first = await generation._begin_generation("http://127.0.0.1:8188")
+        second = await generation._begin_generation("http://127.0.0.1:8188")
+        await generation._finish_generation(
+            "http://127.0.0.1:8188", first, submission_attempted=True
+        )
+        assert releases == []
+        await generation._finish_generation(
+            "http://127.0.0.1:8188", second, submission_attempted=True
+        )
+
+    run(scenario())
+    assert releases == ["http://127.0.0.1:8188"]
 
 
 def test_hidden_selection_context_affects_tags_but_not_workflow_prompt(monkeypatch):
@@ -328,7 +664,7 @@ def test_ambiguous_submit_timeout_is_never_retryable_even_when_cancel_fails(monk
     assert "작업 취소를 확인하지 못했습니다" in str(error.value)
     assert len(captured["submissions"]) == 1
     assert cancels == [captured["submissions"][0][1]]
-    assert captured["order"][-1] == "release"
+    assert "release" not in captured["order"]
 
 
 @pytest.mark.parametrize(
@@ -375,7 +711,7 @@ def test_cancelled_agent_request_targets_submitted_prompt_only(monkeypatch):
             )
     )
     assert cancelled == [("http://127.0.0.1:8188", captured["prompt_id"])]
-    assert captured["order"][-1] == "release"
+    assert "release" not in captured["order"]
 
 
 @pytest.mark.parametrize("status", ["failed", "cancelled"])
@@ -402,7 +738,7 @@ def test_terminal_failure_never_claims_an_image(monkeypatch, status):
             )
         )
     assert error.value.kind == "terminal"
-    assert captured["order"][-1] == "release"
+    assert "release" not in captured["order"]
 
 
 def test_local_input_validation_is_structured_as_input_error():
@@ -417,37 +753,27 @@ def test_local_input_validation_is_structured_as_input_error():
     assert error.value.kind == "input"
 
 
-def test_animagine_policy_effective_prompts_and_actual_safe_workflow_are_returned(monkeypatch):
-    profile = raw_profile(
-        name="My verified Animagine",
-        tag="animagine-xl-4.0-opt",
-        checkpoint="renamed-animagine.safetensors",
-    )
-    profile["assets"][0]["sha256"] = (
-        "6327eca98bfb6538dd7a4edce22484a1bbc57a8cff6b11d075d40da1afb847ac"
-    )
+def test_prompt_policy_keeps_prompts_and_safe_workflow_unchanged(monkeypatch):
+    profile = raw_profile(name="User-supplied model", tag="character")
     captured = install_success_fakes(monkeypatch, [profile])
+    prompt = "blue hair, 1girl, masterpiece, blue hair, cherry blossoms"
+    negative_prompt = "bad hands, custom artifact"
     result = run(
         generation.generate_image(
             base_url="http://127.0.0.1:8188",
             profiles=[profile],
-            prompt="blue hair, 1girl, masterpiece, blue hair, cherry blossoms",
-            negative_prompt="bad hands, custom artifact",
+            prompt=prompt,
+            negative_prompt=negative_prompt,
             seed="7",
         )
     )
     image = result["image"]
-    expected_positive = (
-        "1girl, blue hair, cherry blossoms, masterpiece, high score, great score, absurdres"
-    )
-    assert image["originalPrompt"] == (
-        "blue hair, 1girl, masterpiece, blue hair, cherry blossoms"
-    )
-    assert image["effectivePrompt"] == expected_positive
-    assert image["effectiveNegativePrompt"].startswith("custom artifact, lowres, bad anatomy")
-    assert image["prompt"] == expected_positive
-    assert captured["workflow"]["2"]["inputs"]["text"] == expected_positive
-    assert captured["workflow"]["3"]["inputs"]["text"] == image["effectiveNegativePrompt"]
+    assert image["originalPrompt"] == prompt
+    assert image["effectivePrompt"] == prompt
+    assert image["effectiveNegativePrompt"] == negative_prompt
+    assert image["prompt"] == prompt
+    assert captured["workflow"]["2"]["inputs"]["text"] == prompt
+    assert captured["workflow"]["3"]["inputs"]["text"] == negative_prompt
     assert image["workflow"] == captured["workflow"]
     assert image["workflow"]["5"]["inputs"]["positive"] == ["2", 0]
     assert "client_id" not in repr(image["workflow"])
@@ -459,12 +785,11 @@ def test_animagine_policy_effective_prompts_and_actual_safe_workflow_are_returne
         "addedPositive",
         "addedNegative",
     }
-    assert image["promptPolicy"]["id"] == cw.ANIMAGINE_XL_4_POLICY_ID
-    assert image["promptPolicy"]["addedPositive"] == [
-        "high score",
-        "great score",
-        "absurdres",
-    ]
-    assert "SHA-256" in image["promptPolicy"]["description"]
-    assert cw.ANIMAGINE_XL_4_POLICY_LABEL in result["summary"]
-    assert cw.ANIMAGINE_XL_4_POLICY_LABEL in generation.result_to_tool_text(result)
+    assert image["promptPolicy"] == {
+        "id": "none",
+        "label": "모델 기본 프롬프트",
+        "description": "Aiso는 모델별 프롬프트 태그나 지침을 자동으로 추가하지 않습니다.",
+        "addedPositive": [],
+        "addedNegative": [],
+    }
+    assert "프롬프트 정책: 모델 기본 프롬프트 (none)" in generation.result_to_tool_text(result)

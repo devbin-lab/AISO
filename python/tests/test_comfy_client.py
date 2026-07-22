@@ -258,6 +258,28 @@ def test_node_info_uses_one_encoded_allowlisted_class_name(monkeypatch):
         run(comfy_client.get_node_info("http://127.0.0.1:8188", "../SaveImage"))
 
 
+def test_node_infos_fetches_a_bounded_set_concurrently(monkeypatch):
+    active = 0
+    peak = 0
+
+    async def fake_node_info(_base_url, node_class):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {"name": node_class, "python_module": "nodes", "input": {}}
+
+    monkeypatch.setattr(comfy_client, "get_node_info", fake_node_info)
+    result = run(comfy_client.get_node_infos(
+        "http://127.0.0.1:8188", {"SaveImage", "KSampler", "VAEDecode"}
+    ))
+    assert set(result) == {"SaveImage", "KSampler", "VAEDecode"}
+    assert peak > 1
+    with pytest.raises(comfy_client.ComfyAPIError):
+        run(comfy_client.get_node_infos("http://127.0.0.1:8188", {f"Node{i}" for i in range(65)}))
+
+
 def test_jobs_capability_probes_local_jobs_schema(monkeypatch):
     async def fake_get_json(base_url, route):
         assert base_url == "http://127.0.0.1:8188"

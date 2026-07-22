@@ -80,6 +80,26 @@ def _rel(root: Path, target: Path) -> str:
         return str(target)
 
 
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+
+
+def _is_link_or_reparse_point(path: Path) -> bool:
+    """Return whether a child can redirect traversal outside the workspace.
+
+    ``Path.is_symlink`` covers POSIX links, while Windows directory junctions are
+    reparse points and do not reliably report as symlinks. Never recurse through
+    either kind of entry from a workspace tree listing.
+    """
+    try:
+        if path.is_symlink():
+            return True
+        attrs = getattr(path.lstat(), "st_file_attributes", 0)
+        return bool(attrs & _FILE_ATTRIBUTE_REPARSE_POINT)
+    except OSError:
+        # An inaccessible or racing entry should not be followed optimistically.
+        return True
+
+
 # ---- 안전 툴 (자동 실행) ----
 
 def list_dir(root: Path, path: str = ".") -> str:
@@ -131,6 +151,9 @@ def list_tree(root: Path, path: str = ".", max_depth: int = 4) -> str:
                 state["truncated"] = True
                 return
             state["count"] += 1
+            if _is_link_or_reparse_point(p):
+                lines.append(f"{prefix}{p.name}  [링크/정션 — 탐색 생략]")
+                continue
             if p.is_dir():
                 lines.append(f"{prefix}{p.name}/")
                 if p.name in _TREE_SKIP:
@@ -441,17 +464,22 @@ def multi_edit(root: Path, path: str, edits: list) -> str:
 
 
 def _trash_or_remove(target: Path, is_dir: bool) -> str:
-    """가능하면 휴지통으로 보내(복구 가능), 실패 시 영구 삭제로 폴백. 처리 방식 라벨 반환."""
+    """Move to the recycle bin, or fail without deleting anything.
+
+    An approved reversible delete must not silently turn into permanent removal
+    because the recycle-bin provider is unavailable (for example on a network
+    share). Permanent deletion needs a separate, explicit product flow.
+    """
     try:
         from send2trash import send2trash  # 잘못 지워도 사용자가 휴지통에서 복구 가능
         send2trash(str(target))
         return "휴지통으로 보냄"
-    except Exception:  # noqa: BLE001 — 미설치/실패 시 영구 삭제로 폴백
-        if is_dir:
-            shutil.rmtree(target)
-        else:
-            target.unlink()
-        return "삭제함"
+    except Exception as e:  # noqa: BLE001
+        kind = "폴더" if is_dir else "파일"
+        raise ToolError(
+            f"{kind}을(를) 휴지통으로 옮기지 못했습니다({type(e).__name__}). "
+            "영구 삭제로 대체하지 않았습니다. 휴지통을 사용할 수 있는 위치인지 확인한 뒤 다시 시도하세요."
+        ) from e
 
 
 def delete_file(root: Path, path: str) -> str:

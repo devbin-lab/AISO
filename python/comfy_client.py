@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import re
@@ -23,6 +24,8 @@ _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _REQUEST_TIMEOUT_SECONDS = 3.0
 _MAX_WORKFLOW_BYTES = 1024 * 1024
 _MAX_IMAGE_BYTES = 50 * 1024 * 1024
+_MAX_NODE_INFO_BATCH = 64
+_NODE_INFO_CONCURRENCY = 8
 _MODEL_FOLDERS = frozenset(
     {
         "checkpoints",
@@ -373,6 +376,35 @@ async def get_node_info(base_url: str, node_class: str) -> dict[str, Any]:
     return payload[node_class]
 
 
+async def get_node_infos(base_url: str, node_classes: Any) -> dict[str, dict[str, Any]]:
+    """Fetch a bounded set of node contracts concurrently.
+
+    ComfyUI exposes each node through ``/object_info/<class>``.  A workflow
+    can contain several distinct core nodes, so serial three-second requests
+    make an otherwise valid workflow appear hung.  The bounded fan-out keeps a
+    local server responsive and avoids an unbounded request burst.
+    """
+    if isinstance(node_classes, (str, bytes)):
+        raise ComfyAPIError("ComfyUI 노드 목록 형식이 올바르지 않습니다.")
+    try:
+        classes = sorted(set(node_classes))
+    except TypeError as exc:
+        raise ComfyAPIError("ComfyUI 노드 목록 형식이 올바르지 않습니다.") from exc
+    if not classes or len(classes) > _MAX_NODE_INFO_BATCH or any(
+        not isinstance(node_class, str) or not _NODE_CLASS_RE.fullmatch(node_class)
+        for node_class in classes
+    ):
+        raise ComfyAPIError("ComfyUI 노드 계약 조회 범위를 벗어났습니다.")
+    semaphore = asyncio.Semaphore(_NODE_INFO_CONCURRENCY)
+
+    async def load(node_class: str) -> tuple[str, dict[str, Any]]:
+        async with semaphore:
+            return node_class, await get_node_info(base_url, node_class)
+
+    pairs = await asyncio.gather(*(load(node_class) for node_class in classes))
+    return dict(pairs)
+
+
 async def get_jobs_capability(base_url: str) -> dict[str, Any]:
     """추적·단일 취소가 가능한 ComfyUI 0.28 local jobs API를 사전 확인한다."""
     normalized = normalize_base_url(base_url)
@@ -603,6 +635,7 @@ __all__ = [
     "get_model_files",
     "get_models_inventory",
     "get_node_info",
+    "get_node_infos",
     "normalize_base_url",
     "release_models",
     "submit_prompt",

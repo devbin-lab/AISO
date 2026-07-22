@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AppSettings, ReasoningEffort } from '../../../shared/settings'
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import type {
@@ -33,6 +33,7 @@ import {
 import Dropdown, { type DropdownOption } from '../components/Dropdown'
 import GeneratedImage from '../components/GeneratedImage'
 import { ensureComfyReadyForAgent, looksLikeImageGenerationRequest } from '../lib/comfy'
+import { getComfyAgentReadiness, type ComfyModelProfile } from '../../../shared/comfy-model'
 
 const EFFORT_OPTIONS: DropdownOption[] = [
   { value: 'low', label: '낮음', hint: '빠름' },
@@ -44,6 +45,22 @@ const APPROVAL_OPTIONS: DropdownOption[] = APPROVAL_MODES.map((m) => ({
   label: m.label,
   hint: m.hint
 }))
+
+/**
+ * 자동 모드에서는 Agent 자동 선택 허용 모델만, 수동 모드에서는 등록·검증이 완료된
+ * 모든 모델을 후보로 노출한다. `agentEnabled`는 자동 선택 허용 플래그일 뿐 모델 자체의
+ * 수동 실행 가능 여부를 뜻하지 않는다.
+ */
+async function listComfyProfilesForAgent(manualSelection: boolean): Promise<ComfyModelProfile[]> {
+  try {
+    const registry = await window.api.comfy.models.list()
+    return registry.profiles.filter(
+      (profile) => getComfyAgentReadiness(profile).ready && (manualSelection || profile.agentEnabled)
+    )
+  } catch {
+    return []
+  }
+}
 
 type ToolStatus = 'running' | 'awaiting' | 'done' | 'error' | 'rejected'
 
@@ -67,7 +84,7 @@ interface Props {
   backend: BackendInfo
   health: HealthInfo | null
   onPickWorkspace: () => Promise<void>
-  onSaveSettings: (patch: Partial<AppSettings>) => Promise<void>
+  onSaveSettings: (patch: Partial<AppSettings>) => Promise<boolean>
   convCollapsed: boolean
 }
 
@@ -101,6 +118,9 @@ function AgentView({
   const [indexing, setIndexing] = useState(false)
   const [indexProg, setIndexProg] = useState<{ done: number; total: number } | null>(null)
   const [ragNote, setRagNote] = useState<string | null>(null)
+  const [manualComfyProfiles, setManualComfyProfiles] = useState<ComfyModelProfile[]>([])
+  const [manualComfyProfileId, setManualComfyProfileId] = useState('')
+  const [manualComfyLoading, setManualComfyLoading] = useState(false)
   const [elapsed, setElapsed] = useState(0) // 현재 실행 경과(초) — '멈춘 것처럼 보임' 방지용 활동 표시
   const [liveTokens, setLiveTokens] = useState(0) // 이번 실행 누적 토큰(실시간 표시)
   const runStartRef = useRef(0)
@@ -148,6 +168,29 @@ function AgentView({
     window.api.conversations.list('agent').then(setConvList).catch(() => {})
   }
   useEffect(() => refreshConvs(), [])
+
+  const refreshManualComfyProfiles = useCallback(async (): Promise<void> => {
+    setManualComfyLoading(true)
+    try {
+      const profiles = await listComfyProfilesForAgent(true)
+      setManualComfyProfiles(profiles)
+      // 수동 모드에서는 임의의 첫 모델을 고르지 않는다. 사용자가 명시적으로 선택해야 한다.
+      setManualComfyProfileId((current) =>
+        profiles.some((profile) => profile.id === current) ? current : ''
+      )
+    } finally {
+      setManualComfyLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (settings.comfyModelSelectionMode === 'manual') {
+      void refreshManualComfyProfiles()
+      return
+    }
+    setManualComfyProfiles([])
+    setManualComfyProfileId('')
+  }, [settings.comfyModelSelectionMode, refreshManualComfyProfiles])
 
   // 실행이 끝나면 세션 저장 (스크린샷은 용량 커서 제외 — 재실행 시 재생성됨)
   useEffect(() => {
@@ -327,6 +370,32 @@ function AgentView({
   const send = async (): Promise<void> => {
     const text = input.trim()
     if (!text || !ready || running) return
+    const previousAssistant = [...historyRef.current]
+      .reverse()
+      .find((message) => message.role === 'assistant')?.content ?? ''
+    const imageRequested = looksLikeImageGenerationRequest(text, previousAssistant)
+    const manualSelection = settings.comfyModelSelectionMode === 'manual'
+    const availableComfyProfiles = await listComfyProfilesForAgent(manualSelection)
+    const selectedComfyProfile = availableComfyProfiles.find(
+      (profile) => profile.id === manualComfyProfileId
+    )
+    if (manualSelection && imageRequested && !selectedComfyProfile) {
+      setNote(
+        availableComfyProfiles.length === 0
+          ? '수동 선택에 사용할 준비된 ComfyUI 모델이 없습니다. 설정에서 모델과 워크플로 연결 상태를 확인하세요.'
+          : '수동 선택 모드입니다. 입력창 아래에서 이미지 생성 모델을 선택한 뒤 다시 실행하세요.'
+      )
+      return
+    }
+    // 수동 모드는 선택한 한 모델만 백엔드로 전달한다. LLM의 model_hint로 다른 모델을 고를 수 없다.
+    const comfyProfiles =
+      manualSelection
+        ? selectedComfyProfile
+          ? [selectedComfyProfile]
+          : []
+        : availableComfyProfiles
+    const selectedComfyModelId =
+      manualSelection ? selectedComfyProfile?.id ?? null : null
     // 새 세션의 첫 지시 → 대화 id·제목 부여 (이후 저장 이펙트가 영속화)
     if (!convIdRef.current) {
       const id = newConversationId()
@@ -353,15 +422,7 @@ function AgentView({
         : String(Math.random())
 
     try {
-      const comfyProfiles = await window.api.comfy.models
-        .list()
-        .then((registry) => registry.profiles.filter((profile) => profile.agentEnabled))
-        .catch(() => [])
-      const previousAssistant = [...historyRef.current]
-        .slice(0, -1)
-        .reverse()
-        .find((message) => message.role === 'assistant')?.content ?? ''
-      if (comfyProfiles.length > 0 && looksLikeImageGenerationRequest(text, previousAssistant)) {
+      if (comfyProfiles.length > 0 && imageRequested) {
         setNote('ComfyUI 실행 상태를 확인하고 있습니다…')
         await ensureComfyReadyForAgent(
           backend.port!,
@@ -380,7 +441,8 @@ function AgentView({
         approvalMode,
         comfyProfiles,
         reduce,
-        ac.signal
+        ac.signal,
+        { selectedComfyModelId: selectedComfyModelId ?? undefined }
       )
     } catch (err) {
       setNote(null)
@@ -519,6 +581,11 @@ function AgentView({
       : settings.model
         ? [{ value: settings.model, label: settings.model }]
         : []
+  const manualComfyOptions: DropdownOption[] = manualComfyProfiles.map((profile) => ({
+    value: profile.id,
+    label: profile.name,
+    hint: profile.tags.slice(0, 3).join(', ') || '준비된 ComfyUI 모델'
+  }))
 
   let notice: { text: string; kind: 'err' | 'warn' } | null = null
   if (backend.state !== 'ready') notice = { text: '백엔드 엔진 준비 중…', kind: 'warn' }
@@ -775,6 +842,31 @@ function AgentView({
           align="left"
           title="승인 모드 — 수동(전부 승인) · 읽기(쓰기·삭제만 승인) · 자동(승인 없음)"
         />
+
+        {settings.comfyModelSelectionMode === 'manual' && (
+          <div className="composer-tools__manual-model">
+            <span className="composer-tools__label">이미지 모델</span>
+            <Dropdown
+              value={manualComfyProfileId}
+              options={manualComfyOptions}
+              onChange={setManualComfyProfileId}
+              align="left"
+              disabled={running || manualComfyLoading}
+              title="수동 선택 모드의 이미지 생성 모델"
+              placeholder={manualComfyLoading ? '모델 목록 불러오는 중…' : '모델 선택'}
+            />
+            <button
+              className="iconbtn"
+              type="button"
+              data-tip="이미지 모델 목록 새로고침"
+              aria-label="이미지 모델 목록 새로고침"
+              onClick={() => void refreshManualComfyProfiles()}
+              disabled={running || manualComfyLoading}
+            >
+              <RefreshIcon />
+            </button>
+          </div>
+        )}
 
         <div className="composer-tools__right">
           <Dropdown

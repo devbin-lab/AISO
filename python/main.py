@@ -9,7 +9,7 @@ import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Response
@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent import MAX_GEN_TOKENS, resolve_approval, run_agent, run_research_chat
+from toolspec import get_builtin_tool_catalog
 from comfy_client import (
     ComfyAPIError,
     DEFAULT_COMFY_BASE_URL,
@@ -567,6 +568,15 @@ class AgentRequest(BaseModel):
     keep_alive: str = "30m"
     comfy_base_url: str | None = None
     comfy_profiles: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    # Manual selection is a profile ID, not a free-form model name.  The agent
+    # validates it again against the registered profile data before execution.
+    comfy_selection_mode: Literal["auto", "manual"] = "auto"
+    selected_comfy_model_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._-]+$",
+    )
 
 
 class ApprovalRequest(BaseModel):
@@ -601,10 +611,22 @@ async def agent(req: AgentRequest):
             keep_alive=req.keep_alive,
             comfy_base_url=req.comfy_base_url,
             comfy_profiles=req.comfy_profiles,
+            comfy_selection_mode=req.comfy_selection_mode,
+            selected_comfy_model_id=req.selected_comfy_model_id,
         ):
             yield json.dumps(ev, ensure_ascii=False) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+@app.get("/agent/tools")
+async def agent_tools():
+    """설정 화면용 내장 Agent 툴 카탈로그.
+
+    사용자 스킬은 런타임 확장이라 포함하지 않고, 실제 레지스트리와 조건부 이미지 생성
+    도구만 읽기 전용으로 반환한다. 다른 Agent 경로와 동일하게 세션 토큰 인증이 적용된다.
+    """
+    return {"tools": get_builtin_tool_catalog()}
 
 
 # ---- RAG: 작업 폴더 의미 색인/검색 (임베딩 모델 = 채팅 모델과 독립) ----

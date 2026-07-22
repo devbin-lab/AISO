@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import type { AppSettings } from '../../shared/settings'
 import { DEFAULT_SETTINGS } from '../../shared/settings'
 import type { BackendInfo, HealthInfo } from '../../shared/backend'
@@ -6,16 +6,25 @@ import Titlebar from './components/Titlebar'
 import Sidebar, { type ViewKey } from './components/Sidebar'
 import TooltipHost from './components/Tooltip'
 import { ConfirmHost } from './components/ConfirmDialog'
-import HomeView from './views/HomeView'
-import ChatView from './views/ChatView'
-import AgentView from './views/AgentView'
-import ComfyView from './views/ComfyView'
-import SettingsView from './views/SettingsView'
 import { applyTheme } from './lib/theme'
 import { authHeaders } from './lib/backend'
 
+// Heavy views (Markdown, ComfyUI controls, settings integrations) are split from
+// the startup bundle. A visited view remains mounted so active conversations and
+// unsaved settings retain their existing behavior.
+const HomeView = lazy(() => import('./views/HomeView'))
+const ChatView = lazy(() => import('./views/ChatView'))
+const AgentView = lazy(() => import('./views/AgentView'))
+const ComfyView = lazy(() => import('./views/ComfyView'))
+const SettingsView = lazy(() => import('./views/SettingsView'))
+
+function ViewFallback(): React.JSX.Element {
+  return <div className="view-loading" role="status">화면을 준비하고 있습니다…</div>
+}
+
 function App(): React.JSX.Element {
   const [view, setView] = useState<ViewKey>('home')
+  const [visitedViews, setVisitedViews] = useState<Set<ViewKey>>(() => new Set(['home']))
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [backend, setBackend] = useState<BackendInfo>({ state: 'starting', port: null })
   const [health, setHealth] = useState<HealthInfo | null>(null)
@@ -94,20 +103,28 @@ function App(): React.JSX.Element {
     }
   }
 
-  const saveSettings = async (patch: Partial<AppSettings>): Promise<void> => {
-    let next: AppSettings = { ...settings, ...patch }
+  /** 실제 저장에 성공했을 때만 Renderer 상태를 갱신한다.
+   * false는 호출자가 저장 완료 UI나 후속 작업을 진행하면 안 된다는 뜻이다. */
+  const saveSettings = async (patch: Partial<AppSettings>): Promise<boolean> => {
     try {
+      let next: AppSettings = { ...settings, ...patch }
       if (window.api?.settings) {
         next = await window.api.settings.set(patch)
       }
+      setSettings(next)
+      return true
     } catch (err) {
       console.error('설정 저장 실패:', err)
+      return false
     }
-    setSettings(next)
   }
 
   // 뷰는 숨김 처리로 유지 → 채팅 대화가 뷰 전환에 사라지지 않는다
   const wrap = (k: ViewKey): string => `viewwrap${view === k ? '' : ' viewwrap--hidden'}`
+  const navigate = (next: ViewKey): void => {
+    setVisitedViews((current) => current.has(next) ? current : new Set(current).add(next))
+    setView(next)
+  }
 
   const convToggle =
     view === 'chat'
@@ -120,51 +137,13 @@ function App(): React.JSX.Element {
     <div className="frame">
       <Titlebar backend={backend} health={health} convToggle={convToggle} />
       <div className="body">
-        <Sidebar view={view} onNavigate={setView} />
+        <Sidebar view={view} onNavigate={navigate} />
         <main className="content">
-          <div className={wrap('home')}>
-            <HomeView
-              settings={settings}
-              backend={backend}
-              health={health}
-              onSaveSettings={saveSettings}
-            />
-          </div>
-          <div className={wrap('chat')}>
-            <ChatView
-              settings={settings}
-              backend={backend}
-              health={health}
-              onSaveSettings={saveSettings}
-              convCollapsed={chatConvCollapsed}
-            />
-          </div>
-          <div className={wrap('agent')}>
-            <AgentView
-              settings={settings}
-              backend={backend}
-              health={health}
-              onPickWorkspace={pickWorkspace}
-              onSaveSettings={saveSettings}
-              convCollapsed={agentConvCollapsed}
-            />
-          </div>
-          <div className={wrap('comfy')}>
-            <ComfyView
-              settings={settings}
-              backend={backend}
-              active={view === 'comfy'}
-              onSaveSettings={saveSettings}
-            />
-          </div>
-          <div className={wrap('settings')}>
-            <SettingsView
-              settings={settings}
-              health={health}
-              onSave={saveSettings}
-              active={view === 'settings'}
-            />
-          </div>
+          {visitedViews.has('home') && <div className={wrap('home')}><Suspense fallback={<ViewFallback />}><HomeView settings={settings} backend={backend} health={health} onSaveSettings={saveSettings} /></Suspense></div>}
+          {visitedViews.has('chat') && <div className={wrap('chat')}><Suspense fallback={<ViewFallback />}><ChatView settings={settings} backend={backend} health={health} onSaveSettings={saveSettings} convCollapsed={chatConvCollapsed} /></Suspense></div>}
+          {visitedViews.has('agent') && <div className={wrap('agent')}><Suspense fallback={<ViewFallback />}><AgentView settings={settings} backend={backend} health={health} onPickWorkspace={pickWorkspace} onSaveSettings={saveSettings} convCollapsed={agentConvCollapsed} /></Suspense></div>}
+          {visitedViews.has('comfy') && <div className={wrap('comfy')}><Suspense fallback={<ViewFallback />}><ComfyView settings={settings} backend={backend} active={view === 'comfy'} onSaveSettings={saveSettings} /></Suspense></div>}
+          {visitedViews.has('settings') && <div className={wrap('settings')}><Suspense fallback={<ViewFallback />}><SettingsView settings={settings} backend={backend} health={health} onSave={saveSettings} active={view === 'settings'} /></Suspense></div>}
         </main>
       </div>
       <TooltipHost />

@@ -17,7 +17,7 @@ interface Props {
   settings: AppSettings
   backend: BackendInfo
   health: HealthInfo | null
-  onSaveSettings: (patch: Partial<AppSettings>) => Promise<void>
+  onSaveSettings: (patch: Partial<AppSettings>) => Promise<boolean>
 }
 
 const BACKEND_LABEL: Record<BackendInfo['state'], string> = {

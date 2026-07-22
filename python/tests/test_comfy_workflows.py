@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -93,6 +95,125 @@ def flux_profile(*, extras: list[dict] | None = None) -> dict:
     }
 
 
+def flux2_klein_profile() -> dict:
+    return {
+        "id": "profile_flux2_klein",
+        "name": "FLUX.2 Klein 4B",
+        "family": "flux2",
+        "capabilities": ["txt2img"],
+        "tags": ["general-purpose", "illustration", "character"],
+        "assets": [
+            asset("diffusion_model", "diffusion_model", "flux-2-klein-4b-fp8.safetensors"),
+            asset("text_encoder", "qwen3", "qwen_3_4b.safetensors"),
+            asset("vae", "vae", "flux2-vae.safetensors"),
+        ],
+        "workflowTemplateId": "flux2.txt2img.v1",
+        "defaults": {"width": 1024, "height": 1024, "steps": 4, "cfg": 1.0, "sampler": "euler"},
+        "agentEnabled": True,
+        "priority": 5,
+        "createdAt": 1,
+        "updatedAt": 1,
+    }
+
+
+def user_api_profile() -> dict:
+    graph = {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "anime-xl.safetensors"}},
+        "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "AISO_PROMPT", "clip": ["1", 1]}},
+        "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "AISO_NEGATIVE_PROMPT", "clip": ["1", 1]}},
+        "4": {"class_type": "EmptyLatentImage", "inputs": {"width": 768, "height": 1024, "batch_size": 1}},
+        "5": {
+            "class_type": "KSampler",
+            "inputs": {
+                "model": ["1", 0], "seed": 1, "steps": 28, "cfg": 5.5,
+                "sampler_name": "dpmpp_2m", "scheduler": "karras",
+                "positive": ["2", 0], "negative": ["3", 0], "latent_image": ["4", 0], "denoise": 1.0,
+            },
+        },
+        "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
+        "7": {"class_type": "SaveImage", "inputs": {"images": ["6", 0], "filename_prefix": "ComfyUI"}},
+    }
+    bindings = {
+        "positivePrompt": [{"nodeId": "2", "input": "text"}],
+        "negativePrompt": [{"nodeId": "3", "input": "text"}],
+        "seed": [{"nodeId": "5", "input": "seed"}],
+        "width": [{"nodeId": "4", "input": "width"}],
+        "height": [{"nodeId": "4", "input": "height"}],
+        "steps": [{"nodeId": "5", "input": "steps"}],
+        "cfg": [{"nodeId": "5", "input": "cfg"}],
+        "sampler": [{"nodeId": "5", "input": "sampler_name"}],
+        "scheduler": [{"nodeId": "5", "input": "scheduler"}],
+        "filenamePrefix": [{"nodeId": "7", "input": "filename_prefix"}],
+    }
+    asset_bindings = [{
+        "nodeId": "1",
+        "input": "ckpt_name",
+        "assetId": "custom_asset",
+        "sha256": "a" * 64,
+        "relativePath": "checkpoints/anime-xl.safetensors",
+        "comfyName": "anime-xl.safetensors",
+    }]
+    encoded = json.dumps(
+        {"graph": graph, "bindings": bindings, "assetBindings": asset_bindings}, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    template_id = f"user.{digest[:20]}.txt2img.v1"
+    return {
+        "id": "profile_user_api",
+        "name": "Future architecture",
+        "family": "custom",
+        "capabilities": ["txt2img"],
+        "tags": ["future"],
+        "assets": [{
+            "id": "custom_asset",
+            "kind": "custom",
+            "fileName": "anime-xl.safetensors",
+            "comfyName": "anime-xl.safetensors",
+            "relativePath": "checkpoints/anime-xl.safetensors",
+            "size": 6_000_000_000,
+            "sha256": "a" * 64,
+            "importedAt": 1,
+        }],
+        "workflowTemplateId": template_id,
+        "workflowTemplate": {
+            "schemaVersion": 1,
+            "id": template_id,
+            "sourceFileName": "future-api.json",
+            "sha256": digest,
+            "graph": graph,
+            "bindings": bindings,
+            "assetBindings": asset_bindings,
+            "importedAt": 1,
+        },
+        "defaults": {
+            "width": 768, "height": 1024, "steps": 28, "cfg": 5.5,
+            "sampler": "dpmpp_2m", "scheduler": "karras",
+        },
+        "agentEnabled": True,
+        "priority": 7,
+        "createdAt": 1,
+        "updatedAt": 1,
+    }
+
+
+def rehash_user_template(raw: dict) -> None:
+    template = raw["workflowTemplate"]
+    digest = hashlib.sha256(json.dumps(
+        {
+            "graph": template["graph"],
+            "bindings": template["bindings"],
+            "assetBindings": template["assetBindings"],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    template["sha256"] = digest
+    template["id"] = f"user.{digest[:20]}.txt2img.v1"
+    raw["workflowTemplateId"] = template["id"]
+
+
 def inventory_for(profiles: list[cw.ModelProfile]) -> dict[str, list[str]]:
     result: dict[str, list[str]] = {}
     for profile in profiles:
@@ -103,12 +224,13 @@ def inventory_for(profiles: list[cw.ModelProfile]) -> dict[str, list[str]]:
 
 def node_infos(profile: cw.ModelProfile) -> dict[str, dict]:
     infos = {}
+    required = cw.required_assets(profile)
     for node_class, contract in cw.node_contracts_for_architecture(profile.architecture).items():
-        required = {name: ["MODEL", {}] for name in contract.required_inputs}
+        node_required = {name: ["MODEL", {}] for name in contract.required_inputs}
         infos[node_class] = {
             "name": node_class,
             "python_module": contract.module,
-            "input": {"required": required},
+            "input": {"required": node_required},
         }
     if profile.architecture in {cw.ARCH_SD15, cw.ARCH_SDXL}:
         checkpoint = cw.required_assets(profile)["checkpoint"].comfy_name
@@ -128,8 +250,7 @@ def node_infos(profile: cw.ModelProfile) -> dict[str, dict]:
                 "height": ["INT", {"min": 16, "max": 16384}],
             }
         )
-    else:
-        required = cw.required_assets(profile)
+    elif profile.architecture == cw.ARCH_FLUX1_SPLIT:
         infos["UNETLoader"]["input"]["required"].update(
             {
                 "unet_name": [[required["diffusion_model"].comfy_name], {}],
@@ -144,7 +265,7 @@ def node_infos(profile: cw.ModelProfile) -> dict[str, dict]:
             }
         )
         infos["VAELoader"]["input"]["required"]["vae_name"] = [[required["vae"].comfy_name], {}]
-        infos["KSamplerSelect"]["input"]["required"]["sampler_name"] = [["euler"], {}]
+        infos["KSamplerSelect"]["input"]["required"]["sampler_name"] = ["COMBO", {"options": ["euler"]}]
         infos["BasicScheduler"]["input"]["required"].update(
             {
                 "scheduler": [["simple", "normal"], {}],
@@ -165,6 +286,36 @@ def node_infos(profile: cw.ModelProfile) -> dict[str, dict]:
             "FLOAT",
             {"min": 0.0, "max": 100.0},
         ]
+    else:
+        infos["UNETLoader"]["input"]["required"].update(
+            {
+                "unet_name": [[required["diffusion_model"].comfy_name], {}],
+                "weight_dtype": [["default", "fp8_e4m3fn"], {}],
+            }
+        )
+        infos["CLIPLoader"]["input"]["required"].update(
+            {
+                "clip_name": [[required["qwen3"].comfy_name], {}],
+                "type": [["flux2", "stable_diffusion"], {}],
+            }
+        )
+        infos["VAELoader"]["input"]["required"]["vae_name"] = [[required["vae"].comfy_name], {}]
+        infos["KSamplerSelect"]["input"]["required"]["sampler_name"] = ["COMBO", {"options": ["euler"]}]
+        infos["Flux2Scheduler"]["input"]["required"].update(
+            {
+                "steps": ["INT", {"min": 1, "max": 4096}],
+                "width": ["INT", {"min": 16, "max": 16384}],
+                "height": ["INT", {"min": 16, "max": 16384}],
+            }
+        )
+        infos["EmptyFlux2LatentImage"]["input"]["required"].update(
+            {
+                "width": ["INT", {"min": 16, "max": 16384}],
+                "height": ["INT", {"min": 16, "max": 16384}],
+            }
+        )
+        infos["RandomNoise"]["input"]["required"]["noise_seed"] = ["INT", {"min": 0, "max": cw.MAX_SEED}]
+        infos["CFGGuider"]["input"]["required"]["cfg"] = ["FLOAT", {"min": 0.0, "max": 100.0}]
     return infos
 
 
@@ -261,6 +412,66 @@ def test_selection_exact_hint_then_tags_then_priority_is_deterministic():
     assert selected.id == "texture"
 
 
+def test_manual_profile_selection_is_exact_and_never_falls_back_to_another_model():
+    anime = cw.normalize_profile(sd_profile(ident="anime", name="Anime", tags=["anime"], priority=1))
+    texture = cw.normalize_profile(
+        sd_profile(
+            ident="texture",
+            name="Texture",
+            tags=["texture"],
+            priority=50,
+            checkpoint="texture.safetensors",
+        )
+    )
+    inventory = inventory_for([anime, texture])
+
+    # The prompt and LLM-supplied hint point to Texture, but the user's exact
+    # profile ID wins in manual mode.
+    selected, reason = cw.select_profile(
+        [anime, texture],
+        inventory,
+        prompt="photorealistic texture",
+        model_hint="Texture",
+        selected_profile_id="anime",
+    )
+    assert selected.id == "anime"
+    assert "수동" in reason
+
+    # A stale or unavailable selection is an error, not an automatic fallback.
+    with pytest.raises(cw.WorkflowValidationError, match="수동으로 선택한 모델"):
+        cw.select_profile(
+            [anime, texture],
+            {"checkpoints": ["texture.safetensors"]},
+            prompt="anime",
+            selected_profile_id="anime",
+        )
+    with pytest.raises(cw.WorkflowValidationError, match="수동 선택 모델 ID"):
+        cw.select_profile(
+            [anime, texture],
+            inventory,
+            prompt="anime",
+            selected_profile_id="../anime",
+        )
+
+
+def test_manual_profile_normalization_allows_auto_disabled_but_valid_registered_model():
+    raw = sd_profile(ident="manual_only", enabled=False)
+    with pytest.raises(cw.WorkflowValidationError, match="Agent 자동 선택"):
+        cw.normalize_profile(raw)
+
+    manual_only = cw.normalize_profile(raw, require_agent_enabled=False)
+    assert manual_only.id == "manual_only"
+    assert manual_only.agent_enabled is False
+    selected, reason = cw.select_profile(
+        [manual_only],
+        inventory_for([manual_only]),
+        prompt="anime",
+        selected_profile_id="manual_only",
+    )
+    assert selected.id == "manual_only"
+    assert "수동" in reason
+
+
 def test_missing_higher_ranked_model_falls_back_to_installed_profile():
     missing = cw.normalize_profile(sd_profile(ident="missing", priority=100))
     ready = cw.normalize_profile(
@@ -308,6 +519,86 @@ def test_flux_workflow_is_split_and_does_not_inject_negative_prompt():
     assert {node["class_type"] for node in workflow.values()} <= set(cw.FLUX_NODE_CONTRACTS)
 
 
+def test_flux2_klein_workflow_uses_qwen3_flux2_scheduler_and_official_zero_negative():
+    profile = cw.normalize_profile(flux2_klein_profile())
+    assert profile.architecture == cw.ARCH_FLUX2_KLEIN_4B
+    assert set(cw.required_assets(profile)) == {"diffusion_model", "qwen3", "vae"}
+    options = cw.resolve_generation_options(profile, prompt="navy futuristic jacket", negative_prompt="ignored", seed=7)
+    assert (options.width, options.height, options.steps, options.cfg, options.sampler) == (1024, 1024, 4, 1.0, "euler")
+    cw.validate_runtime_options(profile, options, node_infos(profile))
+    workflow = cw.build_workflow(profile, options, prompt_id="33333333-3333-4333-8333-333333333333")
+    assert workflow["2"]["inputs"] == {"clip_name": "qwen_3_4b.safetensors", "type": "flux2"}
+    assert workflow["5"]["class_type"] == "ConditioningZeroOut"
+    assert workflow["6"]["inputs"]["negative"] == ["5", 0]
+    assert workflow["9"]["inputs"] == {"steps": 4, "width": 1024, "height": 1024}
+    assert "ignored" not in repr(workflow)
+    assert {node["class_type"] for node in workflow.values()} <= set(cw.FLUX2_KLEIN_NODE_CONTRACTS)
+
+
+def test_user_api_workflow_enables_unknown_model_and_injects_only_bound_generation_values():
+    profile = cw.normalize_profile(user_api_profile())
+    assert profile.architecture == cw.ARCH_USER_API
+    assert cw.required_assets(profile) == {}
+    options = cw.resolve_generation_options(
+        profile, prompt="rainy future city", negative_prompt="cartoon", seed=99,
+        width=1024, height=768,
+    )
+    infos = node_infos(cw.normalize_profile(sd_profile()))
+    cw.validate_runtime_options(profile, options, infos)
+    workflow = cw.build_workflow(
+        profile, options, prompt_id="44444444-4444-4444-8444-444444444444"
+    )
+    assert workflow["2"]["inputs"]["text"] == "rainy future city"
+    assert workflow["3"]["inputs"]["text"] == "cartoon"
+    assert workflow["4"]["inputs"]["width"] == 1024
+    assert workflow["4"]["inputs"]["height"] == 768
+    assert workflow["5"]["inputs"]["seed"] == 99
+    assert workflow["7"]["inputs"]["filename_prefix"].startswith("Aiso/")
+    assert cw.snapshot_workflow(workflow, allow_user_template=True) == workflow
+
+
+def test_user_template_snapshot_allows_live_optional_core_node_inputs():
+    """The runtime node schema, not Aiso's narrow built-in template, owns optional inputs."""
+    profile = cw.normalize_profile(sd_profile())
+    options = cw.resolve_generation_options(profile, prompt="x", seed=1)
+    workflow = cw.build_workflow(
+        profile, options, prompt_id="45454545-4545-4545-8454-454545454545"
+    )
+    workflow["5"]["inputs"]["optional_knob"] = 0.5
+
+    snapshot = cw.snapshot_workflow(workflow, allow_user_template=True)
+    assert snapshot["5"]["inputs"]["optional_knob"] == 0.5
+
+
+def test_user_api_workflow_rejects_changed_hash_and_non_core_runtime_node():
+    changed = user_api_profile()
+    changed["workflowTemplate"]["graph"]["5"]["inputs"]["steps"] = 60
+    with pytest.raises(cw.WorkflowValidationError, match="해시"):
+        cw.normalize_profile(changed)
+
+    profile = cw.normalize_profile(user_api_profile())
+    options = cw.resolve_generation_options(profile, prompt="x", seed=1)
+    infos = node_infos(cw.normalize_profile(sd_profile()))
+    infos["KSampler"]["python_module"] = "custom_nodes.remote_runner"
+    with pytest.raises(cw.WorkflowValidationError, match="기본 노드"):
+        cw.validate_runtime_options(profile, options, infos)
+
+
+def test_user_api_workflow_rejects_a_loader_bound_to_a_different_registered_asset():
+    broken = user_api_profile()
+    broken["workflowTemplate"]["assetBindings"][0]["sha256"] = "b" * 64
+    rehash_user_template(broken)
+    with pytest.raises(cw.WorkflowValidationError, match="등록 자산"):
+        cw.normalize_profile(broken)
+
+    wrong_name = user_api_profile()
+    wrong_name["workflowTemplate"]["graph"]["1"]["inputs"]["ckpt_name"] = "other.safetensors"
+    wrong_name["workflowTemplate"]["assetBindings"][0]["comfyName"] = "other.safetensors"
+    rehash_user_template(wrong_name)
+    with pytest.raises(cw.WorkflowValidationError, match="등록 자산"):
+        cw.normalize_profile(wrong_name)
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -341,113 +632,32 @@ def test_node_contract_rejects_custom_override_missing_input_and_server_seed_lim
         cw.validate_runtime_options(profile, options, infos)
 
 
-def test_animagine_official_sha_applies_suffixes_without_duplicates():
-    raw = sd_profile(
-        name="사용자 지정 애니 모델",
-        tags=["anime", "animagine-xl-4.0-opt"],
-        checkpoint="renamed-user-model.safetensors",
+def test_prompt_policy_is_neutral_pass_through_for_every_model_profile():
+    prompt = "blue hair, masterpiece, 1girl, blue hair, cherry blossoms"
+    negative_prompt = "custom artifact, BAD HANDS, bad hands"
+    sdxl = cw.normalize_profile(
+        sd_profile(name="User-supplied SDXL", tags=["anime", "character"])
     )
-    raw["assets"][0]["sha256"] = (
-        "6327eca98bfb6538dd7a4edce22484a1bbc57a8cff6b11d075d40da1afb847ac"
-    )
-    profile = cw.normalize_profile(raw)
-    applied = cw.apply_prompt_policy(
-        profile,
-        prompt="blue hair, masterpiece, 1girl, blue hair, cherry blossoms",
-        negative_prompt="custom artifact, BAD HANDS, bad hands",
-    )
-    assert applied["originalPrompt"] == (
-        "blue hair, masterpiece, 1girl, blue hair, cherry blossoms"
-    )
-    assert applied["effectivePrompt"] == (
-        "1girl, blue hair, cherry blossoms, masterpiece, high score, great score, absurdres"
-    )
-    assert applied["effectiveNegativePrompt"].startswith("custom artifact, lowres, bad anatomy")
-    assert applied["effectiveNegativePrompt"].count("bad hands") == 1
-    assert applied["promptPolicy"] == {
-        "id": cw.ANIMAGINE_XL_4_POLICY_ID,
-        "label": cw.ANIMAGINE_XL_4_POLICY_LABEL,
-        "description": applied["promptPolicy"]["description"],
-        "addedPositive": ["high score", "great score", "absurdres"],
-        "addedNegative": [
-            tag for tag in cw.ANIMAGINE_XL_4_NEGATIVE_TAGS if tag != "bad hands"
-        ],
-    }
-    assert "SHA-256" in applied["promptPolicy"]["description"]
+    flux = cw.normalize_profile(flux_profile())
 
-
-def test_animagine_file_name_alone_does_not_activate_policy():
-    profile = cw.normalize_profile(
-        sd_profile(
-            name="My General SDXL",
-            tags=["anime"],
-            checkpoint="animagine-xl-4.0-opt.safetensors",
+    for profile in (sdxl, flux):
+        applied = cw.apply_prompt_policy(
+            profile,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
         )
-    )
-    assert cw.prompt_policy_match_for_profile(profile) is None
-    applied = cw.apply_prompt_policy(profile, prompt="A girl under cherry blossoms")
-    assert applied["effectivePrompt"] == "A girl under cherry blossoms"
-    assert applied["effectiveNegativePrompt"] == ""
-    assert applied["promptPolicy"]["id"] == "none"
-
-
-def test_animagine_official_sha_is_required_identity_evidence():
-    raw = sd_profile(
-        name="Renamed verified model",
-        tags=["anime"],
-        checkpoint="renamed.safetensors",
-    )
-    raw["assets"][0]["sha256"] = (
-        "1d5b43ff75b6ab598502d4c779d2fbfa3dceca51c60c3b609640a60772333916"
-    )
-    match = cw.prompt_policy_match_for_profile(cw.normalize_profile(raw))
-    assert match is not None
-    assert match.id == cw.ANIMAGINE_XL_4_POLICY_ID
-    assert "SHA-256" in match.description
-
-
-def test_animagine_canonical_name_and_file_without_official_sha_do_not_activate_policy():
-    raw = sd_profile(
-        name="Animagine XL 4.0 Opt",
-        tags=["animagine-xl-4.0-opt"],
-        checkpoint="animagine-xl-4.0-opt.safetensors",
-    )
-    assert cw.prompt_policy_match_for_profile(cw.normalize_profile(raw)) is None
-
-
-def test_animagine_policy_is_never_applied_to_flux_or_generic_sdxl():
-    raw_flux = flux_profile()
-    raw_flux["tags"] = ["animagine-xl-4.0"]
-    flux = cw.normalize_profile(raw_flux)
-    generic = cw.normalize_profile(sd_profile(name="Generic SDXL", tags=["anime"]))
-    tagged_impostor = cw.normalize_profile(
-        sd_profile(name="Generic SDXL", tags=["animagine-xl-4.0-opt"])
-    )
-    assert cw.prompt_policy_match_for_profile(flux) is None
-    assert cw.prompt_policy_match_for_profile(generic) is None
-    assert cw.prompt_policy_match_for_profile(tagged_impostor) is None
-    assert cw.apply_prompt_policy(flux, prompt="texture")["promptPolicy"]["id"] == "none"
-
-
-def test_raw_profile_policy_hint_guides_llm_to_tag_prompt_without_prose():
-    raw = sd_profile(
-        name="Animagine XL 4.0 Opt",
-        tags=["anime"],
-        checkpoint="animagine-xl-4.0-opt.safetensors",
-    )
-    raw["assets"][0]["sha256"] = (
-        "6327eca98bfb6538dd7a4edce22484a1bbc57a8cff6b11d075d40da1afb847ac"
-    )
-    hint = cw.prompt_policy_hint_for_raw_profile(raw)
-    assert hint is not None
-    assert hint["id"] == cw.ANIMAGINE_XL_4_POLICY_ID
-    assert "쉼표 구분 태그" in hint["instructions"]
-    assert "1girl" in hint["instructions"] and "1boy" in hint["instructions"]
-    assert "산문" in hint["instructions"]
-    assert cw.prompt_policy_hint_for_raw_profile(sd_profile(tags=["anime"])) is None
-    assert cw.prompt_policy_hint_for_raw_profile(
-        sd_profile(name="Generic SDXL", tags=["animagine-xl-4.0-opt"])
-    ) is None
+        assert applied == {
+            "originalPrompt": prompt,
+            "effectivePrompt": prompt,
+            "effectiveNegativePrompt": negative_prompt,
+            "promptPolicy": {
+                "id": "none",
+                "label": "모델 기본 프롬프트",
+                "description": "Aiso는 모델별 프롬프트 태그나 지침을 자동으로 추가하지 않습니다.",
+                "addedPositive": [],
+                "addedNegative": [],
+            },
+        }
 
 
 def test_workflow_snapshot_is_independent_and_keeps_safe_connections_only():

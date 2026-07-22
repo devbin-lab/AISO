@@ -3,10 +3,12 @@ import { createHash, randomUUID } from 'crypto'
 import {
   createReadStream,
   createWriteStream,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -17,13 +19,31 @@ import {
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'path'
 import { Transform } from 'stream'
 import { pipeline } from 'stream/promises'
+import { isDeepStrictEqual } from 'util'
 import { appDataFrozen } from './appdata-guard'
+import {
+  COMFY_WORKFLOW_TEMPLATE_MAX_BYTES,
+  bindComfyWorkflowTemplateAssets,
+  parseComfyWorkflowTemplate,
+  parseStoredComfyWorkflowTemplate
+} from './comfy-workflow-template'
+import {
+  inferComfyModelAssetFromHeader,
+  inferComfyModelFamilyFromSafeTensors,
+  readSafeTensorsHeader
+} from './comfy-model-analysis'
 import {
   COMFY_ASSET_KINDS,
   COMFY_ASSET_SLOTS,
+  COMFY_ASSET_SLOT_LABELS,
   COMFY_MODEL_CAPABILITIES,
   COMFY_MODEL_FAMILIES,
   DEFAULT_COMFY_GENERATION,
+  getComfyAgentReadiness,
+  getComfyWorkflowAssetBindingStatus,
+  getComfyGenerationDefaults,
+  getComfyRequiredSlots,
+  type ComfyAutomaticAssetKind,
   type ComfyAssetKind,
   type ComfyAssetSlot,
   type ComfyGenerationDefaults,
@@ -45,8 +65,13 @@ const KIND_SET = new Set<string>(COMFY_ASSET_KINDS)
 const SLOT_SET = new Set<string>(COMFY_ASSET_SLOTS)
 const FAMILY_SET = new Set<string>(COMFY_MODEL_FAMILIES)
 const CAPABILITY_SET = new Set<string>(COMFY_MODEL_CAPABILITIES)
+const MAX_REGISTRY_BACKUP_BYTES = 16 * 1024 * 1024
+const STALE_PARTIAL_AGE_MS = 24 * 60 * 60 * 1000
+const MAX_PARTIAL_SCAN_ENTRIES = 10_000
+const MAX_PARTIAL_SCAN_DEPTH = 8
+const AISO_PARTIAL_FILE_RE = /\.safetensors\.[A-Za-z0-9_-]{1,100}\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.partial$/i
 
-const DESTINATION_BY_KIND: Record<ComfyAssetKind, string> = {
+const DESTINATION_BY_KIND: Record<ComfyAutomaticAssetKind, string> = {
   checkpoint: 'checkpoints',
   diffusion_model: 'diffusion_models',
   text_encoder: 'text_encoders',
@@ -55,19 +80,12 @@ const DESTINATION_BY_KIND: Record<ComfyAssetKind, string> = {
   controlnet: 'controlnet'
 }
 
-const DEFAULT_SLOT_BY_KIND: Partial<Record<ComfyAssetKind, ComfyAssetSlot>> = {
-  checkpoint: 'checkpoint',
-  diffusion_model: 'diffusion_model',
-  vae: 'vae',
-  lora: 'lora',
-  controlnet: 'controlnet'
-}
-
-const SLOT_KIND: Record<ComfyAssetSlot, ComfyAssetKind> = {
+const SLOT_KIND: Record<ComfyAssetSlot, ComfyAutomaticAssetKind> = {
   checkpoint: 'checkpoint',
   diffusion_model: 'diffusion_model',
   clip_l: 'text_encoder',
   t5xxl: 'text_encoder',
+  qwen3: 'text_encoder',
   vae: 'vae',
   lora: 'lora',
   controlnet: 'controlnet'
@@ -78,13 +96,62 @@ const SINGLETON_SLOTS = new Set<ComfyAssetSlot>([
   'diffusion_model',
   'clip_l',
   't5xxl',
+  'qwen3',
   'vae'
 ])
 
 type ProgressCallback = (progress: ComfyModelImportProgress) => void
+type InstallPathCurrentCheck = () => boolean
 type JsonObject = Record<string, unknown>
 
+class ComfyModelImportCancelledError extends Error {
+  constructor() {
+    super('모델 파일 가져오기가 취소되었습니다.')
+  }
+}
+
+interface PlannedImportAsset {
+  source: string
+  fileName: string
+  size: number
+  kind: ComfyAssetKind
+  slot?: ComfyAssetSlot
+  agentFamilies: readonly ComfyModelFamily[]
+  /** ComfyUI/models 기준 POSIX 상대 폴더. */
+  destinationFolderName: string
+}
+
 let importBusy = false
+let registryRevision = 0
+let registryRecovery: { fingerprint: string; error: Error } | undefined
+let activeImportOperationId: string | undefined
+let activeImportCancelled = false
+
+function assertInstallPathCurrent(check?: InstallPathCurrentCheck): void {
+  if (check?.() === false) {
+    throw new Error('ComfyUI 설치 폴더가 작업 중 변경되었습니다. 현재 설치 폴더를 확인한 뒤 다시 시도해 주세요.')
+  }
+}
+
+function assertRegistryCurrent(revision: number): void {
+  if (registryRevision !== revision) {
+    throw new Error('모델 목록이 다른 작업으로 변경되었습니다. 최신 목록을 확인한 뒤 다시 시도해 주세요.')
+  }
+}
+
+function assertImportNotCancelled(operationId: string): void {
+  if (activeImportOperationId === operationId && activeImportCancelled) {
+    throw new ComfyModelImportCancelledError()
+  }
+}
+
+/** IPC may call this while a large SafeTensors copy/hash is in progress. */
+export function cancelComfyModelImport(operationId: unknown): boolean {
+  if (typeof operationId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(operationId)) return false
+  if (activeImportOperationId !== operationId) return false
+  activeImportCancelled = true
+  return true
+}
 
 function registryPath(): string {
   return join(app.getPath('userData'), 'comfy-models.json')
@@ -92,6 +159,40 @@ function registryPath(): string {
 
 function emptyRegistry(): ComfyModelRegistry {
   return { schemaVersion: REGISTRY_VERSION, profiles: [] }
+}
+
+function registryFingerprint(file: string): string {
+  const stat = statSync(file)
+  return `${stat.size}:${stat.mtimeMs}`
+}
+
+function registryRecoveryError(file: string, cause: unknown): Error {
+  let fingerprint = 'unavailable'
+  try {
+    fingerprint = registryFingerprint(file)
+    if (registryRecovery?.fingerprint === fingerprint) return registryRecovery.error
+  } catch {
+    // The caller will surface the original read error below.
+  }
+
+  let recoveryPath = ''
+  try {
+    const stat = statSync(file)
+    if (stat.isFile() && stat.size <= MAX_REGISTRY_BACKUP_BYTES) {
+      recoveryPath = `${file}.corrupt-${Date.now()}-${randomUUID()}.json`
+      copyFileSync(file, recoveryPath)
+    }
+  } catch (backupError) {
+    console.error('[comfy-models] failed to preserve corrupt registry:', backupError)
+  }
+  const error = new Error(
+    recoveryPath
+      ? `ComfyUI 모델 목록 파일이 손상되어 변경을 중단했습니다. 원본 사본을 보존했습니다: ${recoveryPath}`
+      : 'ComfyUI 모델 목록 파일이 손상되어 변경을 중단했습니다. 파일을 복구하거나 설정의 모델 목록 초기화를 사용해 주세요.'
+  )
+  console.error('[comfy-models] registry recovery required:', cause)
+  registryRecovery = { fingerprint, error }
+  return error
 }
 
 function asObject(value: unknown): JsonObject | null {
@@ -186,27 +287,6 @@ function cleanWorkflowTemplate(value: unknown, family: ComfyModelFamily): string
   return template
 }
 
-function cleanKind(value: unknown): ComfyAssetKind {
-  if (typeof value !== 'string' || !KIND_SET.has(value)) {
-    throw new Error('지원하지 않는 모델 자산 종류입니다.')
-  }
-  return value as ComfyAssetKind
-}
-
-function cleanSlot(kind: ComfyAssetKind, value: unknown): ComfyAssetSlot {
-  const fallback = DEFAULT_SLOT_BY_KIND[kind]
-  if (value === undefined && fallback) return fallback
-  if (typeof value !== 'string' || !SLOT_SET.has(value)) {
-    if (kind === 'text_encoder') {
-      throw new Error('텍스트 인코더는 CLIP-L 또는 T5XXL 역할을 선택해야 합니다.')
-    }
-    throw new Error('모델 자산 슬롯이 올바르지 않습니다.')
-  }
-  const slot = value as ComfyAssetSlot
-  if (SLOT_KIND[slot] !== kind) throw new Error('자산 종류와 슬롯이 일치하지 않습니다.')
-  return slot
-}
-
 function cleanOperationId(value: unknown): string {
   if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(value)) {
     throw new Error('모델 가져오기 작업 ID가 올바르지 않습니다.')
@@ -217,8 +297,9 @@ function cleanOperationId(value: unknown): string {
 function normalizeImportRequest(value: unknown): ComfyModelImportRequest {
   const raw = asObject(value)
   if (!raw) throw new Error('모델 가져오기 요청 형식이 올바르지 않습니다.')
-  const family = cleanFamily(raw.family)
-  const kind = cleanKind(raw.assetKind)
+  if (raw.family !== undefined || raw.workflowTemplateId !== undefined || raw.assetKind !== undefined || raw.assetSlot !== undefined) {
+    throw new Error('모델 구조와 파일 역할은 연결한 파일을 Aiso가 분석해 내부적으로 결정합니다.')
+  }
   const profileId = raw.profileId === undefined
     ? undefined
     : typeof raw.profileId === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(raw.profileId)
@@ -228,15 +309,8 @@ function normalizeImportRequest(value: unknown): ComfyModelImportRequest {
     operationId: cleanOperationId(raw.operationId),
     ...(profileId ? { profileId } : {}),
     name: cleanName(raw.name),
-    family,
     capabilities: cleanCapabilities(raw.capabilities),
-    tags: cleanTags(raw.tags),
-    workflowTemplateId: cleanWorkflowTemplate(raw.workflowTemplateId, family),
-    defaults: cleanDefaults(raw.defaults),
-    agentEnabled: raw.agentEnabled === true,
-    priority: cleanPriority(raw.priority),
-    assetKind: kind,
-    assetSlot: cleanSlot(kind, raw.assetSlot)
+    tags: cleanTags(raw.tags)
   }
 }
 
@@ -266,11 +340,31 @@ function parseStoredAsset(value: unknown): ComfyModelAsset | null {
     slot = raw.slot as ComfyAssetSlot
     if (SLOT_KIND[slot] !== kind) return null
   }
-  if (!raw.relativePath.startsWith(`${DESTINATION_BY_KIND[kind]}/`)) return null
+  let agentFamilies: ComfyModelFamily[] | undefined
+  if (raw.agentFamilies !== undefined) {
+    if (!Array.isArray(raw.agentFamilies) || raw.agentFamilies.some((family) => (
+      typeof family !== 'string' || !FAMILY_SET.has(family)
+    ))) return null
+    agentFamilies = [...new Set(raw.agentFamilies)] as ComfyModelFamily[]
+  }
+  if (kind === 'custom') {
+    // 직접 연결 파일은 어떤 loader 폴더인지 Aiso가 추측하지 않는다. 다만 models
+    // 루트 바로 아래에는 둘 수 없고, Agent 슬롯·호환 표시는 절대 부여하지 않는다.
+    if (
+      slot !== undefined ||
+      agentFamilies === undefined ||
+      agentFamilies.length !== 0 ||
+      !raw.relativePath.includes('/') ||
+      !raw.relativePath.endsWith(`/${raw.fileName}`)
+    ) return null
+  } else if (!raw.relativePath.startsWith(`${DESTINATION_BY_KIND[kind]}/`)) {
+    return null
+  }
   return {
     id: raw.id,
     kind,
     ...(slot ? { slot } : {}),
+    ...(agentFamilies === undefined ? {} : { agentFamilies }),
     fileName: raw.fileName,
     comfyName: raw.comfyName,
     relativePath: raw.relativePath,
@@ -285,28 +379,50 @@ function parseStoredProfile(value: unknown): ComfyModelProfile | null {
   if (!raw || typeof raw.id !== 'string' || !raw.id) return null
   try {
     const family = cleanFamily(raw.family)
-    const assets = Array.isArray(raw.assets)
-      ? raw.assets.map(parseStoredAsset).filter((asset): asset is ComfyModelAsset => asset !== null)
-      : []
+    const parsedAssets = Array.isArray(raw.assets) ? raw.assets.map(parseStoredAsset) : []
+    if (parsedAssets.some((asset) => asset === null)) return null
+    const assets = parsedAssets as ComfyModelAsset[]
+    const parsedWorkflowTemplate = raw.workflowTemplate === undefined
+      ? undefined
+      : parseStoredComfyWorkflowTemplate(raw.workflowTemplate)
+    if (raw.workflowTemplate !== undefined && !parsedWorkflowTemplate) return null
+    // Re-resolve every literal loader value against this profile's registered
+    // assets.  Legacy records are migrated in memory; ambiguous matches stay
+    // unbound and cannot become Agent-ready.
+    const workflowTemplate = parsedWorkflowTemplate
+      ? bindComfyWorkflowTemplateAssets(parsedWorkflowTemplate, assets)
+      : undefined
+    // 직접 연결 파일은 모델 계열을 추측하지 않는다. 다만 사용자가 검증된 API
+    // 워크플로를 명시적으로 연결했다면 그 고정 그래프를 통해서만 Agent가 사용한다.
+    const hasDirectAsset = assets.some((asset) => asset.kind === 'custom')
+    const effectiveFamily: ComfyModelFamily = hasDirectAsset ? 'custom' : family
     const createdAt = typeof raw.createdAt === 'number' && Number.isFinite(raw.createdAt)
       ? raw.createdAt
       : Date.now()
     const updatedAt = typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt)
       ? raw.updatedAt
       : createdAt
-    return {
+    const storedTemplateId = cleanWorkflowTemplate(raw.workflowTemplateId, effectiveFamily)
+    const profile: ComfyModelProfile = {
       id: raw.id,
       name: cleanName(raw.name),
-      family,
+      family: effectiveFamily,
       capabilities: cleanCapabilities(raw.capabilities),
       tags: cleanTags(raw.tags),
       assets,
-      workflowTemplateId: cleanWorkflowTemplate(raw.workflowTemplateId, family),
+      workflowTemplateId: workflowTemplate?.id ?? (hasDirectAsset ? 'custom.txt2img.v1' : storedTemplateId),
+      ...(workflowTemplate ? { workflowTemplate } : {}),
       defaults: cleanDefaults(raw.defaults),
-      agentEnabled: raw.agentEnabled === true,
+      agentEnabled: false,
       priority: cleanPriority(raw.priority),
       createdAt,
       updatedAt
+    }
+    return {
+      ...profile,
+      // A stale/legacy template may still be displayed and edited, but Agent
+      // must never trust it until all model loader inputs are explicitly bound.
+      agentEnabled: raw.agentEnabled === true && getComfyAgentReadiness(profile).ready
     }
   } catch {
     return null
@@ -315,21 +431,29 @@ function parseStoredProfile(value: unknown): ComfyModelProfile | null {
 
 function loadRegistry(): ComfyModelRegistry {
   const file = registryPath()
-  if (!existsSync(file)) return emptyRegistry()
+  if (!existsSync(file)) {
+    registryRecovery = undefined
+    return emptyRegistry()
+  }
   try {
+    const fingerprint = registryFingerprint(file)
+    if (registryRecovery?.fingerprint === fingerprint) throw registryRecovery.error
     const raw = asObject(JSON.parse(readFileSync(file, 'utf-8')))
     if (!raw || raw.schemaVersion !== REGISTRY_VERSION || !Array.isArray(raw.profiles)) {
       throw new Error('지원하지 않는 레지스트리 형식')
     }
+    const profiles = raw.profiles.map(parseStoredProfile)
+    if (profiles.some((profile) => profile === null)) {
+      throw new Error('모델 프로필 중 하나 이상이 손상되었습니다.')
+    }
+    registryRecovery = undefined
     return {
       schemaVersion: REGISTRY_VERSION,
-      profiles: raw.profiles
-        .map(parseStoredProfile)
-        .filter((profile): profile is ComfyModelProfile => profile !== null)
+      profiles: profiles as ComfyModelProfile[]
     }
   } catch (error) {
-    console.error('[comfy-models] 레지스트리 읽기 실패:', error)
-    return emptyRegistry()
+    if (error instanceof Error && registryRecovery?.error === error) throw error
+    throw registryRecoveryError(file, error)
   }
 }
 
@@ -341,6 +465,8 @@ function saveRegistry(registry: ComfyModelRegistry): void {
   try {
     writeFileSync(temporary, JSON.stringify(registry, null, 2), { encoding: 'utf-8', flag: 'wx' })
     renameSync(temporary, file)
+    registryRevision += 1
+    registryRecovery = undefined
   } finally {
     rmSync(temporary, { force: true })
   }
@@ -374,6 +500,68 @@ function resolveModelsRoot(installPath: string): string {
   return modelsRoot
 }
 
+function cleanupStalePartials(modelsRoot: string, olderThanMs: number): number {
+  const cutoff = Date.now() - olderThanMs
+  const root = realpathSync(modelsRoot)
+  const directories: Array<{ path: string; depth: number }> = [{ path: root, depth: 0 }]
+  let removed = 0
+  let inspected = 0
+  while (directories.length > 0) {
+    const { path: directory, depth } = directories.pop()!
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      inspected += 1
+      if (inspected > MAX_PARTIAL_SCAN_ENTRIES) {
+        console.warn('[comfy-models] stale partial cleanup stopped at scan limit')
+        return removed
+      }
+      const target = join(directory, entry.name)
+      let stat
+      try {
+        stat = lstatSync(target)
+      } catch {
+        continue
+      }
+      // Never follow junctions/symlinks while clearing stale transient files.
+      if (stat.isSymbolicLink()) continue
+      if (stat.isDirectory()) {
+        if (depth < MAX_PARTIAL_SCAN_DEPTH) directories.push({ path: target, depth: depth + 1 })
+        continue
+      }
+      if (
+        stat.isFile() &&
+        AISO_PARTIAL_FILE_RE.test(entry.name) &&
+        stat.mtimeMs <= cutoff
+      ) {
+        try {
+          rmSync(target, { force: true })
+          removed += 1
+        } catch (error) {
+          console.warn('[comfy-models] stale partial cleanup failed:', target, error)
+        }
+      }
+    }
+  }
+  return removed
+}
+
+/**
+ * Removes only Aiso's UUID-tagged, old partial imports.  Call after loading a
+ * configured Portable install; actual model files and arbitrary .partial files
+ * are deliberately preserved.
+ */
+export function cleanupStaleComfyModelPartials(
+  installPath: string,
+  olderThanMs = STALE_PARTIAL_AGE_MS
+): number {
+  if (!installPath.trim() || !Number.isFinite(olderThanMs) || olderThanMs < 0) return 0
+  try {
+    return cleanupStalePartials(resolveModelsRoot(installPath), olderThanMs)
+  } catch (error) {
+    console.warn('[comfy-models] stale partial cleanup skipped:', error)
+    return 0
+  }
+}
+
 function assertInside(root: string, target: string): void {
   const rel = relative(resolve(root), resolve(target))
   if (rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel))) return
@@ -396,6 +584,47 @@ function assertDestinationDirectory(modelsRoot: string, directory: string): void
     const realCurrent = realpathSync(current)
     assertInside(realComfyRoot, realCurrent)
   }
+}
+
+function manualDestinationRelativePath(modelsRoot: string, selectedDirectory: string): string {
+  const destination = resolve(selectedDirectory)
+  assertInside(modelsRoot, destination)
+  const relativeDirectory = relative(resolve(modelsRoot), destination).split(sep).join('/')
+  if (!validRelativePath(relativeDirectory)) {
+    throw new Error('직접 연결 위치는 ComfyUI/models 아래의 하위 폴더여야 합니다.')
+  }
+  // 선택 대화상자의 경로가 junction/symlink를 따라 models 밖으로 나가지 않는지 다시 확인한다.
+  assertDestinationDirectory(modelsRoot, destination)
+  return relativeDirectory
+}
+
+async function chooseManualDestination(
+  owner: BrowserWindow,
+  modelsRoot: string,
+  fileName: string
+): Promise<string | null> {
+  const choice = await dialog.showMessageBox(owner, {
+    type: 'info',
+    title: '직접 연결 위치 선택',
+    message: `${fileName}의 모델 역할을 Aiso가 안전하게 확인하지 못했습니다.`,
+    detail:
+      '모델 배포 문서에 지정된 ComfyUI/models 하위 실제 폴더를 선택하면, 파일을 그 위치에 직접 연결합니다. ' +
+      '새 하위 폴더가 필요하면 다음 창의 새 폴더 기능으로 만든 뒤 선택하세요. ' +
+      'Aiso는 이 파일의 역할을 추측하지 않으며 Agent 자동 선택에도 사용하지 않습니다.',
+    buttons: ['폴더 선택', '가져오기 취소'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true
+  })
+  if (choice.response !== 0) return null
+
+  const selection = await dialog.showOpenDialog(owner, {
+    title: 'ComfyUI/models 하위 폴더 선택',
+    defaultPath: modelsRoot,
+    properties: ['openDirectory', 'createDirectory', 'promptToCreate']
+  })
+  if (selection.canceled || selection.filePaths.length === 0) return null
+  return manualDestinationRelativePath(modelsRoot, selection.filePaths[0])
 }
 
 function assertAvailableDiskSpace(directory: string, selectedBytes: number): void {
@@ -452,12 +681,14 @@ function makeReporter(
 async function sha256File(
   path: string,
   totalBytes: number,
-  report?: (completedBytes: number, force?: boolean) => void
+  report?: (completedBytes: number, force?: boolean) => void,
+  assertNotCancelled?: () => void
 ): Promise<string> {
   const hash = createHash('sha256')
   let completed = 0
   const stream = createReadStream(path)
   for await (const chunk of stream) {
+    assertNotCancelled?.()
     hash.update(chunk as Buffer)
     completed += (chunk as Buffer).length
     report?.(completed)
@@ -471,16 +702,22 @@ async function copyAndHash(
   source: string,
   destination: string,
   totalBytes: number,
-  report: (completedBytes: number, force?: boolean) => void
+  report: (completedBytes: number, force?: boolean) => void,
+  assertNotCancelled?: () => void
 ): Promise<string> {
   const hash = createHash('sha256')
   let completed = 0
   const observer = new Transform({
     transform(chunk: Buffer, _encoding, callback) {
-      hash.update(chunk)
-      completed += chunk.length
-      report(completed)
-      callback(null, chunk)
+      try {
+        assertNotCancelled?.()
+        hash.update(chunk)
+        completed += chunk.length
+        report(completed)
+        callback(null, chunk)
+      } catch (error) {
+        callback(error as Error)
+      }
     }
   })
   await pipeline(
@@ -505,15 +742,18 @@ async function findReusableAsset(
   modelsRoot: string,
   kind: ComfyAssetKind,
   sha256: string,
-  size: number
+  size: number,
+  expectedRelativePath?: string,
+  assertNotCancelled?: () => void
 ): Promise<ComfyModelAsset | null> {
   for (const profile of registry.profiles) {
     for (const asset of profile.assets) {
       if (asset.kind !== kind || asset.sha256 !== sha256 || asset.size !== size) continue
+      if (expectedRelativePath !== undefined && asset.relativePath !== expectedRelativePath) continue
       try {
         const candidate = pathForRelative(modelsRoot, asset.relativePath)
         if (!existsSync(candidate) || lstatSync(candidate).isSymbolicLink() || !statSync(candidate).isFile()) continue
-        if (await sha256File(candidate, size) === sha256) return asset
+        if (await sha256File(candidate, size, undefined, assertNotCancelled) === sha256) return asset
       } catch {
         // 다른 설치본의 오래된 메타데이터이거나 사라진 파일이면 다음 후보를 확인한다.
       }
@@ -522,33 +762,230 @@ async function findReusableAsset(
   return null
 }
 
-function cloneAssetForSlot(asset: ComfyModelAsset, slot: ComfyAssetSlot): ComfyModelAsset {
-  return { ...asset, id: randomUUID(), slot, importedAt: Date.now() }
+function cloneAssetForSlot(
+  asset: ComfyModelAsset,
+  slot: ComfyAssetSlot | undefined,
+  agentFamilies?: readonly ComfyModelFamily[]
+): ComfyModelAsset {
+  return {
+    ...asset,
+    id: randomUUID(),
+    ...(slot ? { slot } : {}),
+    ...(agentFamilies === undefined ? {} : { agentFamilies: [...agentFamilies] }),
+    importedAt: Date.now()
+  }
 }
 
 function ensureSlotAvailable(profile: ComfyModelProfile, asset: ComfyModelAsset): boolean {
+  const identical = profile.assets.find((item) => (
+    item.kind === asset.kind &&
+    item.slot === asset.slot &&
+    item.sha256 === asset.sha256 &&
+    item.relativePath === asset.relativePath
+  ))
+  if (identical) {
+    if (asset.agentFamilies !== undefined && !isDeepStrictEqual(identical.agentFamilies, asset.agentFamilies)) {
+      identical.agentFamilies = [...asset.agentFamilies]
+    }
+    return false
+  }
   if (!asset.slot || !SINGLETON_SLOTS.has(asset.slot)) return true
   const current = profile.assets.find((item) => item.slot === asset.slot)
   if (!current) return true
-  if (current.sha256 === asset.sha256 && current.relativePath === asset.relativePath) return false
   throw new Error(`${asset.slot} 슬롯에는 이미 다른 모델 자산이 등록되어 있습니다.`)
+}
+
+function assertCompatiblePrimaryAsset(
+  profile: ComfyModelProfile,
+  asset: Pick<PlannedImportAsset, 'slot'>
+): void {
+  if (asset.slot !== 'checkpoint' && asset.slot !== 'diffusion_model') return
+  const existing = profile.assets.find((item) => item.slot === 'checkpoint' || item.slot === 'diffusion_model')
+  if (existing && existing.slot !== asset.slot) {
+    throw new Error('한 모델 프로필에는 하나의 생성 모델만 연결할 수 있습니다. 다른 생성 모델은 새 모델로 연결해 주세요.')
+  }
+}
+
+async function planImportAsset(
+  owner: BrowserWindow,
+  modelsRoot: string,
+  source: string,
+  fileName: string,
+  size: number,
+  allowDirectConnection: boolean
+): Promise<PlannedImportAsset | null> {
+  const header = readSafeTensorsHeader(source)
+  if (!header) {
+    throw new Error(`${fileName}: 유효한 SafeTensors 헤더를 확인할 수 없습니다.`)
+  }
+  const detected = inferComfyModelAssetFromHeader(header)
+  if (detected) {
+    return {
+      source,
+      fileName,
+      size,
+      kind: detected.kind,
+      slot: detected.slot,
+      agentFamilies: detected.agentFamilies,
+      destinationFolderName: DESTINATION_BY_KIND[detected.kind]
+    }
+  }
+
+  if (!allowDirectConnection) {
+    throw new Error(
+      `${fileName}: 직접 연결 파일은 현재 자동 워크플로 프로필에 추가할 수 없습니다. ` +
+      '새 모델 연결로 별도의 수동 ComfyUI 프로필을 만들어 주세요.'
+    )
+  }
+  const destinationFolderName = await chooseManualDestination(owner, modelsRoot, fileName)
+  if (!destinationFolderName) return null
+  return {
+    source,
+    fileName,
+    size,
+    kind: 'custom',
+    agentFamilies: [],
+    destinationFolderName
+  }
+}
+
+function makeImportedAsset(
+  plan: PlannedImportAsset,
+  sourceHash: string,
+  importedAt = Date.now()
+): ComfyModelAsset {
+  return {
+    id: randomUUID(),
+    kind: plan.kind,
+    ...(plan.slot ? { slot: plan.slot } : {}),
+    agentFamilies: [...plan.agentFamilies],
+    fileName: plan.fileName,
+    comfyName: plan.fileName,
+    relativePath: `${plan.destinationFolderName}/${plan.fileName}`,
+    size: plan.size,
+    sha256: sourceHash,
+    importedAt
+  }
+}
+
+function assertDirectImportProfile(profile: ComfyModelProfile): void {
+  if (profile.family !== 'custom') {
+    throw new Error(
+      '직접 연결 파일은 Agent 자동 워크플로 프로필에 섞을 수 없습니다. ' +
+      '새 모델 연결로 별도의 수동 ComfyUI 프로필을 만들어 주세요.'
+    )
+  }
 }
 
 function profileFromRequest(request: ComfyModelImportRequest, previous?: ComfyModelProfile): ComfyModelProfile {
   const now = Date.now()
+  // 새 등록은 미확정 상태에서 시작하고, 파일 분석이 완료된 뒤에만 내부 계열을 연결한다.
+  // 이미 실행 가능한 프로필은 추가 파일을 연결해도 기존 워크플로 계약을 보존한다.
+  const family = previous?.family ?? 'custom'
   return {
     id: previous?.id ?? randomUUID(),
-    name: request.name,
-    family: request.family,
+    name: previous?.name ?? request.name,
+    family,
     capabilities: request.capabilities ?? previous?.capabilities ?? ['txt2img'],
     tags: request.tags ?? previous?.tags ?? [],
     assets: previous?.assets.slice() ?? [],
-    workflowTemplateId: request.workflowTemplateId ?? previous?.workflowTemplateId ?? `${request.family}.txt2img.v1`,
-    defaults: cleanDefaults(request.defaults, previous?.defaults ?? DEFAULT_COMFY_GENERATION),
-    agentEnabled: request.agentEnabled ?? previous?.agentEnabled ?? false,
-    priority: request.priority ?? previous?.priority ?? 0,
+    workflowTemplateId: previous?.workflowTemplateId ?? `${family}.txt2img.v1`,
+    ...(previous?.workflowTemplate ? { workflowTemplate: previous.workflowTemplate } : {}),
+    defaults: previous?.defaults ?? getComfyGenerationDefaults(family),
+    agentEnabled: previous?.agentEnabled ?? false,
+    priority: previous?.priority ?? 0,
     createdAt: previous?.createdAt ?? now,
     updatedAt: now
+  }
+}
+
+function inferFamilyFromProfileAssets(profile: ComfyModelProfile, modelsRoot: string): ComfyModelFamily {
+  const checkpoint = profile.assets.find((asset) => asset.slot === 'checkpoint')
+  if (checkpoint) {
+    const family = inferComfyModelFamilyFromSafeTensors(pathForRelative(modelsRoot, checkpoint.relativePath))
+    if (family === 'sd15' || family === 'sdxl') return family
+    return 'custom'
+  }
+
+  const diffusionModel = profile.assets.find((asset) => asset.slot === 'diffusion_model')
+  if (diffusionModel) {
+    const family = inferComfyModelFamilyFromSafeTensors(pathForRelative(modelsRoot, diffusionModel.relativePath))
+    if (family === 'flux1' || family === 'flux2') return family
+  }
+  return 'custom'
+}
+
+function applyAutomaticProfileAnalysis(
+  profile: ComfyModelProfile,
+  modelsRoot: string,
+  previous?: ComfyModelProfile
+): ComfyModelProfile {
+  // 기존에 확정되어 실행 중인 프로필은 파일 추가만으로 재분류하지 않는다.
+  if (previous && previous.family !== 'custom' && previous.family !== 'flux2') return profile
+
+  const family = inferFamilyFromProfileAssets(profile, modelsRoot)
+  if (family === profile.family) return profile
+  const usesDefaultTemplate = profile.workflowTemplateId === `${profile.family}.txt2img.v1`
+  return {
+    ...profile,
+    family,
+    workflowTemplateId: usesDefaultTemplate ? `${family}.txt2img.v1` : profile.workflowTemplateId,
+    defaults: getComfyGenerationDefaults(family),
+    // 새 파일 분석 결과만으로 Agent 자동 선택을 켜지 않는다.
+    agentEnabled: false,
+    updatedAt: Date.now()
+  }
+}
+
+/**
+ * 설치 폴더가 바뀐 뒤에도 예전 레지스트리만 보고 Agent를 재활성화하지 않도록,
+ * 현재 Portable 설치본 안에 등록 당시와 SHA-256이 같은 일반 파일이 실제로 있는지 확인한다.
+ */
+async function assertAgentAssetsAvailableAtInstall(profile: ComfyModelProfile, installPath: string): Promise<void> {
+  const modelsRoot = resolveModelsRoot(installPath)
+  let realModelsRoot: string
+  try {
+    realModelsRoot = realpathSync(modelsRoot)
+  } catch {
+    throw new Error('현재 ComfyUI 설치 폴더에 models 경로가 없습니다. 설치 폴더를 다시 선택해 주세요.')
+  }
+  const unavailable: string[] = []
+
+  const assetsToVerify = profile.workflowTemplate
+    ? getComfyWorkflowAssetBindingStatus(profile.workflowTemplate, profile.assets)
+      .boundAssets
+      .map((asset) => ({ label: asset.comfyName, asset }))
+    : getComfyRequiredSlots(profile.family).map((slot) => ({
+        label: COMFY_ASSET_SLOT_LABELS[slot],
+        asset: profile.assets.find((item) => item.slot === slot)
+      }))
+  for (const { label, asset } of assetsToVerify) {
+    if (!asset) {
+      unavailable.push(label)
+      continue
+    }
+    try {
+      const candidate = pathForRelative(modelsRoot, asset.relativePath)
+      const stat = lstatSync(candidate)
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== asset.size) {
+        unavailable.push(label)
+        continue
+      }
+      assertInside(realModelsRoot, realpathSync(candidate))
+      if (await sha256File(candidate, asset.size) !== asset.sha256) {
+        unavailable.push(label)
+      }
+    } catch {
+      unavailable.push(label)
+    }
+  }
+
+  if (unavailable.length > 0) {
+    throw new Error(
+      `현재 ComfyUI 설치 폴더에서 필수 구성 파일을 확인할 수 없습니다: ` +
+      `${unavailable.join(', ')}. ` +
+      '해당 파일을 다시 연결한 뒤 Agent 자동 선택을 켜 주세요.'
+    )
   }
 }
 
@@ -560,63 +997,119 @@ export async function pickAndImportComfyModelAssets(
   owner: BrowserWindow,
   installPath: string,
   rawRequest: unknown,
-  onProgress: ProgressCallback
+  onProgress: ProgressCallback,
+  isInstallPathCurrent?: InstallPathCurrentCheck
 ): Promise<ComfyModelImportResult> {
   if (importBusy) throw new Error('다른 모델을 가져오는 중입니다. 완료된 뒤 다시 시도해 주세요.')
-  const request = normalizeImportRequest(rawRequest)
-  const modelsRoot = resolveModelsRoot(installPath)
-  const registry = loadRegistry()
-  const previous = request.profileId
-    ? registry.profiles.find((profile) => profile.id === request.profileId)
-    : undefined
-  if (request.profileId && !previous) throw new Error('추가할 모델 프로필을 찾을 수 없습니다.')
-
-  const selection = await dialog.showOpenDialog(owner, {
-    title: `${request.name} 모델 파일 가져오기`,
-    properties: ['openFile', 'multiSelections'],
-    filters: [
-      {
-        name: 'SafeTensors 모델',
-        extensions: ['safetensors']
-      }
-    ]
-  })
-  if (selection.canceled || selection.filePaths.length === 0) {
-    return { canceled: true, imported: [], reused: [] }
-  }
-
   importBusy = true
   const partialFiles: string[] = []
   const finalizedFiles: string[] = []
   try {
-    const profile = profileFromRequest(request, previous)
+    const request = normalizeImportRequest(rawRequest)
+    activeImportOperationId = request.operationId
+    activeImportCancelled = false
+    const modelsRoot = resolveModelsRoot(installPath)
+    cleanupStalePartials(modelsRoot, STALE_PARTIAL_AGE_MS)
+    const registry = loadRegistry()
+    const registryRevisionAtLoad = registryRevision
+    const previous = request.profileId
+      ? registry.profiles.find((profile) => profile.id === request.profileId)
+      : undefined
+    if (request.profileId && !previous) throw new Error('추가할 모델 프로필을 찾을 수 없습니다.')
+
+    const selection = await dialog.showOpenDialog(owner, {
+      title: `${request.name} 모델 파일 가져오기`,
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        {
+          name: 'SafeTensors 모델',
+          extensions: ['safetensors']
+        }
+      ]
+    })
+    if (selection.canceled || selection.filePaths.length === 0) {
+      return { canceled: true, imported: [], reused: [] }
+    }
+    assertImportNotCancelled(request.operationId)
+    assertInstallPathCurrent(isInstallPathCurrent)
+
+    let profile = profileFromRequest(request, previous)
     const imported: ComfyModelAsset[] = []
     const reused: ComfyModelAsset[] = []
-    const destinationFolderName = DESTINATION_BY_KIND[request.assetKind]
-    const destinationDirectory = join(modelsRoot, destinationFolderName)
-    assertDestinationDirectory(modelsRoot, destinationDirectory)
-    const selectedFiles = selection.filePaths.map((source) => ({ source, ...validateSourceFile(source) }))
+    const selectedFiles: PlannedImportAsset[] = []
+    const allowDirectConnection = profile.family === 'custom'
+    for (const source of selection.filePaths) {
+      assertImportNotCancelled(request.operationId)
+      const { fileName, size } = validateSourceFile(source)
+      const planned = await planImportAsset(owner, modelsRoot, source, fileName, size, allowDirectConnection)
+      if (!planned) return { canceled: true, imported: [], reused: [] }
+      selectedFiles.push(planned)
+    }
+    assertInstallPathCurrent(isInstallPathCurrent)
+
+    // 직접 연결 파일과 자동 분석 파일은 함께 연결할 수 있다. 다만 하나라도 직접
+    // 연결이면 전체 프로필을 수동 ComfyUI 전용으로 보존해 Agent가 소비하지 못하게 한다.
+    const includesDirectAsset = profile.assets.some((asset) => asset.kind === 'custom') ||
+      selectedFiles.some((file) => file.kind === 'custom')
+    if (includesDirectAsset) assertDirectImportProfile(profile)
+    const primarySlots = new Set(
+      profile.assets
+        .map((asset) => asset.slot)
+        .filter((slot): slot is 'checkpoint' | 'diffusion_model' => slot === 'checkpoint' || slot === 'diffusion_model')
+    )
+    for (const file of selectedFiles) {
+      if (file.slot !== 'checkpoint' && file.slot !== 'diffusion_model') continue
+      if (primarySlots.size > 0 && !primarySlots.has(file.slot)) {
+        throw new Error('한 모델 프로필에는 하나의 생성 모델만 연결할 수 있습니다. 다른 생성 모델은 새 모델로 연결해 주세요.')
+      }
+      primarySlots.add(file.slot)
+    }
     const plannedByHash = new Map<string, ComfyModelAsset>()
     const plannedByDestination = new Map<string, string>()
 
-    for (const { source, fileName, size } of selectedFiles) {
+    for (const plan of selectedFiles) {
+      assertImportNotCancelled(request.operationId)
+      assertInstallPathCurrent(isInstallPathCurrent)
+      const { source, fileName, size, kind, slot, destinationFolderName } = plan
+      const destinationDirectory = join(modelsRoot, destinationFolderName)
+      assertDestinationDirectory(modelsRoot, destinationDirectory)
       const hashReport = makeReporter(onProgress, request.operationId, 'hashing', fileName, size)
-      const sourceHash = await sha256File(source, size, hashReport)
-      const duplicateKey = `${request.assetKind}:${sourceHash}:${size}`
+      const sourceHash = await sha256File(
+        source,
+        size,
+        hashReport,
+        () => assertImportNotCancelled(request.operationId)
+      )
+      const relativePath = `${destinationFolderName}/${fileName}`
+      const duplicateKey = `${kind}:${slot ?? ''}:${destinationFolderName.toLowerCase()}:${sourceHash}:${size}`
       const alreadyPlanned = plannedByHash.get(duplicateKey)
       if (alreadyPlanned) {
-        const asset = cloneAssetForSlot(alreadyPlanned, request.assetSlot!)
-        if (ensureSlotAvailable(profile, asset)) profile.assets.push(asset)
-        reused.push(asset)
+        const asset = cloneAssetForSlot(alreadyPlanned, slot, plan.agentFamilies)
+        assertCompatiblePrimaryAsset(profile, plan)
+        if (ensureSlotAvailable(profile, asset)) {
+          profile.assets.push(asset)
+          reused.push(asset)
+        }
         continue
       }
 
-      const known = await findReusableAsset(registry, modelsRoot, request.assetKind, sourceHash, size)
+      const known = await findReusableAsset(
+        registry,
+        modelsRoot,
+        kind,
+        sourceHash,
+        size,
+        kind === 'custom' ? relativePath : undefined,
+        () => assertImportNotCancelled(request.operationId)
+      )
       if (known) {
-        const asset = cloneAssetForSlot(known, request.assetSlot!)
-        if (ensureSlotAvailable(profile, asset)) profile.assets.push(asset)
+        const asset = cloneAssetForSlot(known, slot, plan.agentFamilies)
+        assertCompatiblePrimaryAsset(profile, plan)
+        if (ensureSlotAvailable(profile, asset)) {
+          profile.assets.push(asset)
+          reused.push(asset)
+        }
         plannedByHash.set(duplicateKey, asset)
-        reused.push(asset)
         continue
       }
 
@@ -632,25 +1125,23 @@ export async function pickAndImportComfyModelAssets(
         }
         const destinationStat = statSync(destination)
         if (!destinationStat.isFile()) throw new Error(`${fileName}: 같은 이름의 폴더 또는 특수 파일이 존재합니다.`)
-        const existingHash = await sha256File(destination, destinationStat.size)
+        const existingHash = await sha256File(
+          destination,
+          destinationStat.size,
+          undefined,
+          () => assertImportNotCancelled(request.operationId)
+        )
         if (destinationStat.size !== size || existingHash !== sourceHash) {
           throw new Error(`${fileName}: 같은 이름의 다른 모델 파일이 이미 존재합니다. 기존 파일은 덮어쓰지 않았습니다.`)
         }
-        const asset: ComfyModelAsset = {
-          id: randomUUID(),
-          kind: request.assetKind,
-          slot: request.assetSlot,
-          fileName,
-          comfyName: fileName,
-          relativePath: `${destinationFolderName}/${fileName}`,
-          size,
-          sha256: sourceHash,
-          importedAt: Date.now()
+        const asset = makeImportedAsset(plan, sourceHash)
+        assertCompatiblePrimaryAsset(profile, plan)
+        if (ensureSlotAvailable(profile, asset)) {
+          profile.assets.push(asset)
+          reused.push(asset)
         }
-        if (ensureSlotAvailable(profile, asset)) profile.assets.push(asset)
         plannedByHash.set(duplicateKey, asset)
         plannedByDestination.set(destination.toLowerCase(), sourceHash)
-        reused.push(asset)
         continue
       }
 
@@ -659,7 +1150,13 @@ export async function pickAndImportComfyModelAssets(
       assertAvailableDiskSpace(destinationDirectory, size)
       partialFiles.push(partial)
       const copyReport = makeReporter(onProgress, request.operationId, 'copying', fileName, size)
-      const copiedHash = await copyAndHash(source, partial, size, copyReport)
+      const copiedHash = await copyAndHash(
+        source,
+        partial,
+        size,
+        copyReport,
+        () => assertImportNotCancelled(request.operationId)
+      )
       onProgress({
         operationId: request.operationId,
         phase: 'verifying',
@@ -676,7 +1173,12 @@ export async function pickAndImportComfyModelAssets(
         }
         const destinationStat = statSync(destination)
         const existingHash = destinationStat.isFile()
-          ? await sha256File(destination, destinationStat.size)
+          ? await sha256File(
+            destination,
+            destinationStat.size,
+            undefined,
+            () => assertImportNotCancelled(request.operationId)
+          )
           : ''
         if (destinationStat.size !== size || existingHash !== sourceHash) {
           throw new Error(`${fileName}: 복사 중 같은 이름의 다른 파일이 생성되어 작업을 중단했습니다.`)
@@ -688,17 +1190,8 @@ export async function pickAndImportComfyModelAssets(
         partialFiles.splice(partialFiles.indexOf(partial), 1)
         finalizedFiles.push(destination)
       }
-      const asset: ComfyModelAsset = {
-        id: randomUUID(),
-        kind: request.assetKind,
-        slot: request.assetSlot,
-        fileName,
-        comfyName: fileName,
-        relativePath: `${destinationFolderName}/${fileName}`,
-        size,
-        sha256: sourceHash,
-        importedAt: Date.now()
-      }
+      const asset = makeImportedAsset(plan, sourceHash)
+      assertCompatiblePrimaryAsset(profile, plan)
       if (ensureSlotAvailable(profile, asset)) profile.assets.push(asset)
       plannedByHash.set(duplicateKey, asset)
       plannedByDestination.set(destination.toLowerCase(), sourceHash)
@@ -712,6 +1205,26 @@ export async function pickAndImportComfyModelAssets(
       })
     }
 
+    assertInstallPathCurrent(isInstallPathCurrent)
+    assertRegistryCurrent(registryRevisionAtLoad)
+    if (profile.workflowTemplate) {
+      const workflowTemplate = bindComfyWorkflowTemplateAssets(profile.workflowTemplate, profile.assets)
+      profile = {
+        ...profile,
+        workflowTemplateId: workflowTemplate.id,
+        workflowTemplate
+      }
+    }
+    profile = includesDirectAsset
+      ? {
+          ...profile,
+          family: 'custom',
+          workflowTemplateId: profile.workflowTemplate?.id ?? 'custom.txt2img.v1',
+          defaults: profile.workflowTemplate ? profile.defaults : getComfyGenerationDefaults('custom'),
+          agentEnabled: false,
+          updatedAt: Date.now()
+        }
+      : applyAutomaticProfileAnalysis(profile, modelsRoot, previous)
     const existingIndex = registry.profiles.findIndex((item) => item.id === profile.id)
     if (existingIndex >= 0) registry.profiles[existingIndex] = profile
     else registry.profiles.push(profile)
@@ -721,38 +1234,111 @@ export async function pickAndImportComfyModelAssets(
     for (const path of partialFiles) rmSync(path, { force: true })
     // 레지스트리가 저장되기 전에 만든 파일만 정리한다. 기존 파일과 재사용 파일은 건드리지 않는다.
     for (const path of finalizedFiles) rmSync(path, { force: true })
+    if (error instanceof ComfyModelImportCancelledError) {
+      return { canceled: true, imported: [], reused: [] }
+    }
     throw error
   } finally {
     importBusy = false
+    activeImportOperationId = undefined
+    activeImportCancelled = false
   }
+}
+
+export async function pickAndImportComfyWorkflowTemplate(
+  owner: BrowserWindow,
+  id: unknown
+): Promise<import('../shared/comfy-model').ComfyWorkflowImportResult> {
+  if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(id)) {
+    throw new Error('모델 프로필 ID가 올바르지 않습니다.')
+  }
+  const selection = await dialog.showOpenDialog(owner, {
+    title: 'ComfyUI API 워크플로 연결',
+    properties: ['openFile'],
+    filters: [{ name: 'ComfyUI API 워크플로', extensions: ['json'] }]
+  })
+  if (selection.canceled || selection.filePaths.length === 0) return { canceled: true }
+  const source = selection.filePaths[0]
+  const stat = lstatSync(source)
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > COMFY_WORKFLOW_TEMPLATE_MAX_BYTES) {
+    throw new Error('워크플로 JSON은 1MB 이하의 일반 파일이어야 합니다.')
+  }
+  let raw: unknown
+  try {
+    raw = JSON.parse(readFileSync(source, 'utf8'))
+  } catch {
+    throw new Error('워크플로 JSON을 읽을 수 없습니다.')
+  }
+  const parsed = parseComfyWorkflowTemplate(raw, source)
+  const registry = loadRegistry()
+  const index = registry.profiles.findIndex((profile) => profile.id === id)
+  if (index < 0) throw new Error('모델 프로필을 찾을 수 없습니다.')
+  const current = registry.profiles[index]
+  const workflowTemplate = bindComfyWorkflowTemplateAssets(parsed.template, current.assets)
+  const defaults = cleanDefaults({ ...current.defaults, ...parsed.suggestedDefaults }, current.defaults)
+  const profile: ComfyModelProfile = {
+    ...current,
+    workflowTemplateId: workflowTemplate.id,
+    workflowTemplate,
+    defaults,
+    // 새 워크플로는 사용자가 내용을 확인한 뒤 명시적으로 Agent 사용을 켠다.
+    agentEnabled: false,
+    updatedAt: Date.now()
+  }
+  registry.profiles[index] = profile
+  saveRegistry(registry)
+  return { canceled: false, profile: structuredClone(profile) }
+}
+
+export function removeComfyWorkflowTemplate(id: unknown): ComfyModelProfile {
+  if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(id)) {
+    throw new Error('모델 프로필 ID가 올바르지 않습니다.')
+  }
+  const registry = loadRegistry()
+  const index = registry.profiles.findIndex((profile) => profile.id === id)
+  if (index < 0) throw new Error('모델 프로필을 찾을 수 없습니다.')
+  const current = registry.profiles[index]
+  const profile: ComfyModelProfile = {
+    ...current,
+    workflowTemplateId: `${current.family}.txt2img.v1`,
+    workflowTemplate: undefined,
+    defaults: getComfyGenerationDefaults(current.family),
+    agentEnabled: false,
+    updatedAt: Date.now()
+  }
+  registry.profiles[index] = profile
+  saveRegistry(registry)
+  return structuredClone(profile)
 }
 
 function normalizePatch(value: unknown, current: ComfyModelProfile): ComfyModelProfilePatch {
   const raw = asObject(value)
   if (!raw) throw new Error('모델 프로필 변경 형식이 올바르지 않습니다.')
-  const nextFamily = raw.family === undefined ? current.family : cleanFamily(raw.family)
-  const resetDefaultWorkflow = raw.family !== undefined && raw.workflowTemplateId === undefined &&
-    current.workflowTemplateId === `${current.family}.txt2img.v1`
+  if (raw.family !== undefined || raw.workflowTemplateId !== undefined) {
+    throw new Error('모델 구조와 워크플로는 연결한 파일을 Aiso가 분석해 내부적으로 결정합니다.')
+  }
   return {
     ...(raw.name === undefined ? {} : { name: cleanName(raw.name) }),
-    ...(raw.family === undefined ? {} : { family: nextFamily }),
     ...(raw.capabilities === undefined ? {} : { capabilities: cleanCapabilities(raw.capabilities) }),
     ...(raw.tags === undefined ? {} : { tags: cleanTags(raw.tags) }),
-    ...(raw.workflowTemplateId === undefined
-      ? resetDefaultWorkflow ? { workflowTemplateId: `${nextFamily}.txt2img.v1` } : {}
-      : { workflowTemplateId: cleanWorkflowTemplate(raw.workflowTemplateId, nextFamily) }),
     ...(raw.defaults === undefined ? {} : { defaults: cleanDefaults(raw.defaults, current.defaults) }),
     ...(raw.agentEnabled === undefined ? {} : { agentEnabled: raw.agentEnabled === true }),
     ...(raw.priority === undefined ? {} : { priority: cleanPriority(raw.priority, current.priority) })
   }
 }
 
-export function updateComfyModelProfile(id: unknown, rawPatch: unknown): ComfyModelProfile {
+export async function updateComfyModelProfile(
+  id: unknown,
+  rawPatch: unknown,
+  installPath = '',
+  isInstallPathCurrent?: InstallPathCurrentCheck
+): Promise<ComfyModelProfile> {
   if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(id)) {
     throw new Error('모델 프로필 ID가 올바르지 않습니다.')
   }
-  const registry = loadRegistry()
-  const index = registry.profiles.findIndex((profile) => profile.id === id)
+  let registry = loadRegistry()
+  let registryRevisionAtLoad = registryRevision
+  let index = registry.profiles.findIndex((profile) => profile.id === id)
   if (index < 0) throw new Error('모델 프로필을 찾을 수 없습니다.')
   const current = registry.profiles[index]
   const patch = normalizePatch(rawPatch, current)
@@ -762,9 +1348,42 @@ export function updateComfyModelProfile(id: unknown, rawPatch: unknown): ComfyMo
     defaults: patch.defaults ? cleanDefaults(patch.defaults, current.defaults) : current.defaults,
     updatedAt: Date.now()
   }
+  if (patch.agentEnabled === true && !current.agentEnabled && !getComfyAgentReadiness(next).ready) {
+    throw new Error(`Agent 자동 선택을 켤 수 없습니다. ${getComfyAgentReadiness(next).detail}`)
+  }
+  if (patch.agentEnabled === true && !current.agentEnabled) {
+    await assertAgentAssetsAvailableAtInstall(next, installPath)
+    assertInstallPathCurrent(isInstallPathCurrent)
+    const latestRegistry = loadRegistry()
+    const latestIndex = latestRegistry.profiles.findIndex((profile) => profile.id === id)
+    if (latestIndex < 0 || !isDeepStrictEqual(latestRegistry.profiles[latestIndex], current)) {
+      throw new Error('모델 목록이 파일 확인 중 변경되었습니다. 최신 목록을 확인한 뒤 다시 시도해 주세요.')
+    }
+    registry = latestRegistry
+    index = latestIndex
+    registryRevisionAtLoad = registryRevision
+  }
+  assertRegistryCurrent(registryRevisionAtLoad)
   registry.profiles[index] = next
   saveRegistry(registry)
   return structuredClone(next)
+}
+
+/**
+ * ComfyUI Portable 설치본이 바뀌면 기존 레지스트리의 파일 경로 계약을 신뢰할 수 없다.
+ * 실제 파일은 삭제하지 않고 Agent 자동 선택만 안전하게 해제한다.
+ */
+export function disableComfyAgentProfiles(): number {
+  const registry = loadRegistry()
+  const now = Date.now()
+  let disabled = 0
+  registry.profiles = registry.profiles.map((profile) => {
+    if (!profile.agentEnabled) return profile
+    disabled += 1
+    return { ...profile, agentEnabled: false, updatedAt: now }
+  })
+  if (disabled > 0) saveRegistry(registry)
+  return disabled
 }
 
 export function unregisterComfyModelProfile(id: unknown): boolean {
@@ -783,6 +1402,8 @@ export function unregisterComfyModelProfile(id: unknown): boolean {
 export function clearComfyModelRegistry(): void {
   try {
     rmSync(registryPath(), { force: true })
+    registryRevision += 1
+    registryRecovery = undefined
   } catch (error) {
     console.error('[comfy-models] 모델 레지스트리 초기화 실패:', error)
   }

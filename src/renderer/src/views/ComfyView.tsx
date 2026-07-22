@@ -15,7 +15,7 @@ interface Props {
   settings: AppSettings
   backend: BackendInfo
   active: boolean
-  onSaveSettings: (patch: Partial<AppSettings>) => Promise<void>
+  onSaveSettings: (patch: Partial<AppSettings>) => Promise<boolean>
 }
 
 function gib(bytes?: number): string {
@@ -200,7 +200,9 @@ function ComfyView({ settings, backend, active, onSaveSettings }: Props): React.
   const chooseInstall = async (): Promise<void> => {
     try {
       const selected = await window.api.comfy.pickInstall()
-      if (selected) await onSaveSettings({ comfyInstallPath: selected })
+      if (selected && !await onSaveSettings({ comfyInstallPath: selected })) {
+        setMessage('설치 폴더를 저장하지 못했습니다. 설정 권한과 디스크 상태를 확인해 주세요.')
+      }
     } catch (err) {
       setMessage(`폴더 선택 실패: ${String(err)}`)
     }
@@ -292,7 +294,7 @@ function ComfyView({ settings, backend, active, onSaveSettings }: Props): React.
             aria-expanded={showModels}
             onClick={() => setShowModels((v) => !v)}
           >
-            등록 {registeredModels.length} · 체크포인트 {checkpoints.length}
+            연결한 모델 {registeredModels.length} · ComfyUI 체크포인트 {checkpoints.length}
           </button>
           <a className="btn btn--ghost2 comfy-external" href={safeBaseUrl} target="_blank" rel="noreferrer">
             브라우저로 열기
@@ -313,22 +315,24 @@ function ComfyView({ settings, backend, active, onSaveSettings }: Props): React.
       </header>
       {checkpoints.length === 0 && registeredModels.length === 0 && (
         <div className="comfy-warning" role="status">
-          등록된 모델이 없습니다. 설정 → ComfyUI → 모델 라이브러리에서 <code>.safetensors</code> 파일을 가져오세요.
+          아직 연결한 모델이 없습니다. 설정 → ComfyUI에서 사용할 모델을 연결하세요.
         </div>
       )}
       {showModels && (
         <div className="comfy-model-panel">
-          <div className="comfy-model-panel__title">Aiso 모델 프로필</div>
+          <div className="comfy-model-panel__title">Aiso에 연결한 모델</div>
           {registeredModels.length === 0
-            ? <div>등록된 프로필이 없습니다.</div>
+            ? <div>연결된 모델이 없습니다.</div>
             : registeredModels.map((profile) => {
                 const readiness = getComfyAgentReadiness(profile)
                 return (
                   <div className="comfy-model-panel__profile" key={profile.id}>
                     <b>{profile.name}</b>
-                    <span>{profile.family.toUpperCase()} · {profile.assets.length}개 자산</span>
+                    <span>구성 파일 {profile.assets.length}개</span>
                     <small className={readiness.ready ? 'is-ready' : ''}>
-                      {profile.agentEnabled ? readiness.detail : 'Agent 자동 선택 꺼짐'}
+                      {profile.agentEnabled
+                        ? `${readiness.detail}${readiness.ready ? ' · Agent 자동 선택 사용 중' : ' · Agent 자동 선택에서 제외됨'}`
+                        : 'Agent 자동 선택 꺼짐'}
                     </small>
                   </div>
                 )

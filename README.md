@@ -8,7 +8,7 @@
 
 파일과 문서를 내 PC에서 다루고, 필요한 작업은 실행 결과로 확인합니다.
 
-![version](https://img.shields.io/badge/version-0.3.0-F16522?style=flat-square)
+![version](https://img.shields.io/badge/version-0.3.1-F16522?style=flat-square)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-47848F?style=flat-square&logo=electron&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama-local%20LLM-black?style=flat-square&logo=ollama)
@@ -131,11 +131,15 @@ Discord 봇 토큰은 Electron `safeStorage`를 사용해 별도로 보관합니
 
 - Aiso 내부에서 사용자가 설치한 로컬 ComfyUI 화면을 열어 직접 작업
 - Windows Portable ComfyUI의 시작·연결 상태와 GPU 정보를 설정에서 확인
-- 사용자가 보유한 모델 파일을 ComfyUI의 지정 모델 폴더로 복사·등록하고 모델 프로필 관리
-- 명확한 이미지 요청에서만 Agent가 등록된 모델과 검증된 워크플로를 선택해 생성
+- SafeTensors 헤더와 텐서 구조를 읽어 확인 가능한 모델 파일만 ComfyUI의 적절한 모델 폴더에 연결
+- 판별할 수 없는 파일도 사용자가 지정한 ComfyUI 폴더에 직접 연결해 ComfyUI 화면에서 사용할 수 있음
+- 자동 선택과 직접 선택 중 이미지 생성 모델 선택 방식을 고를 수 있음
+- 명확한 이미지 요청에서만 Agent가 등록·검증된 모델과 워크플로를 선택해 생성
+- 내장 텍스트→이미지 계약: SD 1.5, SDXL, FLUX.1 split, FLUX.2 [klein] 4B
+- 사용자가 내보낸 `Save (API Format)` 워크플로는 등록 자산의 이름·경로·SHA-256 연결이 모두 확인될 때만 Agent 실행에 사용
 - 결과 카드에 선택 모델, seed, 생성값, 실제 프롬프트와 ComfyUI 노드 그래프 표시
 
-모델 파일은 Aiso에 번들하지 않으며 사용자의 ComfyUI 설치본에 보관합니다. Agent 자동 생성은 현재 검증된 SD 1.5·SDXL·FLUX.1 split 템플릿만 지원합니다.
+모델 파일은 Aiso에 번들하거나 추천하지 않으며 사용자의 ComfyUI 설치본에 보관합니다. 대화 기록에는 이미지 바이트가 아니라 ComfyUI 출력 파일 참조가 저장되므로, 이전 생성 결과를 다시 볼 때도 ComfyUI가 실행 중이고 해당 출력 파일이 남아 있어야 합니다.
 
 ### 데스크톱 기능
 
@@ -147,6 +151,8 @@ Discord 봇 토큰은 Electron `safeStorage`를 사용해 별도로 보관합니
 - 일·주·월 토큰 사용량 통계
 - GitHub Releases 기반 자동 업데이트
 - 백엔드 비정상 종료 시 제한된 횟수의 자동 재시작
+- LLM·ComfyUI·Discord·화면·도구·스킬·업데이트를 분리한 설정 탭
+- 실제 백엔드 도구 레지스트리에서 계산한 내장 Agent 도구 목록과 승인 조건 표시
 
 ## 사용 범위
 
@@ -182,7 +188,7 @@ Discord 봇 토큰은 Electron `safeStorage`를 사용해 별도로 보관합니
 | 홈 | 백엔드·Ollama·모델 상태, 초기 설정 안내, 토큰 사용량 확인 |
 | 채팅 | 로컬 모델과 일반 대화, 선택적으로 자동 웹 조사 수행 |
 | 에이전트 | 작업 폴더 지정, 권한 모드 선택, 계획·도구 기반 작업 수행 |
-| 설정 | 모델, 추론 강도, 온도, 컨텍스트, RAG, 웹 검색, Discord, 업데이트 관리 |
+| 설정 | LLM, ComfyUI, Discord, 화면, 내장 도구, 스킬, 업데이트 관리 |
 
 ## 안전 및 보안
 
@@ -192,7 +198,7 @@ Discord 봇 토큰은 Electron `safeStorage`를 사용해 별도로 보관합니
 |---|---|
 | 수동 | 읽기, 쓰기, 이동, 삭제, 실행을 포함한 모든 실질 작업에 승인 필요 |
 | 읽기 | 조회 작업은 자동으로 수행하고 쓰기·편집·삭제·명령 실행은 승인 필요 |
-| 자동 | 작업 폴더 안의 작업을 승인 없이 수행. 외부 발신과 Discord 변경은 예외적으로 승인 필요 |
+| 자동 | 읽기와 일부 되돌릴 수 있는 작업을 자동 수행. 코드·명령·브라우저 실행, 삭제, 스킬 실행·생성, 외부 발신·Discord 변경은 승인 필요 |
 
 처음 사용할 때는 `읽기` 모드를 권장합니다.
 
@@ -200,13 +206,16 @@ Discord 봇 토큰은 Electron `safeStorage`를 사용해 별도로 보관합니
 
 - 에이전트의 파일 접근을 사용자가 지정한 작업 폴더로 제한
 - 사용자 홈 디렉터리 자체를 작업 폴더로 지정하는 동작 차단
-- 삭제 작업은 가능한 경우 운영체제 휴지통으로 이동
+- 작업 폴더의 심볼릭 링크·Windows 정션을 따라 외부 경로로 탐색하지 않음
+- 삭제 작업은 운영체제 휴지통 이동에 실패하면 영구 삭제로 대체하지 않고 실패 처리
 - FastAPI 사이드카를 `127.0.0.1`의 동적 포트에서 실행
 - 앱 실행마다 생성한 세션 토큰으로 사이드카 API 인증
 - 허용된 개발 오리진만 접근할 수 있도록 CORS 제한
 - 웹 가져오기 과정의 SSRF, DNS 리바인딩, 사설망 접근 차단
+- 비밀값·토큰처럼 보이는 검색어와 URL 쿼리, 과도하게 긴 외부 요청 차단
+- 작업 폴더 RAG 문맥을 신뢰하지 않는 참고 데이터로 격리
 - 미리보기 페이지에 CSP와 iframe sandbox 적용
-- 명령·웹 실행 시간 제한과 에이전트 반복 퇴행 감지
+- 명령·코드 실행의 출력 크기 상한, 시간 제한, 프로세스 트리 종료와 에이전트 반복 퇴행 감지
 - 스킬 실행 환경에서 Aiso 인증 토큰 제거
 
 자동 모드는 사용자의 확인 단계를 줄이는 대신 파일 변경과 명령 실행 위험을 수반합니다. 신뢰할 수 있는 작업 폴더에서만 사용해야 합니다.
@@ -215,12 +224,12 @@ Discord 봇 토큰은 Electron `safeStorage`를 사용해 별도로 보관합니
 
 최신 Windows 설치본은 [GitHub Releases](https://github.com/devbin-lab/AISO/releases/latest)에서 받을 수 있습니다.
 
-현재 버전: `0.3.0`
+현재 소스 버전: `0.3.1`
 
-설치 파일:
+v0.3.1 설치본이 게시될 때의 파일 이름:
 
 ```text
-Aiso-0.3.0-Setup.exe
+Aiso-0.3.1-Setup.exe
 ```
 
 ### 시스템 요구사항
@@ -278,7 +287,7 @@ ollama pull bge-m3
 - 문서 의미 검색이 필요하면 `bge-m3`를 설치하고 RAG를 활성화합니다.
 - Discord 기능이 필요하면 봇 토큰을 저장하고 연동을 활성화합니다.
 - 예약과 봇을 창을 닫은 뒤에도 유지하려면 트레이 상주를 켭니다.
-- 이미지 생성을 사용하려면 별도로 설치한 ComfyUI의 주소와 Windows Portable 경로를 설정하고, 사용할 모델을 ComfyUI 모델 폴더에 등록합니다.
+- 이미지 생성을 사용하려면 별도로 설치한 ComfyUI의 주소와 Windows Portable 경로를 설정하고, 사용할 모델을 ComfyUI 모델 폴더에 등록합니다. Agent가 고를지, 이미지 요청마다 직접 고를지도 설정에서 정할 수 있습니다.
 
 ## 아키텍처
 
@@ -316,8 +325,8 @@ flowchart LR
 | `python/websearch.py`, `python/webfetch.py` | 웹 검색과 안전한 본문 수집 |
 | `python/runskill.py` | 자동화 스킬 생성 및 실행 |
 | `python/discord*.py` | Discord 봇, 서버 작업, 예약 관리 |
-| `python/comfy_*.py` | ComfyUI 상태 조회, 안전한 워크플로 생성, 작업 추적, 출력 프록시 |
-| `src/main/comfy*.ts` | ComfyUI 설정, Portable 실행, 모델 프로필·파일 등록 |
+| `python/comfy_*.py` | ComfyUI 상태 조회, 모델별 안전한 워크플로 생성, 작업 추적, 출력 프록시 |
+| `src/main/comfy*.ts` | ComfyUI 설정, Portable 실행, SafeTensors 분석, 모델 프로필·사용자 워크플로·파일 등록 |
 | `pyruntime` | 설치본에 포함되는 Python 런타임 |
 | `tools` | 검증에 사용하는 Windows 도구 체인 |
 
@@ -365,6 +374,7 @@ python/.venv/Scripts/python.exe -m pip install -r python/requirements-dev.txt
 ```powershell
 npm run dev          # Electron과 Vite 개발 서버 실행
 npm run typecheck    # Main, preload, renderer 타입 검사
+npm test             # ComfyUI 계약 및 렌더러 회귀 테스트
 npm run build        # Electron 애플리케이션 빌드
 npm run dist:win     # Python 런타임을 포함한 Windows 설치본 생성
 
@@ -382,7 +392,9 @@ python/.venv/Scripts/python.exe -m pytest python/tests -q
 - 자동 모드에서는 작업 폴더 내부 파일을 사용자 확인 없이 변경할 수 있습니다.
 - Discord 예약은 Aiso 백엔드가 실행 중일 때만 처리됩니다.
 - ComfyUI 이미지 생성은 선택 기능이며, ComfyUI와 모델 파일은 사용자가 별도로 설치해야 합니다.
-- Agent 자동 생성은 현재 SD 1.5·SDXL·FLUX.1 split의 검증된 텍스트→이미지 워크플로만 지원합니다. FLUX.2, custom·외부 워크플로, img2img, inpaint, ControlNet, 업스케일은 후속 범위입니다.
+- 내장 Agent 자동 생성은 SD 1.5·SDXL·FLUX.1 split·FLUX.2 [klein] 4B의 텍스트→이미지 계약만 제공합니다. 다른 모델은 사용자가 검증한 API 워크플로를 연결해야 하며, Aiso가 모델별 사용법을 추측해 자동 구성하지 않습니다.
+- img2img, inpaint, ControlNet, 업스케일은 내장 자동 워크플로 범위가 아닙니다. 연결한 사용자 워크플로의 입력·출력 계약을 사용자가 확인해야 합니다.
+- 이전 이미지 카드의 복원은 ComfyUI 출력 파일을 다시 읽는 방식입니다. ComfyUI가 꺼져 있거나 출력 파일을 지우면 카드에서 이미지를 표시할 수 없습니다.
 - `.xls` 같은 일부 구형 문서 형식은 직접 지원하지 않습니다.
 
 ## 데이터와 네트워크
@@ -394,6 +406,7 @@ python/.venv/Scripts/python.exe -m pytest python/tests -q
 - 토큰 사용량 통계
 - 작업 폴더별 RAG 색인
 - 사용자가 만든 자동화 스킬
+- ComfyUI 모델 프로필, 자산 해시, 연결한 사용자 워크플로
 - Discord 설정과 예약 정보
 
 ### 외부 연결이 발생하는 경우
@@ -419,6 +432,18 @@ Aiso는 공개 웹 페이지를 읽을 때 내부 네트워크 주소와 로컬 
 ## 버전 변천사
 
 아래 기록은 저장소에 남아 있는 Git 릴리스 태그를 기준으로 정리했습니다.
+
+### v0.3.1 — 2026-07-22
+
+ComfyUI 모델 연결과 Agent 실행 계약을 넓히되, 사용자가 가져온 모델·워크플로를 추측 없이 검증된 범위에서만 실행하도록 강화한 안정화 릴리스입니다.
+
+- FLUX.2 [klein] 4B의 확산 모델·Qwen 3 텍스트 인코더·VAE 필수 구성 계약과 전용 워크플로 추가
+- SafeTensors 헤더·텐서 구조 기반의 자산 판별, 직접 연결 파일, 사용자 API 워크플로 연결 추가
+- 사용자 워크플로의 모델 로더를 등록 자산의 이름·경로·SHA-256에 고정해 변경·바꿔치기 상태에서 Agent 실행 차단
+- 이미지 생성의 모델 자동 선택과 직접 선택 모드 추가, 모델별 안전한 기본 생성값 적용
+- 설정 화면의 LLM 통합, 도구 카탈로그, ComfyUI 모델 관리 흐름과 반응형 UI 개선
+- 실행·삭제·외부 발신의 자동 모드 승인 경계를 명확화하고, 웹 외부 전송·RAG·작업 폴더 링크·프로세스 출력 안전 경계 강화
+- Python 의존성 잠금, ComfyUI 계약·렌더러·보안 경계 회귀 테스트 추가
 
 ### v0.3.0 — 2026-07-20
 

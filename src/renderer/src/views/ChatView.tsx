@@ -57,7 +57,7 @@ interface Props {
   settings: AppSettings
   backend: BackendInfo
   health: HealthInfo | null
-  onSaveSettings: (patch: Partial<AppSettings>) => Promise<void>
+  onSaveSettings: (patch: Partial<AppSettings>) => Promise<boolean>
   convCollapsed: boolean
 }
 

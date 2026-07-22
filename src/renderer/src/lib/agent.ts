@@ -1,11 +1,31 @@
 import { type AppSettings, resolveTemperature } from '../../../shared/settings'
-import type { AgentEvent, ApprovalMode } from '../../../shared/agent'
+import type { AgentEvent, AgentToolCatalog, ApprovalMode } from '../../../shared/agent'
 import type { ComfyModelProfile } from '../../../shared/comfy-model'
 import { authHeaders } from './backend'
 
 export interface AgentMessage {
   role: 'user' | 'assistant'
   content: string
+}
+
+/**
+ * Manual ComfyUI selection is intentionally a per-generation choice rather
+ * than a model-name hint embedded in the prompt.  The sidecar validates this
+ * ID against the registered profile list before it can execute a workflow.
+ */
+export interface ComfySelectionRequest {
+  selectedComfyModelId?: string
+}
+
+/** 실제 Python 레지스트리에서 계산한 내장 Agent 도구 목록을 읽는다. */
+export async function fetchAgentToolCatalog(port: number): Promise<AgentToolCatalog> {
+  const res = await fetch(`http://127.0.0.1:${port}/agent/tools`, {
+    headers: authHeaders()
+  })
+  if (!res.ok) throw new Error(`도구 목록을 불러오지 못했습니다 (HTTP ${res.status})`)
+  const catalog = await res.json() as AgentToolCatalog
+  if (!Array.isArray(catalog.tools)) throw new Error('도구 목록 응답 형식이 올바르지 않습니다.')
+  return catalog
 }
 
 /** 에이전트 하네스 스트림(NDJSON) 을 읽어 이벤트 단위로 콜백한다. */
@@ -18,9 +38,15 @@ export async function streamAgent(
   approvalMode: ApprovalMode,
   comfyProfiles: ComfyModelProfile[],
   onEvent: (e: AgentEvent) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  comfySelection?: ComfySelectionRequest
 ): Promise<void> {
   const lastUserText = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
+  const comfySelectionMode = settings.comfyModelSelectionMode === 'manual' ? 'manual' : 'auto'
+  const selectedComfyModelId =
+    comfySelectionMode === 'manual' && typeof comfySelection?.selectedComfyModelId === 'string'
+      ? comfySelection.selectedComfyModelId.trim()
+      : ''
   const res = await fetch(`http://127.0.0.1:${port}/agent`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -38,7 +64,9 @@ export async function streamAgent(
       rag_top_k: settings.ragTopK,
       keep_alive: settings.keepAlive,
       comfy_base_url: settings.comfyBaseUrl,
-      comfy_profiles: comfyProfiles
+      comfy_profiles: comfyProfiles,
+      comfy_selection_mode: comfySelectionMode,
+      ...(selectedComfyModelId ? { selected_comfy_model_id: selectedComfyModelId } : {})
     }),
     signal
   })

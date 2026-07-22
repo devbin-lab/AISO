@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from discordops import APPLY_SCHEMA as DISCORD_APPLY_SCHEMA
 from discordops import MAP_SCHEMA as DISCORD_MAP_SCHEMA
@@ -134,17 +134,24 @@ def _build_registry() -> dict[str, ToolSpec]:
             mutates=name in _FILE_MUTATES,
         )
     # 3) 비동기 툴 — 기존 AGENT_TOOLS 순서(run_web, run_code, run_command, web_fetch)
+    # Existing workspace code/HTML is not trusted merely because it is already on disk.
+    # These tools execute it with the user's browser/process permissions, so neither a
+    # read-only session nor auto mode may bypass the approval boundary.
     reg["run_web"] = ToolSpec("run_web", RUN_WEB_SCHEMA, CallKind.ASYNC_ROOT,
-                              returns_screenshot=True, handler=run_web)
-    reg["run_code"] = ToolSpec("run_code", RUN_CODE_SCHEMA, CallKind.ASYNC_ROOT, handler=run_code)
+                              approval=Approval.ALWAYS, returns_screenshot=True, handler=run_web)
+    reg["run_code"] = ToolSpec("run_code", RUN_CODE_SCHEMA, CallKind.ASYNC_ROOT,
+                               approval=Approval.ALWAYS, handler=run_code)
     reg["run_command"] = ToolSpec("run_command", RUN_COMMAND_SCHEMA, CallKind.ASYNC_ROOT,
                                   approval=Approval.ALWAYS, mutates=True, handler=run_command)
     reg["web_fetch"] = ToolSpec("web_fetch", WEB_FETCH_SCHEMA, CallKind.ASYNC_PLAIN, handler=web_fetch)
     reg["web_search"] = ToolSpec("web_search", WEB_SEARCH_SCHEMA, CallKind.ASYNC_PLAIN, handler=web_search)
     # 3b) 스킬 — create_skill(코드 산출의 유일한 경로, 쓰기 등급) / run_skill(임의 실행, 명령 등급)
     #     스킬은 workspace 밖(앱 skills 폴더)에 저장되므로 mutates=False(재색인 불필요).
+    # Skills persist executable code outside the selected workspace.  Treat creation
+    # and execution alike so a prompt-injected repository cannot plant a future
+    # executable in an unattended auto run.
     reg["create_skill"] = ToolSpec("create_skill", CREATE_SKILL_SCHEMA, CallKind.ASYNC_PLAIN,
-                                   approval=Approval.DESTRUCTIVE, handler=create_skill)
+                                   approval=Approval.ALWAYS, handler=create_skill)
     reg["run_skill"] = ToolSpec("run_skill", RUN_SKILL_SCHEMA, CallKind.ASYNC_PLAIN,
                                 approval=Approval.ALWAYS, handler=run_skill)
     # 4) search_docs — 색인 있을 때만 노출(AGENT_TOOLS 제외)이지만 실행 디스패치엔 필요
@@ -185,6 +192,12 @@ _CONDITIONAL_TOOLS = {
 # 모델에게 넘길 스키마 배열 — 조건부 툴 제외, 등록 순서 유지 (기존 AGENT_TOOLS와 바이트 동일)
 AGENT_TOOLS: list[dict] = [spec.schema for name, spec in REGISTRY.items() if name not in _CONDITIONAL_TOOLS]
 
+# 외부 공유 서버에 영향을 주는 행위는 auto 모드여도 승인한다. Agent 실행 루프와 툴 목록이
+# 같은 정책을 보도록 여기에서 단일 상수로 관리한다.
+FORCE_APPROVAL_IN_AUTO = frozenset({
+    "discord_server_apply", "discord_send", "discord_schedule_add",
+})
+
 
 def is_meta(name: str) -> bool:
     spec = REGISTRY.get(name)
@@ -194,13 +207,16 @@ def is_meta(name: str) -> bool:
 def needs_approval(name: str, mode: str) -> bool:
     """승인 모드별로 이 툴이 사용자 승인을 요구하는지.
 
-    - auto(자동):   승인 없이 전부 실행.
+    - auto(자동):   SAFE와 되돌릴 수 있는 작업만 무승인 실행. 코드·명령·브라우저
+                    실행과 삭제는 항상 승인.
     - read(읽기):   읽기(SAFE)는 통과, 쓰기·편집·삭제·명령은 승인.
     - manual(수동): 읽기 포함 모든 실질 행위를 승인(계획 갱신 같은 메타는 제외).
     """
-    if mode == "auto":
-        return False
     spec = REGISTRY.get(name)
+    if mode == "auto":
+        # Auto is deliberately not a blanket bypass. Shell/code/browser execution,
+        # skill execution/creation, and deletion retain an explicit user gate.
+        return spec is not None and spec.approval in (Approval.ALWAYS, Approval.DELETE)
     if spec is None:
         return mode == "manual"  # 미등록 툴 → 수동에서만 승인(그 외 기존처럼 통과)
     if spec.kind is CallKind.META:
@@ -208,6 +224,102 @@ def needs_approval(name: str, mode: str) -> bool:
     if mode == "manual":
         return True  # 수동: 읽기까지 전부 승인
     return spec.approval is not Approval.SAFE  # read: 읽기 제외 전부 승인
+
+
+def _catalog_classification(name: str, spec: ToolSpec) -> tuple[str, str, tuple[str, ...]]:
+    """툴 목록 UI에 필요한 분류·노출 조건을 실제 실행 경계에 맞춰 만든다."""
+    if spec.kind is CallKind.META:
+        return "plan", "always", ()
+    if name == "search_docs":
+        return "rag", "rag", ("작업 폴더 선택", "RAG 사용", "색인 완료")
+    if name.startswith("discord_"):
+        return "discord", "discord", ("디스코드 봇 연결",)
+    if spec.kind is CallKind.FILE or name in {"run_web", "run_code", "run_command"}:
+        category = "files" if spec.kind is CallKind.FILE else "execution"
+        return category, "workspace", ("작업 폴더 선택",)
+    if name in {"web_search", "web_fetch"}:
+        return "research", "always", (
+            "작업 폴더 내용을 읽은 뒤 웹으로 전송할 때는 자동 모드도 승인 필요",
+        )
+    if name in {"create_skill", "run_skill"}:
+        return "automation", "always", ()
+    return "automation", "always", ()
+
+
+def _catalog_entry(
+    *,
+    name: str,
+    schema: dict,
+    category: str,
+    availability: str,
+    requirements: tuple[str, ...],
+    mutates: bool,
+) -> dict[str, Any]:
+    """Ollama 함수 스키마를 안전한 읽기 전용 툴 카탈로그 항목으로 축약한다."""
+    function = schema.get("function") if isinstance(schema, dict) else None
+    function = function if isinstance(function, dict) else {}
+    raw_parameters = function.get("parameters")
+    properties = raw_parameters.get("properties", {}) if isinstance(raw_parameters, dict) else {}
+    parameters = [
+        {
+            "name": str(param_name),
+            "description": str(param.get("description") or ""),
+        }
+        for param_name, param in properties.items()
+        if isinstance(param, dict)
+    ] if isinstance(properties, dict) else []
+    approval = {
+        mode: needs_approval(name, mode) or (mode == "auto" and name in FORCE_APPROVAL_IN_AUTO)
+        for mode in ("manual", "read", "auto")
+    }
+    return {
+        "name": name,
+        "description": str(function.get("description") or ""),
+        "category": category,
+        "parameters": parameters,
+        "mutates": mutates,
+        "approval": approval,
+        "availability": availability,
+        "requirements": list(requirements),
+    }
+
+
+def get_builtin_tool_catalog() -> list[dict[str, Any]]:
+    """현재 빌드에 내장된 Agent 툴 목록을 반환한다.
+
+    이 함수는 ``REGISTRY``를 그대로 순회하므로 툴 추가·승인 등급 변경이 설정 UI와
+    어긋나지 않는다. 사용자 스킬은 런타임에 달라지는 별도 확장 기능이라 포함하지 않는다.
+    """
+    catalog: list[dict[str, Any]] = []
+    for name, spec in REGISTRY.items():
+        category, availability, requirements = _catalog_classification(name, spec)
+        catalog.append(
+            _catalog_entry(
+                name=name,
+                schema=spec.schema,
+                category=category,
+                availability=availability,
+                requirements=requirements,
+                mutates=spec.mutates,
+            )
+        )
+
+    # 이미지는 REGISTRY가 아닌 Agent 런타임에서 요청 의도와 ComfyUI 준비 상태에 따라
+    # 동적으로 추가된다. 기본 도구 목록에는 포함하되, 항상 사용할 수 있는 도구처럼 보이지
+    # 않도록 별도 조건을 명시한다.
+    from comfy_generation import GENERATE_IMAGE_SCHEMA
+
+    catalog.append(
+        _catalog_entry(
+            name="generate_image",
+            schema=GENERATE_IMAGE_SCHEMA,
+            category="image",
+            availability="image",
+            requirements=("명시적 이미지 생성 요청", "ComfyUI 연결", "등록 모델 준비"),
+            mutates=False,
+        )
+    )
+    return catalog
 
 
 async def execute(spec: ToolSpec, root: Path, host: str, args: dict) -> tuple[str, str | None]:

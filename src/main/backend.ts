@@ -33,6 +33,7 @@ const MAX_CRASH_RESTARTS = 5
 let crashRestarts = 0
 let lastOllamaHost = ''
 let restartTimer: ReturnType<typeof setTimeout> | null = null
+let lateReadinessProbe: Promise<void> | null = null
 
 function set(patch: Partial<BackendInfo>): void {
   info = { ...info, ...patch }
@@ -61,6 +62,52 @@ function freePort(): Promise<number> {
       }
     })
     s.on('error', reject)
+  })
+}
+
+async function isHealthy(port: number): Promise<boolean> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { 'X-Aiso-Token': AUTH_TOKEN }
+    })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
+/** A slow Python/Ollama initialization must be able to recover from the initial timeout. */
+function continueLateReadinessProbe(expected: ChildProcess, port: number, initialDetail: string): void {
+  if (lateReadinessProbe) return
+  lateReadinessProbe = (async () => {
+    const deadline = Date.now() + 90_000
+    while (Date.now() < deadline && proc === expected && info.state !== 'stopped') {
+      if (await isHealthy(port)) {
+        crashRestarts = 0
+        set({ state: 'ready', detail: undefined })
+        console.log('[backend] 지연 준비 완료')
+        return
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2_000))
+    }
+    if (proc === expected && info.state !== 'stopped' && expected.pid) {
+      set({ state: 'error', detail: `${initialDetail} · 재시작을 시도합니다.` })
+      if (process.platform === 'win32') {
+        try {
+          execFileSync('taskkill', ['/PID', String(expected.pid), '/T', '/F'], { stdio: 'ignore' })
+        } catch {
+          /* already stopped */
+        }
+      } else {
+        try {
+          expected.kill()
+        } catch {
+          /* already stopped */
+        }
+      }
+    }
+  })().finally(() => {
+    lateReadinessProbe = null
   })
 }
 
@@ -150,10 +197,7 @@ export async function startBackend(ollamaHost: string): Promise<void> {
     if (!proc) return // 이미 종료됨 (exit 핸들러가 error 처리)
     try {
       // /health도 토큰 인증 대상이므로 준비 폴링에도 토큰을 실어야 한다.
-      const r = await fetch(`http://127.0.0.1:${port}/health`, {
-        headers: { 'X-Aiso-Token': AUTH_TOKEN }
-      })
-      if (r.ok) {
+      if (await isHealthy(port)) {
         crashRestarts = 0 // 정상 준비 → 크래시 카운터 리셋
         set({ state: 'ready' })
         console.log('[backend] 준비 완료')
@@ -164,7 +208,9 @@ export async function startBackend(ollamaHost: string): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, 400))
   }
-  set({ state: 'error', detail: `준비 시간 초과${stderrTail ? ` · ${stderrTail}` : ''}` })
+  const detail = `준비 시간 초과${stderrTail ? ` · ${stderrTail}` : ''}`
+  set({ state: 'error', detail })
+  if (proc) continueLateReadinessProbe(proc, port, detail)
 }
 
 export function stopBackend(): void {

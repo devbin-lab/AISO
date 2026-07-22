@@ -1,6 +1,6 @@
 {
   "name": "aiso",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "로컬 작업·조사·자동화·검증 에이전트",
   "main": "./out/main/index.js",
   "author": "devbin-lab",
@@ -13,11 +13,16 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "test:comfy-model-analysis": "node --experimental-strip-types --test src/main/comfy-model-analysis.test.ts src/main/comfy-workflow-template.test.ts",
+    "test:renderer": "vitest run --config vitest.config.ts",
+    "test": "npm run test:comfy-model-analysis && npm run test:renderer",
     "build:pyruntime": "powershell -ExecutionPolicy Bypass -File scripts/build-pyruntime.ps1",
     "build:win": "electron-vite build && electron-builder --win",
     "dist:win": "npm run build:pyruntime && npm run build:win"
   },
   "devDependencies": {
+    "@testing-library/react": "16.3.0",
+    "@testing-library/user-event": "14.6.1",
     "@types/node": "^26.1.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
@@ -25,13 +30,15 @@
     "electron": "^43.0.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
+    "jsdom": "26.1.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-markdown": "^10.1.0",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "typescript": "^6.0.3",
-    "vite": "^6.4.3"
+    "vite": "^6.4.3",
+    "vitest": "3.2.7"
   },
   "dependencies": {
     "@electron-toolkit/utils": "^4.0.0",

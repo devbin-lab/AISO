@@ -18,7 +18,8 @@ import type {
   ComfyModelImportResult,
   ComfyModelProfile,
   ComfyModelProfilePatch,
-  ComfyModelRegistry
+  ComfyModelRegistry,
+  ComfyWorkflowImportResult
 } from '../shared/comfy-model'
 
 export interface AisoAPI {
@@ -41,7 +42,10 @@ export interface AisoAPI {
     models: {
       list: () => Promise<ComfyModelRegistry>
       importAssets: (request: ComfyModelImportRequest) => Promise<ComfyModelImportResult>
+      cancelImport: (operationId: string) => Promise<boolean>
       update: (id: string, patch: ComfyModelProfilePatch) => Promise<ComfyModelProfile>
+      importWorkflow: (id: string) => Promise<ComfyWorkflowImportResult>
+      removeWorkflow: (id: string) => Promise<ComfyModelProfile>
       unregister: (id: string) => Promise<boolean>
       onImportProgress: (cb: (progress: ComfyModelImportProgress) => void) => () => void
     }

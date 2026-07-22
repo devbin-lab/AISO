@@ -1,5 +1,7 @@
 export type ReasoningEffort = 'low' | 'medium' | 'high'
 export type ThemeMode = 'dark' | 'light' | 'system'
+/** ComfyUI 이미지 생성에서 모델을 고르는 주체. */
+export type ComfyModelSelectionMode = 'auto' | 'manual'
 /** 생성 온도 모드 (드롭다운으로 선택):
  *  - auto: 매 요청마다 내용을 보고 정리·분류 / 코딩·일반 중 자동 선택
  *  - organize / balanced: 온도값이 코드에 고정(조정 불가)
@@ -54,6 +56,12 @@ export interface AppSettings {
   comfyBaseUrl: string
   /** ComfyUI Windows Portable의 최상위 폴더. 비어 있으면 사용자가 직접 실행한 서버에만 연결한다. */
   comfyInstallPath: string
+  /**
+   * ComfyUI 이미지 생성 모델 선택 방식.
+   * - auto: Agent가 등록·검증된 후보 중 요청과 태그를 기준으로 고른다.
+   * - manual: 사용자가 Agent 화면에서 고른 정확한 등록 프로필만 실행한다.
+   */
+  comfyModelSelectionMode: ComfyModelSelectionMode
 }
 
 /** 정리·분류 / 코딩·일반 고정 온도 — 사용자 조정 불가(코드 상수). */
@@ -65,6 +73,24 @@ export const TEMP_MODE_OPTIONS: { value: TempPreset; label: string; hint: string
   { value: 'organize', label: '정리·분류', hint: `파일 정리·데이터 추출 (온도 ${TEMP_FIXED.organize} 고정)` },
   { value: 'balanced', label: '코딩·일반', hint: `코딩·일반 작업 (온도 ${TEMP_FIXED.balanced} 고정)` },
   { value: 'custom', label: '커스텀', hint: '슬라이더로 직접 값을 고정' }
+]
+
+/** ComfyUI 설정 화면의 모델 선택 제어 옵션. */
+export const COMFY_MODEL_SELECTION_MODE_OPTIONS: {
+  value: ComfyModelSelectionMode
+  label: string
+  hint: string
+}[] = [
+  {
+    value: 'auto',
+    label: '자동 선택',
+    hint: 'Agent가 등록·검증된 모델의 태그와 우선순위를 기준으로 선택합니다.'
+  },
+  {
+    value: 'manual',
+    label: '직접 선택',
+    hint: '이미지 요청 전 사용자가 고른 등록 모델만 사용합니다.'
+  }
 ]
 
 // 'auto' 분류용 키워드 — 정리 관련 문구면 organize, 그 외(코딩 지시·질문 등)는 balanced로 떨어진다.
@@ -127,5 +153,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   trayResident: false,
   autoLaunch: false,
   comfyBaseUrl: 'http://127.0.0.1:8188',
-  comfyInstallPath: ''
+  comfyInstallPath: '',
+  comfyModelSelectionMode: 'auto'
 }

@@ -64,20 +64,6 @@ def workflow_snapshot() -> dict:
     }
 
 
-def animagine_profile() -> dict:
-    profile = copy.deepcopy(PROFILE)
-    profile["name"] = "Animagine-XL-4.0"
-    profile["assets"][0].update(
-        {
-            "fileName": "animagine-xl-4.0-opt.safetensors",
-            "comfyName": "animagine-xl-4.0-opt.safetensors",
-            "relativePath": "checkpoints/animagine-xl-4.0-opt.safetensors",
-            "sha256": "6327eca98bfb6538dd7a4edce22484a1bbc57a8cff6b11d075d40da1afb847ac",
-        }
-    )
-    return profile
-
-
 def generated_result() -> dict:
     return {
         "summary": "이미지 생성 완료",
@@ -303,6 +289,65 @@ def test_generate_image_is_conditionally_exposed_and_emits_reference(env, monkey
     assert types(events)[-1] == "done"
 
 
+def test_manual_comfy_selection_forces_the_exact_profile_id(env, monkeypatch):
+    seen: dict = {}
+
+    async def fake_unload(_host):
+        return []
+
+    async def fake_generate_image(**kwargs):
+        seen.update(kwargs)
+        return generated_result()
+
+    monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
+    monkeypatch.setattr(agent, "generate_image", fake_generate_image)
+    chat = FakeChat([
+        {"calls": [("generate_image", {"prompt": "1girl", "model_hint": "another model"})]}
+    ])
+
+    events = env.run(
+        chat,
+        messages=IMAGE_MESSAGES,
+        workspace="",
+        comfy_base_url="http://127.0.0.1:8188",
+        comfy_profiles=[PROFILE],
+        comfy_selection_mode="manual",
+        selected_comfy_model_id="anime-sdxl",
+    )
+
+    assert seen["selected_profile_id"] == "anime-sdxl"
+    assert seen["model_hint"] == "another model"
+    system_prompt = chat.payloads[0]["messages"][0]["content"]
+    assert "직접 선택한 등록 모델은 이미 고정" in system_prompt
+    assert "image_result" in types(events)
+
+
+def test_manual_comfy_selection_without_a_registered_choice_never_falls_back(env, monkeypatch):
+    attempted = False
+
+    async def should_not_generate(**_kwargs):
+        nonlocal attempted
+        attempted = True
+        return generated_result()
+
+    monkeypatch.setattr(agent, "generate_image", should_not_generate)
+    chat = FakeChat([{"calls": [("generate_image", {"prompt": "1girl"})]}])
+
+    events = env.run(
+        chat,
+        messages=IMAGE_MESSAGES,
+        workspace="",
+        comfy_base_url="http://127.0.0.1:8188",
+        comfy_profiles=[PROFILE],
+        comfy_selection_mode="manual",
+    )
+
+    assert attempted is False
+    assert chat.calls == 0
+    assert types(events) == ["error", "done"]
+    assert "등록 모델 하나를 선택" in events[0]["error"]
+
+
 def test_completed_meta_plan_plus_successful_image_finishes_without_followup_llm_url(env, monkeypatch):
     async def fake_unload(_host):
         return []
@@ -420,7 +465,13 @@ def test_multi_image_terminal_failure_preserves_verified_success_context(env, mo
     )
     assert "모델 Anime SDXL, seed 42, 크기 1024x1024" in final_content
     assert "실제 프롬프트: 1girl, original character, masterpiece" in final_content
-    assert any(event.get("type") == "error" for event in events)
+    summary_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "content" and "모델 Anime SDXL, seed 42" in event.get("text", "")
+    )
+    error_index = next(index for index, event in enumerate(events) if event.get("type") == "error")
+    assert summary_index < error_index
     assert types(events)[-1] == "done"
 
 
@@ -432,7 +483,9 @@ def test_same_environment_generation_error_retries_once_then_stops_without_web_s
 
     async def fail_generation(**kwargs):
         attempts.append(kwargs)
-        raise agent.GenerationError("ComfyUI에 연결할 수 없습니다.", retryable=True)
+        raise agent.GenerationError(
+            "ComfyUI에 연결할 수 없습니다.", retryable=True, kind="transport"
+        )
 
     monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
     monkeypatch.setattr(agent, "generate_image", fail_generation)
@@ -475,7 +528,9 @@ def test_environment_generation_error_can_recover_on_single_internal_retry(env, 
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise agent.GenerationError("ComfyUI가 HTTP 503 오류를 반환했습니다.", retryable=True)
+            raise agent.GenerationError(
+                "ComfyUI가 HTTP 503 오류를 반환했습니다.", retryable=True, kind="transport"
+            )
         return generated_result()
 
     monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
@@ -543,6 +598,42 @@ def test_cancel_and_generation_timeout_are_terminal_without_auto_retry(env, monk
     assert detail in final_error
     assert "자동 재시도하지 않았습니다" in final_error
     assert types(events)[-1] == "done"
+
+
+def test_execution_seed_error_cannot_retry_when_retryable_flag_is_incorrect(env, monkeypatch):
+    """제출 후 실행 오류는 문자열이나 잘못된 retryable 플래그와 무관하게 terminal이다."""
+    attempts = 0
+
+    async def fake_unload(_host):
+        return []
+
+    async def execution_failure(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise agent.GenerationError(
+            "ComfyUI 이미지 생성에 실패했습니다 (SeedError).",
+            retryable=True,
+            kind="terminal",
+        )
+
+    monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
+    monkeypatch.setattr(agent, "generate_image", execution_failure)
+    events = env.run(
+        FakeChat(
+            [
+                {"calls": [("generate_image", {"prompt": "1girl"})]},
+                {"calls": [("web_search", {"query": "ComfyUI 재시도"})]},
+            ]
+        ),
+        messages=IMAGE_MESSAGES,
+        workspace="",
+        comfy_base_url="http://127.0.0.1:8188",
+        comfy_profiles=[PROFILE],
+    )
+
+    assert attempts == 1
+    assert not any("자동 재시도합니다" in event.get("text", "") for event in events)
+    assert "SeedError" in next(event["error"] for event in events if event.get("type") == "error")
 
 
 def test_generation_input_error_keeps_existing_llm_correction_flow_without_auto_retry(env, monkeypatch):
@@ -639,48 +730,19 @@ def test_long_image_selection_context_keeps_head_and_tail_within_backend_limit()
     assert "\x00" not in bounded
 
 
-def test_animagine_profile_exposes_tag_prompt_policy_to_agent(env):
-    profile = animagine_profile()
+def test_agent_registered_model_data_has_no_model_specific_prompt_policy_hint(env):
     chat = FakeChat([{"content": "확인했습니다."}])
     env.run(
         chat,
         messages=IMAGE_MESSAGES,
         workspace="",
         comfy_base_url="http://127.0.0.1:8188",
-        comfy_profiles=[profile],
+        comfy_profiles=[PROFILE],
     )
     system_prompt = chat.payloads[0]["messages"][0]["content"]
-    assert "cagliostrolab.animagine-xl-4.0.tag-style.v1" in system_prompt
-    assert "영어 쉼표 구분 태그" in system_prompt
-    assert "산문 문장을 쓰지 마세요" in system_prompt
-
-
-def test_animagine_policy_hint_does_not_bleed_to_unselected_profile(env):
-    profiles = [animagine_profile(), PROFILE]
-    chat = FakeChat([{"content": "등록 모델을 확인했습니다."}])
-    env.run(
-        chat,
-        messages=[{"role": "user", "content": "애니메이션 캐릭터 이미지를 생성해줘."}],
-        workspace="",
-        comfy_base_url="http://127.0.0.1:8188",
-        comfy_profiles=profiles,
-    )
-    system_prompt = chat.payloads[0]["messages"][0]["content"]
-    assert "cagliostrolab.animagine-xl-4.0.tag-style.v1" not in system_prompt
-
-    named_chat = FakeChat([{"content": "정책을 확인했습니다."}])
-    env.run(
-        named_chat,
-        messages=[{"role": "user", "content": "Animagine XL 4.0으로 캐릭터 이미지를 생성해줘."}],
-        workspace="",
-        comfy_base_url="http://127.0.0.1:8188",
-        comfy_profiles=profiles,
-    )
-    named_system_prompt = named_chat.payloads[0]["messages"][0]["content"]
-    assert "cagliostrolab.animagine-xl-4.0.tag-style.v1" in named_system_prompt
-    assert not agent._profile_is_explicitly_named(
-        animagine_profile(), "Animagine XL 4.0Derivative 모델 정책을 설명해줘."
-    )
+    assert '"promptPolicy"' not in system_prompt
+    assert "전용 문법" not in system_prompt
+    assert "자동으로 추가하지 않습니다" not in system_prompt
 
 
 def test_clear_image_request_is_nudged_once_when_model_asks_again(env, monkeypatch):

@@ -5,7 +5,7 @@ runcode.py와 같은 이유로 동기 subprocess를 asyncio.to_thread에서 실�
 
 보안: 셸 명령은 파일 툴처럼 경로로 가둘 수 없다(절대경로·cd ..로 작업 폴더를 벗어날 수 있음).
 따라서 실제 안전장치는 경로 confine이 아니라 상위(agent) 루프의 **승인 게이트**다.
-run_command는 auto 모드를 제외한 모든 승인 모드에서 승인을 요구한다(agent.needs_approval).
+run_command는 모든 승인 모드에서 사용자의 명시적 승인을 요구한다(agent.needs_approval).
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from runcode import _bundled_bin, _find_python
+from runcode import _bundled_bin, _find_python, run_process_capped
 from tools import ToolError, _rel  # noqa: F401 — _rel은 향후 표시용
 
 CMD_TIMEOUT_DEFAULT = 60
@@ -86,38 +86,26 @@ def _run_cmd_sync(root: Path, command: str, timeout: int) -> str:
     # raw 문자열로 넘긴다 — 리스트 [cmd,/c,command]는 subprocess가 재인용해 중첩 따옴표
     # (예: python -c "…")를 깨뜨린다. `/s`는 바깥 따옴표만 벗기고 내부는 그대로 둔다.
     cmdline = f'"{comspec}" /d /s /c "{command}"'
-    proc = subprocess.Popen(
+    captured = run_process_capped(
         cmdline,
         cwd=str(root),
         env=_cmd_env(root),
-        stdin=subprocess.DEVNULL,  # 대화형 입력 대기 방지(EOF)
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        timeout=timeout,
+        max_output_bytes=MAX_CMD_OUTPUT,
         creationflags=_CREATE_NO_WINDOW | _CREATE_NEW_GROUP,
     )
-    try:
-        out_b, err_b = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-            capture_output=True,
-            creationflags=_CREATE_NO_WINDOW,
-        )
-        try:
-            proc.communicate(timeout=5)
-        except Exception:  # noqa: BLE001
-            pass
+    if captured.timed_out:
         return f"⏱ 명령이 시간을 초과했습니다 ({timeout}초). 무한 루프나 입력 대기를 확인하세요.\n$ {command}"
 
-    out, err = _decode(out_b), _decode(err_b)
-    parts = [f"$ {command}", f"(종료코드 {proc.returncode})"]
+    out, err = _decode(captured.stdout), _decode(captured.stderr)
+    parts = [f"$ {command}", f"(종료코드 {captured.returncode})"]
     if out.strip():
         parts.append("[stdout]\n" + out.rstrip())
     if err.strip():
         parts.append("[stderr]\n" + err.rstrip())
     if not out.strip() and not err.strip():
         parts.append("(출력 없음)")
-    status = "✅" if proc.returncode == 0 else "❌"
+    status = "✅" if captured.returncode == 0 else "❌"
     return status + " " + _cap("\n".join(parts))
 
 

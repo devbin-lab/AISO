@@ -1,9 +1,46 @@
 export type ApprovalMode = 'manual' | 'read' | 'auto'
 
+/** 백엔드의 실제 툴 레지스트리에서 읽어 오는 내장 Agent 툴 목록 항목. */
+export type AgentToolCategory =
+  | 'plan'
+  | 'files'
+  | 'execution'
+  | 'research'
+  | 'automation'
+  | 'rag'
+  | 'discord'
+  | 'image'
+
+/** 해당 툴이 Agent에 노출되기 위한 기본 조건. */
+export type AgentToolAvailability = 'always' | 'workspace' | 'rag' | 'discord' | 'image'
+
+export interface AgentToolParameter {
+  name: string
+  description: string
+}
+
+export interface AgentToolCatalogEntry {
+  name: string
+  description: string
+  category: AgentToolCategory
+  parameters: AgentToolParameter[]
+  /** 작업 폴더를 변경할 수 있는지. ComfyUI 출력처럼 작업 폴더 밖 결과는 포함하지 않는다. */
+  mutates: boolean
+  /** 각 승인 모드에서 실행 전 사용자 승인이 필요한지. */
+  approval: Record<ApprovalMode, boolean>
+  availability: AgentToolAvailability
+  /** 현재 세션에서 노출되기 위한 추가 조건 또는 주의 사항. */
+  requirements: string[]
+}
+
+export interface AgentToolCatalog {
+  tools: AgentToolCatalogEntry[]
+}
+
 export const APPROVAL_MODES: { v: ApprovalMode; label: string; hint: string }[] = [
   { v: 'manual', label: '수동', hint: '읽기·쓰기·편집·삭제 모두 승인' },
   { v: 'read', label: '읽기', hint: '읽기는 자동, 쓰기·편집·삭제는 승인' },
-  { v: 'auto', label: '자동', hint: '모든 작업 승인 없이 실행' }
+  { v: 'auto', label: '자동', hint: '읽기·일부 변경은 자동, 실행·삭제·외부 발신은 승인' }
 ]
 
 export type PlanStatus = 'pending' | 'in_progress' | 'completed'
@@ -90,6 +127,12 @@ export const TOOL_LABEL: Record<string, string> = {
   create_skill: '스킬 만들기',
   run_skill: '스킬 실행',
   search_docs: '문서 검색 (RAG)',
+  discord_server_map: '디스코드 서버 구조 확인',
+  discord_server_apply: '디스코드 서버 구성 적용',
+  discord_send: '디스코드 메시지 전송',
+  discord_schedule_add: '디스코드 예약 추가',
+  discord_schedule_list: '디스코드 예약 목록',
+  discord_schedule_remove: '디스코드 예약 삭제',
   update_plan: '계획 갱신',
   generate_image: '이미지 생성'
 }

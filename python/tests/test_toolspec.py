@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 
 import agent
+from comfy_generation import GENERATE_IMAGE_SCHEMA
+from toolspec import FORCE_APPROVAL_IN_AUTO, REGISTRY, get_builtin_tool_catalog, needs_approval
 
 _SNAPSHOT = Path(__file__).parent / "_agent_tools_snapshot.json"
 
@@ -18,7 +20,11 @@ _META = {"update_plan"}  # 실질 행위 아님 — 어떤 모드에서도 승�
 # 읽기(SAFE) 툴 — read 모드에서 통과, manual 모드에서만 승인
 _SAFE = {
     "list_dir", "list_tree", "read_file", "grep", "glob", "create_dir",
-    "run_web", "run_code", "web_fetch", "web_search", "search_docs",
+    "web_fetch", "web_search", "search_docs",
+}
+_AUTO_APPROVAL_REQUIRED = {
+    "delete_file", "delete_dir", "run_web", "run_code", "run_command",
+    "create_skill", "run_skill",
 }
 _ALL_TOOLS = [
     "update_plan", "list_dir", "list_tree", "read_file", "grep", "glob",
@@ -36,7 +42,7 @@ def test_agent_tools_snapshot():
 
 def _expected_approval(name: str, mode: str) -> bool:
     if mode == "auto":
-        return False
+        return name in _AUTO_APPROVAL_REQUIRED
     if name in _META:
         return False  # 메타(update_plan)는 어떤 모드에서도 승인 불필요
     if mode == "manual":
@@ -56,3 +62,38 @@ def test_create_dir_is_safe():
     assert agent.needs_approval("create_dir", "read") is False
     assert agent.needs_approval("create_dir", "auto") is False
     assert agent.needs_approval("create_dir", "manual") is True
+
+
+def test_auto_keeps_execution_and_deletion_behind_approval():
+    """Auto mode is not an escape hatch for arbitrary execution or deletion."""
+    for name in _AUTO_APPROVAL_REQUIRED:
+        assert agent.needs_approval(name, "auto") is True, name
+
+
+def test_builtin_tool_catalog_tracks_registry_and_conditional_tools():
+    """설정의 툴 목록은 실제 레지스트리·이미지 스키마와 반드시 함께 변한다."""
+    catalog = get_builtin_tool_catalog()
+    by_name = {item["name"]: item for item in catalog}
+
+    assert [item["name"] for item in catalog] == [*REGISTRY, "generate_image"]
+    for name, spec in REGISTRY.items():
+        item = by_name[name]
+        function = spec.schema["function"]
+        assert item["description"] == function["description"]
+        assert [param["name"] for param in item["parameters"]] == list(
+            function.get("parameters", {}).get("properties", {})
+        )
+        assert item["mutates"] is spec.mutates
+        assert item["approval"] == {
+            mode: needs_approval(name, mode) or (mode == "auto" and name in FORCE_APPROVAL_IN_AUTO)
+            for mode in ("manual", "read", "auto")
+        }
+
+    image = by_name["generate_image"]
+    assert image["description"] == GENERATE_IMAGE_SCHEMA["function"]["description"]
+    assert image["availability"] == "image"
+    assert {"명시적 이미지 생성 요청", "ComfyUI 연결", "등록 모델 준비"} <= set(image["requirements"])
+    assert by_name["search_docs"]["availability"] == "rag"
+    assert "색인 완료" in by_name["search_docs"]["requirements"]
+    assert by_name["discord_send"]["availability"] == "discord"
+    assert by_name["discord_send"]["approval"]["auto"] is True

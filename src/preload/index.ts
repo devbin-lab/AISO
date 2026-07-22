@@ -18,7 +18,8 @@ import type {
   ComfyModelImportResult,
   ComfyModelProfile,
   ComfyModelProfilePatch,
-  ComfyModelRegistry
+  ComfyModelRegistry,
+  ComfyWorkflowImportResult
 } from '../shared/comfy-model'
 
 // 사이드카 인증 토큰 — preload 초기화 시 1회 동기 조회 후 캐시(세션 내 불변).
@@ -61,8 +62,14 @@ const api = {
       list: (): Promise<ComfyModelRegistry> => ipcRenderer.invoke('comfy:models:list'),
       importAssets: (request: ComfyModelImportRequest): Promise<ComfyModelImportResult> =>
         ipcRenderer.invoke('comfy:models:import', request),
+      cancelImport: (operationId: string): Promise<boolean> =>
+        ipcRenderer.invoke('comfy:models:import:cancel', operationId),
       update: (id: string, patch: ComfyModelProfilePatch): Promise<ComfyModelProfile> =>
         ipcRenderer.invoke('comfy:models:update', id, patch),
+      importWorkflow: (id: string): Promise<ComfyWorkflowImportResult> =>
+        ipcRenderer.invoke('comfy:models:workflow:import', id),
+      removeWorkflow: (id: string): Promise<ComfyModelProfile> =>
+        ipcRenderer.invoke('comfy:models:workflow:remove', id),
       unregister: (id: string): Promise<boolean> =>
         ipcRenderer.invoke('comfy:models:unregister', id),
       onImportProgress: (cb: (progress: ComfyModelImportProgress) => void) => {

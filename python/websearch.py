@@ -14,12 +14,13 @@ import asyncio
 from urllib.parse import parse_qs, quote, urlparse
 
 from tools import ToolError
-from webfetch import _guard_subresource
+from webfetch import _guard_subresource, outbound_text_block_reason
 
 SEARCH_TIMEOUT = 20000     # 검색 페이지 로드 상한(ms)
 DEFAULT_COUNT = 8
 MAX_COUNT = 15
 MAX_SNIPPET = 320          # 결과 요약 문자 상한
+MAX_QUERY_CHARS = 512
 
 WEB_SEARCH_SCHEMA = {
     "type": "function",
@@ -150,9 +151,18 @@ def _search_sync(query: str, count: int) -> str:
 async def web_search(query: str = "", count: int = DEFAULT_COUNT, **_ignore) -> str:
     if not isinstance(query, str) or not query.strip():
         raise ToolError("검색어가 비어 있습니다.")
+    q = query.strip()
+    if len(q) > MAX_QUERY_CHARS:
+        return (
+            f"[차단] 검색어가 너무 깁니다({len(q)}자 > {MAX_QUERY_CHARS}자). "
+            "작업 폴더나 대화 내용을 외부 검색어에 실어 보내는 요청은 허용하지 않습니다."
+        )
+    outbound_block = outbound_text_block_reason(q)
+    if outbound_block:
+        return f"[차단] {outbound_block}"
     try:
         n = int(count)
     except (TypeError, ValueError):
         n = DEFAULT_COUNT
     n = max(1, min(MAX_COUNT, n))
-    return await asyncio.to_thread(_search_sync, query.strip(), n)
+    return await asyncio.to_thread(_search_sync, q, n)

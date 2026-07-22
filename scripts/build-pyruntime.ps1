@@ -1,57 +1,90 @@
-# 임베디드 Python 런타임 번들 생성 — 사용자 PC에 Python이 없어도 FastAPI 사이드카가 돈다.
-# Playwright는 시스템 Edge(channel=msedge)를 쓰므로 브라우저 바이너리는 다운로드하지 않는다.
-# 결과: <repo>/pyruntime/  (electron-builder가 resources/pyruntime 으로 복사)
+# Build a reproducible embedded Python runtime for the packaged application.
 $ErrorActionPreference = 'Stop'
-$PyVer = if ($env:AISO_PY_VER) { $env:AISO_PY_VER } else { '3.12.10' }
+
 $root = Split-Path -Parent $PSScriptRoot
 $out = Join-Path $root 'pyruntime'
-$req = Join-Path $root 'python\requirements.txt'
+$requirements = Join-Path $root 'python\requirements.txt'
+$constraints = Join-Path $root 'python\requirements.lock'
+$lockFile = Join-Path $PSScriptRoot 'pyruntime.lock.json'
 
-Write-Host "[pyruntime] Python $PyVer 임베디드 번들 → $out"
-if (Test-Path $out) { Remove-Item -Recurse -Force $out }
-New-Item -ItemType Directory -Force $out | Out-Null
-
-# 1) 임베디드 Python 다운로드·해제
-$zip = Join-Path $env:TEMP "py-embed-$PyVer.zip"
-$url = "https://www.python.org/ftp/python/$PyVer/python-$PyVer-embed-amd64.zip"
-Write-Host "[pyruntime] 다운로드: $url"
-Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-Expand-Archive -Path $zip -DestinationPath $out -Force
-
-# 2) ._pth 편집 — site-packages + 앱 코드 경로 활성화
-#    (import site: pip/site-packages 인식 / ..\python: main.py 임포트 — 패키징 시 resources/python)
-$pth = (Get-ChildItem $out -Filter 'python*._pth')[0].FullName
-$lines = Get-Content $pth
-$lines = $lines -replace '^\s*#\s*import\s+site', 'import site'
-$lines += 'Lib\site-packages'
-$lines += '..\python'
-Set-Content -Path $pth -Value $lines -Encoding ASCII
-
-# 3) pip 부트스트랩 (임베디드엔 ensurepip이 없어 get-pip 사용)
-$py = Join-Path $out 'python.exe'
-$getpip = Join-Path $env:TEMP 'get-pip.py'
-Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile $getpip -UseBasicParsing
-& $py $getpip --no-warn-script-location
-if ($LASTEXITCODE -ne 0) { throw "get-pip 실패 (exit $LASTEXITCODE)" }
-
-# 4) 런타임 의존성 설치
-& $py -m pip install --no-warn-script-location --no-cache-dir -r $req
-if ($LASTEXITCODE -ne 0) { throw "requirements 설치 실패 (exit $LASTEXITCODE)" }
-
-# 5) 용량 절감 — __pycache__ 제거 (playwright 드라이버/브라우저는 시스템 Edge라 미포함)
-Get-ChildItem $out -Recurse -Directory -Filter '__pycache__' -ErrorAction SilentlyContinue |
-    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-
-# 6) 런타임에 불필요한 패키지 제거 (용량 절감)
-#    - pip: 패키지 설치용(런타임 미사용)  - watchfiles: uvicorn --reload 전용
-#    (패키징본은 backend.ts가 --reload를 붙이지 않으므로 watchfiles를 임포트하지 않음)
-$sp = Join-Path $out 'Lib\site-packages'
-foreach ($pat in @('pip', 'pip-*.dist-info', 'watchfiles', 'watchfiles-*.dist-info')) {
-    Get-ChildItem -Path $sp -Filter $pat -ErrorAction SilentlyContinue |
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+if (!(Test-Path -LiteralPath $requirements) -or !(Test-Path -LiteralPath $constraints) -or !(Test-Path -LiteralPath $lockFile)) {
+    throw 'Python runtime build inputs are missing.'
 }
-Get-ChildItem -Path (Join-Path $out 'Scripts') -Filter 'pip*.exe' -ErrorAction SilentlyContinue |
-    Remove-Item -Force -ErrorAction SilentlyContinue
 
-$size = (Get-ChildItem $out -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
-Write-Host ("[pyruntime] 완료 — {0:N0} MB" -f $size)
+$runtimeLock = Get-Content -LiteralPath $lockFile -Raw | ConvertFrom-Json
+$pyVersion = [string]$runtimeLock.python.version
+$pythonUrl = [string]$runtimeLock.python.url
+$pythonSha256 = [string]$runtimeLock.python.sha256
+$getPipUrl = [string]$runtimeLock.getPip.url
+$getPipSha256 = [string]$runtimeLock.getPip.sha256
+$pipVersion = [string]$runtimeLock.getPip.pipVersion
+
+function Get-VerifiedDownload([string]$uri, [string]$destination, [string]$expectedSha256) {
+    Invoke-WebRequest -Uri $uri -OutFile $destination -UseBasicParsing
+    $actual = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expectedSha256.ToLowerInvariant()) {
+        Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        throw "Downloaded SHA-256 does not match lock: $uri"
+    }
+}
+
+# Preserve the working runtime until a fully verified staging build is ready.
+$stage = Join-Path $root ("pyruntime.staging-" + [guid]::NewGuid().ToString('N'))
+$backup = Join-Path $root ("pyruntime.backup-" + [guid]::NewGuid().ToString('N'))
+$promoted = $false
+
+try {
+    New-Item -ItemType Directory -Force $stage | Out-Null
+    $archive = Join-Path $stage "python-$pyVersion-embed-amd64.zip"
+    Write-Host "[pyruntime] Python $pyVersion download and verify"
+    Get-VerifiedDownload $pythonUrl $archive $pythonSha256
+    Expand-Archive -LiteralPath $archive -DestinationPath $stage -Force
+    Remove-Item -LiteralPath $archive -Force
+
+    $pth = (Get-ChildItem -LiteralPath $stage -Filter 'python*._pth')[0].FullName
+    $lines = Get-Content -LiteralPath $pth
+    $lines = $lines -replace '^\s*#\s*import\s+site', 'import site'
+    $lines += 'Lib\site-packages'
+    $lines += '..\python'
+    Set-Content -LiteralPath $pth -Value $lines -Encoding ASCII
+
+    $py = Join-Path $stage 'python.exe'
+    $getPip = Join-Path $stage 'get-pip.py'
+    Write-Host '[pyruntime] get-pip download and verify'
+    Get-VerifiedDownload $getPipUrl $getPip $getPipSha256
+    & $py $getPip "pip==$pipVersion" --no-warn-script-location
+    if ($LASTEXITCODE -ne 0) { throw "get-pip failed (exit $LASTEXITCODE)" }
+    Remove-Item -LiteralPath $getPip -Force
+
+    Write-Host '[pyruntime] install locked runtime dependencies'
+    & $py -m pip install --disable-pip-version-check --no-warn-script-location --no-cache-dir --only-binary=:all: -r $requirements -c $constraints
+    if ($LASTEXITCODE -ne 0) { throw "requirements install failed (exit $LASTEXITCODE)" }
+
+    Get-ChildItem -LiteralPath $stage -Recurse -Directory -Filter '__pycache__' -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    $sitePackages = Join-Path $stage 'Lib\site-packages'
+    foreach ($pattern in @('pip', 'pip-*.dist-info', 'watchfiles', 'watchfiles-*.dist-info')) {
+        Get-ChildItem -LiteralPath $sitePackages -Filter $pattern -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $scriptsDir = Join-Path $stage 'Scripts'
+    Get-ChildItem -LiteralPath $scriptsDir -Filter 'pip*.exe' -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+
+    & $py --version
+    if ($LASTEXITCODE -ne 0) { throw "Embedded Python check failed (exit $LASTEXITCODE)" }
+    if (Test-Path -LiteralPath $out) { Move-Item -LiteralPath $out -Destination $backup }
+    Move-Item -LiteralPath $stage -Destination $out
+    $promoted = $true
+
+    $size = (Get-ChildItem -LiteralPath $out -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
+    Write-Host ("[pyruntime] complete - {0:N0} MB" -f $size)
+} catch {
+    if (!(Test-Path -LiteralPath $out) -and (Test-Path -LiteralPath $backup)) {
+        Move-Item -LiteralPath $backup -Destination $out
+    }
+    throw
+} finally {
+    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($promoted -and (Test-Path -LiteralPath $backup)) { Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue }
+}
