@@ -4,11 +4,11 @@
 
 # Aiso
 
-**작은 로컬 모델에 맞춰 설계한 작업·조사·자동화 에이전트**
+**개인용 GPU의 소형 로컬 모델에 맞춰 설계한 작업·조사·자동화·검증 에이전트**
 
 파일과 문서를 내 PC에서 다루고, 필요한 작업은 실행 결과로 확인합니다.
 
-![version](https://img.shields.io/badge/version-0.3.1-F16522?style=flat-square)
+[![version](https://img.shields.io/badge/version-0.3.1-F16522?style=flat-square)](https://github.com/devbin-lab/AISO/releases/tag/v0.3.1)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-47848F?style=flat-square&logo=electron&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama-local%20LLM-black?style=flat-square&logo=ollama)
@@ -21,17 +21,19 @@
 
 ## 프로젝트 소개
 
-Aiso는 Ollama 기반의 소형 언어 모델을 활용하는 Windows 데스크톱 에이전트입니다. 대화만 제공하는 챗봇을 넘어, 사용자가 지정한 작업 폴더를 탐색하고 파일을 정리하며 문서를 분석하고 반복 작업을 자동화합니다.
+Aiso는 Ollama 기반의 소형 언어 모델을 활용하는 Windows 데스크톱 에이전트입니다. 대화만 제공하는 챗봇을 넘어, 사용자가 지정한 작업 폴더를 탐색하고 파일을 정리하며 문서를 분석하고 반복 작업을 자동화합니다. v0.3.1에서는 사용자가 설치한 ComfyUI와 이미지 모델을 연결해 검증된 워크플로로 이미지를 생성하는 기능도 제공합니다.
 
-이 프로젝트는 로컬에서 구동할 수 있는 9B~20B급 모델의 장점과 한계를 함께 고려해 설계했습니다. 작은 모델에 대규모 프로그램의 설계와 수정을 맡기지 않습니다. 대신 범위를 명확히 제한하고, 파일 시스템·검색·실행·웹 브라우저 같은 결정적 도구를 연결해 다음 작업에 집중합니다.
+이 프로젝트는 개인용 GPU에서 구동할 수 있는 약 8B~20B급 모델의 장점과 한계를 함께 고려해 설계했습니다. 프론티어 AI를 대체하거나 작은 모델에 대규모 프로그램의 설계와 수정을 맡기는 것이 목표가 아닙니다. 가벼운 작업을 로컬에서 처리해 클라우드 AI 사용량과 외부 정보 노출을 줄이고, 파일 시스템·검색·실행·웹 브라우저 같은 결정적 도구로 결과를 확인하는 보조 에이전트를 지향합니다.
 
 - 파일과 폴더의 탐색, 분류, 이동 및 정리
-- PDF·Excel·Word를 포함한 문서 내용 분석
+- PDF·XLSX·XLSM·DOCX·HWP·HWPX 문서 내용 분석
 - Markdown 문서 작성 및 편집
 - 기존 코드와 웹 결과물의 간단한 실행·검사·검증
 - 최신 정보 검색과 여러 출처의 교차 확인
 - 반복 작업을 위한 Python 스킬 생성 및 실행
 - Discord 서버 구성, 메시지 전송 및 예약 브리핑
+- 사용자가 설치한 ComfyUI와 모델을 이용한 선택적 이미지 생성
+- 수동·읽기·자동 권한 모드에 따른 도구 실행 통제
 
 핵심 목표는 모델의 능력을 과장하는 것이 아니라, **로컬 모델이 안정적으로 수행할 수 있는 범위를 제품 수준의 안전장치와 검증 절차로 제공하는 것**입니다.
 
@@ -39,13 +41,15 @@ Aiso는 Ollama 기반의 소형 언어 모델을 활용하는 Windows 데스크�
 
 ### 로컬 우선
 
-LLM 추론과 임베딩은 사용자가 선택한 Ollama 서버에서 수행합니다. 기본 설정은 `http://localhost:11434`이며, 대화 기록·설정·사용량·RAG 색인은 사용자 PC에 저장됩니다.
+LLM 추론과 임베딩은 사용자가 선택한 Ollama 서버에서 수행합니다. 기본값인 `http://localhost:11434`를 사용하면 프롬프트와 임베딩 처리가 이 PC에서 이루어집니다. 원격 Ollama 주소를 설정하면 대화 내용과 임베딩할 문서 조각이 해당 서버로 전송될 수 있습니다. 대화 기록·설정·사용량은 사용자 PC에, RAG 색인은 각 작업 폴더의 `.aiso/rag`에 저장됩니다.
 
-웹 검색, 모델 다운로드, 업데이트 확인, Discord 연동처럼 외부 연결이 필요한 기능은 해당 기능을 사용할 때만 네트워크를 사용합니다. 웹 검색은 설정에서 비활성화할 수 있고 Discord 연동은 기본적으로 꺼져 있습니다.
+채팅 웹 조사, 모델 다운로드, 업데이트 확인, Discord 연동처럼 외부 연결이 필요한 기능은 해당 기능을 사용할 때만 네트워크를 사용합니다. 채팅 웹 조사는 설정에서 비활성화할 수 있고 Discord 연동은 기본적으로 꺼져 있습니다. Discord 예약 브리핑은 실행 시점에 별도로 공개 웹을 조사할 수 있습니다.
+
+완전한 오프라인 사용이 필요하면 로컬 Ollama를 사용하고 채팅 웹 조사·Discord 연동·업데이트 확인을 사용하지 않아야 합니다.
 
 ### 명확한 역할 제한
 
-Aiso는 범용 코딩 에이전트가 아닙니다. 사용자의 프로그램이나 애플리케이션 코드를 새로 작성하거나 직접 수정하지 않으며, 일반 파일 쓰기·편집은 Markdown 문서로 제한합니다.
+Aiso는 범용 코딩 에이전트가 아닙니다. Agent 정책은 사용자의 프로그램이나 애플리케이션 코드를 새로 작성하거나 직접 수정하는 작업을 제공하지 않으며, 일반 파일 쓰기·편집은 Markdown 문서로 제한합니다.
 
 코드 실행 도구는 다음과 같은 검증 목적으로 사용합니다.
 
@@ -54,15 +58,15 @@ Aiso는 범용 코딩 에이전트가 아닙니다. 사용자의 프로그램이
 - 기존 웹 페이지의 렌더링과 상호작용 확인
 - 자동화 스킬이 실제로 동작하는지 검증
 
-반복 자동화가 필요한 경우에만 앱 전용 스킬 폴더에 독립적인 Python 스킬을 생성합니다. 스킬 실행은 임의 코드 실행에 해당하므로 권한 모드에 따라 사용자 승인을 요구합니다.
+반복 자동화가 필요한 경우에만 앱 전용 스킬 폴더에 독립적인 Python 스킬을 생성합니다. 스킬 생성과 실행은 임의 코드의 저장·실행에 해당하므로 모든 권한 모드에서 사용자 승인을 요구합니다.
 
 ### 도구 기반 검증
 
-에이전트는 결과를 추측으로 확정하지 않습니다. 파일을 다시 읽고, 명령을 실행하고, 브라우저 화면과 픽셀 변화를 확인하는 방식으로 가능한 범위 안에서 결과를 검증합니다. 검증에 실패하면 오류를 모델에 다시 전달해 작업을 수정하거나 한계를 명확하게 보고합니다.
+에이전트는 결과를 추측으로 확정하지 않습니다. 파일을 다시 읽고, 명령을 실행하고, 브라우저 화면과 픽셀 변화를 확인하는 방식으로 가능한 범위 안에서 결과를 검증합니다. 도구 호출이 실패하면 오류를 모델에 다시 전달해 인자를 수정하고 제한된 횟수 안에서 재시도할 수 있습니다. 이 과정은 성공을 보장하는 자가 복구 기능이 아니며, 회복하지 못한 오류는 한계와 함께 보고합니다.
 
 ### 사용자 통제
 
-파일 변경, 명령 실행, 외부 서비스 변경은 권한 정책을 거칩니다. 특히 Discord 메시지 전송·예약·서버 변경은 자동 모드에서도 최종 승인을 요구합니다.
+파일 변경, 명령 실행, 외부 서비스 변경은 권한 정책을 거칩니다. 특히 Discord 메시지 발신·예약 등록·서버 변경은 자동 모드에서도 최종 승인을 요구합니다.
 
 ## 주요 기능
 
@@ -71,8 +75,8 @@ Aiso는 범용 코딩 에이전트가 아닙니다. 사용자의 프로그램이
 - 계획 수립, 도구 실행, 결과 확인으로 이어지는 다단계 작업 루프
 - 폴더 구조 조회, 파일명 검색, 본문 검색, 파일 읽기
 - 파일 및 폴더 생성·이동·이름 변경·삭제
-- PDF, `.xlsx`, `.docx` 등 문서 형식의 텍스트 추출
-- 작업 폴더 밖으로의 경로 이탈 차단
+- PDF, `.xlsx`, `.xlsm`, `.docx`, `.hwp`, `.hwpx` 문서의 텍스트 추출
+- 파일 도구의 작업 폴더 밖 경로 이탈 차단
 - 진행 계획, 도구 호출 결과, 토큰 사용량, 소요 시간 표시
 
 ### 검사 및 검증
@@ -84,6 +88,8 @@ Aiso는 범용 코딩 에이전트가 아닙니다. 사용자의 프로그램이
 - 파일 변경 후 RAG 색인 자동 갱신
 
 검증 도구는 기존 결과물을 확인하기 위한 기능입니다. 새로운 프로그램을 제작하거나 프로젝트 전반을 자율 수정하는 기능은 제공하지 않습니다.
+
+파일 도구와 달리, 사용자가 승인한 코드·명령·브라우저·스킬 실행은 운영체제의 사용자 권한으로 동작하며 완전한 샌드박스가 아닙니다. 신뢰할 수 없는 작업 폴더의 실행 요청은 승인하지 않아야 합니다.
 
 ### 웹 조사
 
@@ -109,7 +115,8 @@ Aiso는 범용 코딩 에이전트가 아닙니다. 사용자의 프로그램이
 - 재사용 가능한 Python 스킬 생성
 - 스킬 이름·설명·실행 코드를 앱 전용 폴더에 저장
 - JSON 입력과 표준출력 기반의 단순한 실행 규약
-- 생성 직후 실제 실행을 통한 동작 확인
+- 저장 시 Python 문법 검사, 생성 후 별도 실행을 통한 실제 동작 확인
+- 실행 오류를 Agent에 반환해 스킬 수정·재실행 가능
 - 설정 화면에서 스킬 목록 확인 및 삭제
 
 스킬은 알림, 브리핑, 정보 수집처럼 반복해서 실행할 작은 자동화 작업에 적합합니다.
@@ -125,21 +132,25 @@ Aiso는 범용 코딩 에이전트가 아닙니다. 사용자의 프로그램이
 - 보호된 전용 명령 채널
 - 트레이 상주 및 Windows 로그인 시 자동 실행
 
-Discord 봇 토큰은 Electron `safeStorage`를 사용해 별도로 보관합니다. 서버 변경, 발신, 예약 등록은 적용 전에 승인을 받습니다.
+Discord 봇 토큰은 Windows에서 Electron `safeStorage`를 사용할 수 있으면 암호화해 별도 보관합니다. 암호화를 사용할 수 없는 환경에서는 Windows 사용자 파일 권한에 의존하는 폴백을 사용합니다. 서버 변경, 발신, 예약 등록은 적용 전에 승인을 받습니다.
 
 ### ComfyUI 로컬 이미지 생성
 
 - Aiso 내부에서 사용자가 설치한 로컬 ComfyUI 화면을 열어 직접 작업
 - Windows Portable ComfyUI의 시작·연결 상태와 GPU 정보를 설정에서 확인
-- SafeTensors 헤더와 텐서 구조를 읽어 확인 가능한 모델 파일만 ComfyUI의 적절한 모델 폴더에 연결
-- 판별할 수 없는 파일도 사용자가 지정한 ComfyUI 폴더에 직접 연결해 ComfyUI 화면에서 사용할 수 있음
-- 자동 선택과 직접 선택 중 이미지 생성 모델 선택 방식을 고를 수 있음
+- SafeTensors 헤더와 텐서 구조를 분석한 뒤 원본은 유지하고, 확인 가능한 모델 파일을 ComfyUI의 적절한 모델 폴더로 복사·SHA-256 검증
+- 판별할 수 없는 유효 파일은 사용자가 지정한 ComfyUI 하위 폴더에 직접 연결 가능. 이 상태에서는 Agent 자동 선택에서 제외되며, 검증된 API 워크플로를 추가로 연결하면 Agent 실행에 사용 가능
+- 자동 선택과 수동 선택 중 이미지 생성 모델 선택 방식을 고를 수 있음
 - 명확한 이미지 요청에서만 Agent가 등록·검증된 모델과 워크플로를 선택해 생성
-- 내장 텍스트→이미지 계약: SD 1.5, SDXL, FLUX.1 split, FLUX.2 [klein] 4B
+- 내장 텍스트→이미지 기술 계약: SD 1.5, SDXL, FLUX.1 split, FLUX.2 [klein] 4B
 - 사용자가 내보낸 `Save (API Format)` 워크플로는 등록 자산의 이름·경로·SHA-256 연결이 모두 확인될 때만 Agent 실행에 사용
 - 결과 카드에 선택 모델, seed, 생성값, 실제 프롬프트와 ComfyUI 노드 그래프 표시
 
-모델 파일은 Aiso에 번들하거나 추천하지 않으며 사용자의 ComfyUI 설치본에 보관합니다. 대화 기록에는 이미지 바이트가 아니라 ComfyUI 출력 파일 참조가 저장되므로, 이전 생성 결과를 다시 볼 때도 ComfyUI가 실행 중이고 해당 출력 파일이 남아 있어야 합니다.
+SD·FLUX 계열 이름은 권장 모델 목록이 아니라 Aiso가 내장 노드로 구성할 수 있는 기술적 호환 계약입니다. 모델 파일은 Aiso에 번들하거나 추천하지 않으며 사용자의 ComfyUI 설치본에 보관합니다. Aiso에서 등록을 해제해도 ComfyUI에 복사된 파일은 삭제하지 않습니다.
+
+Aiso는 이미지 모델과 워크플로를 배포·판매·추천하거나 해당 라이선스를 제공하지 않습니다. 등록 가능 여부는 기술적 호환성을 의미할 뿐 공식 지원이나 상업적 이용 가능성을 보증하지 않습니다. 사용자는 모델 출처, 이용 약관, 상업적 이용 범위와 생성물의 권리를 직접 확인해야 합니다.
+
+대화 기록에는 이미지 바이트가 아니라 ComfyUI 출력 파일 참조가 저장됩니다. 이전 생성 결과를 다시 볼 때도 ComfyUI가 실행 중이고 해당 출력 파일이 남아 있어야 합니다.
 
 ### 데스크톱 기능
 
@@ -149,10 +160,10 @@ Discord 봇 토큰은 Electron `safeStorage`를 사용해 별도로 보관합니
 - 모델 설치 상태 확인과 Ollama 모델 다운로드
 - 모델의 GPU 메모리 즉시 해제
 - 일·주·월 토큰 사용량 통계
-- GitHub Releases 기반 자동 업데이트
+- GitHub Releases 기반 앱 내 업데이트 확인과 사용자 승인 다운로드·설치
 - 백엔드 비정상 종료 시 제한된 횟수의 자동 재시작
 - LLM·ComfyUI·Discord·화면·도구·스킬·업데이트를 분리한 설정 탭
-- 실제 백엔드 도구 레지스트리에서 계산한 내장 Agent 도구 목록과 승인 조건 표시
+- 실제 백엔드 도구 레지스트리에서 계산한 내장 Agent 도구 목록과 승인 조건 표시. 사용자 생성 스킬은 별도의 스킬 탭에서 관리
 
 ## 사용 범위
 
@@ -204,7 +215,7 @@ Discord 봇 토큰은 Electron `safeStorage`를 사용해 별도로 보관합니
 
 ### 보호 장치
 
-- 에이전트의 파일 접근을 사용자가 지정한 작업 폴더로 제한
+- 파일 도구의 접근을 사용자가 지정한 작업 폴더로 제한
 - 사용자 홈 디렉터리 자체를 작업 폴더로 지정하는 동작 차단
 - 작업 폴더의 심볼릭 링크·Windows 정션을 따라 외부 경로로 탐색하지 않음
 - 삭제 작업은 운영체제 휴지통 이동에 실패하면 영구 삭제로 대체하지 않고 실패 처리
@@ -218,19 +229,14 @@ Discord 봇 토큰은 Electron `safeStorage`를 사용해 별도로 보관합니
 - 명령·코드 실행의 출력 크기 상한, 시간 제한, 프로세스 트리 종료와 에이전트 반복 퇴행 감지
 - 스킬 실행 환경에서 Aiso 인증 토큰 제거
 
-자동 모드는 사용자의 확인 단계를 줄이는 대신 파일 변경과 명령 실행 위험을 수반합니다. 신뢰할 수 있는 작업 폴더에서만 사용해야 합니다.
+자동 모드는 사용자의 확인 단계를 줄이는 대신 작업 폴더 안의 일부 파일 변경 위험을 수반합니다. 명령·코드·브라우저·스킬 실행은 자동 모드에서도 승인이 필요하지만, 승인 후에는 운영체제 사용자 권한으로 실행됩니다.
 
 ## 다운로드
 
-최신 Windows 설치본은 [GitHub Releases](https://github.com/devbin-lab/AISO/releases/latest)에서 받을 수 있습니다.
+현재 배포 버전은 [v0.3.1](https://github.com/devbin-lab/AISO/releases/tag/v0.3.1)(2026-07-22)입니다.
 
-현재 소스 버전: `0.3.1`
-
-v0.3.1 설치본이 게시될 때의 파일 이름:
-
-```text
-Aiso-0.3.1-Setup.exe
-```
+- Windows 설치 파일: [Aiso-0.3.1-Setup.exe](https://github.com/devbin-lab/AISO/releases/download/v0.3.1/Aiso-0.3.1-Setup.exe)
+- 전체 릴리스: [GitHub Releases](https://github.com/devbin-lab/AISO/releases)
 
 ### 시스템 요구사항
 
@@ -238,20 +244,24 @@ Aiso-0.3.1-Setup.exe
 |---|---|---|
 | 운영체제 | Windows 10 64-bit | Windows 11 64-bit |
 | 메모리 | 16 GB | 32 GB |
-| GPU | NVIDIA GPU, VRAM 8 GB | NVIDIA GPU, VRAM 16 GB 이상 |
+| GPU | Ollama가 지원하는 GPU | NVIDIA GPU, VRAM 16 GB 이상 |
 | 필수 프로그램 | [Ollama](https://ollama.com/download) | 최신 안정 버전 |
 
-선택한 모델과 컨텍스트 길이에 따라 실제 메모리 요구량은 달라집니다. GPU 메모리가 부족하면 더 작은 모델을 사용하거나 컨텍스트 길이를 낮춰야 합니다.
+프로젝트의 주 대상은 VRAM 16 GB 이상의 개인용 PC입니다. 8 GB 환경에서도 더 작은 모델과 짧은 컨텍스트로 실행할 수 있지만 CPU·시스템 메모리 오프로드가 발생하면 응답 속도가 크게 낮아질 수 있습니다. ComfyUI 이미지 생성에 필요한 VRAM은 사용자가 연결한 모델과 해상도에 따라 별도로 달라집니다.
 
 > 현재 설치 파일에는 코드 서명이 적용되어 있지 않습니다. Windows SmartScreen 경고가 표시될 경우 게시자와 파일 출처를 확인한 후 실행하십시오.
 
 ## 시작하기
 
-### 1. Ollama 설치
+### 1. Aiso 설치
+
+[GitHub Releases](https://github.com/devbin-lab/AISO/releases/latest)에서 최신 Windows 설치 파일을 내려받아 실행합니다.
+
+### 2. Ollama 설치
 
 [Ollama 공식 사이트](https://ollama.com/download)에서 Windows 버전을 설치하고 실행합니다.
 
-### 2. 모델 준비
+### 3. 모델 준비
 
 Aiso의 홈 화면에서 설치된 모델을 확인하고 필요한 모델을 내려받을 수 있습니다. 기본 설정은 다음과 같습니다.
 
@@ -277,17 +287,17 @@ ollama pull gemma4:12b
 ollama pull bge-m3
 ```
 
-### 3. 작업 폴더와 권한 설정
+### 4. 작업 폴더와 권한 설정
 
-에이전트 화면에서 작업 폴더를 선택하고 권한 모드를 지정합니다. 파일 관련 도구는 선택한 폴더 안에서만 활성화됩니다. 작업 폴더를 선택하지 않아도 일반 채팅, 웹 조사, 스킬, Discord 기능은 사용할 수 있습니다.
+에이전트 화면에서 작업 폴더를 선택하고 권한 모드를 지정합니다. 처음에는 `읽기` 모드를 권장합니다. 파일 관련 도구는 선택한 폴더 안에서만 활성화됩니다. 작업 폴더를 선택하지 않아도 일반 채팅, 웹 조사, 스킬, Discord 기능은 사용할 수 있습니다.
 
-### 4. 선택 기능 설정
+### 5. 선택 기능 설정
 
-- 완전한 오프라인 사용이 필요하면 채팅 웹 검색을 끕니다.
+- 완전한 오프라인 사용이 필요하면 채팅 웹 조사를 끕니다.
 - 문서 의미 검색이 필요하면 `bge-m3`를 설치하고 RAG를 활성화합니다.
 - Discord 기능이 필요하면 봇 토큰을 저장하고 연동을 활성화합니다.
 - 예약과 봇을 창을 닫은 뒤에도 유지하려면 트레이 상주를 켭니다.
-- 이미지 생성을 사용하려면 별도로 설치한 ComfyUI의 주소와 Windows Portable 경로를 설정하고, 사용할 모델을 ComfyUI 모델 폴더에 등록합니다. Agent가 고를지, 이미지 요청마다 직접 고를지도 설정에서 정할 수 있습니다.
+- 이미지 생성을 사용하려면 별도로 설치한 ComfyUI의 주소와 Windows Portable 경로를 설정하고, 사용할 모델을 ComfyUI 모델 폴더에 등록합니다. Agent 자동 선택과 이미지 요청별 수동 선택 중 원하는 방식을 설정할 수 있습니다.
 
 ## 아키텍처
 
@@ -295,7 +305,7 @@ ollama pull bge-m3
 flowchart LR
     subgraph Desktop["Aiso Desktop"]
         Renderer["React Renderer<br/>Home · Chat · Agent · Settings"]
-        Main["Electron Main<br/>Window · IPC · SQLite · Update"]
+        Main["Electron Main<br/>Window · IPC · SQLite · Update · ComfyUI"]
         Sidecar["FastAPI Sidecar<br/>Agent · RAG · Tools · Discord"]
     end
 
@@ -306,7 +316,8 @@ flowchart LR
     Sidecar --> Workspace["Selected Workspace"]
     Sidecar --> Web["Public Web"]
     Sidecar --> Discord["Discord API"]
-    Sidecar --> ComfyUI["User-installed ComfyUI"]
+    Main -->|"launch · embedded UI · model files"| ComfyUI["User-installed ComfyUI"]
+    Sidecar -->|"API workflow · output"| ComfyUI
 ```
 
 ### 구성 요소
@@ -338,7 +349,7 @@ Electron 메인 프로세스는 실행 시 사용 가능한 로컬 포트를 확
 |---|---|
 | 데스크톱 | Electron 43, electron-vite, electron-updater |
 | 프론트엔드 | React 19, TypeScript 6, Vite |
-| 백엔드 | Python 3.12, FastAPI, Uvicorn, httpx |
+| 백엔드 | Python 3.12.10, FastAPI, Uvicorn, httpx |
 | 로컬 AI | Ollama, `gemma4`, `gpt-oss`, `bge-m3` |
 | 문서 처리 | pypdf, openpyxl, python-docx, olefile |
 | 웹 검증 | Playwright |
@@ -351,8 +362,8 @@ Electron 메인 프로세스는 실행 시 사용 가능한 로컬 포트를 확
 
 ### 요구 환경
 
-- Node.js 20 이상
-- Python 3.12
+- Node.js 20.19 이상 또는 22.12 이상
+- Python 3.12(배포용 고정 런타임: 3.12.10)
 - Ollama
 - Windows PowerShell
 
@@ -362,7 +373,7 @@ Electron 메인 프로세스는 실행 시 사용 가능한 로컬 포트를 확
 git clone https://github.com/devbin-lab/AISO.git
 cd AISO
 
-npm install
+npm ci
 
 python -m venv python/.venv
 python/.venv/Scripts/python.exe -m pip install -r python/requirements.txt
@@ -375,22 +386,24 @@ python/.venv/Scripts/python.exe -m pip install -r python/requirements-dev.txt
 npm run dev          # Electron과 Vite 개발 서버 실행
 npm run typecheck    # Main, preload, renderer 타입 검사
 npm test             # ComfyUI 계약 및 렌더러 회귀 테스트
-npm run build        # Electron 애플리케이션 빌드
-npm run dist:win     # Python 런타임을 포함한 Windows 설치본 생성
+npm run build        # Electron 번들을 out/에 컴파일
+npm run build:win    # 기존 pyruntime으로 Windows 설치본 패키징
+npm run dist:win     # Python 런타임을 다시 구성한 뒤 Windows 설치본 패키징
 
 python/.venv/Scripts/python.exe -m pytest python/tests -q
 ```
 
-배포 빌드는 `python` 소스, 임베디드 Python 런타임, 검증용 도구 체인을 Electron 리소스에 포함합니다. 일부 네트워크·디버깅 실행 파일은 바이러스 백신 오탐을 줄이기 위해 배포 대상에서 제외합니다.
+`npm run dist:win`은 고정된 Python 3.12.10 런타임과 의존성을 내려받아 다시 구성하므로 네트워크 연결이 필요합니다. 배포 빌드는 `python` 소스, 임베디드 Python 런타임, 검증용 도구 체인을 Electron 리소스에 포함합니다. 일부 네트워크·디버깅 실행 파일은 바이러스 백신 오탐을 줄이기 위해 배포 대상에서 제외합니다.
 
 ## 현재 제약사항
 
 - Windows 10/11만 공식 대상으로 합니다.
 - Ollama는 별도로 설치해야 하며 모델 파일은 설치 프로그램에 포함하지 않습니다.
 - 결과 품질과 도구 호출 안정성은 선택한 모델에 영향을 받습니다.
-- 코드 실행은 제한된 검증 기능이며 완전한 보안 샌드박스가 아닙니다.
+- 코드·명령·브라우저·스킬 실행은 제한된 검증 기능이며, 승인 후 운영체제 사용자 권한으로 동작하는 비샌드박스 기능입니다.
 - 자동 모드에서는 작업 폴더 내부 파일을 사용자 확인 없이 변경할 수 있습니다.
 - Discord 예약은 Aiso 백엔드가 실행 중일 때만 처리됩니다.
+- Discord 서버 구성은 카테고리와 채널을 대상으로 하며 역할(role) 관리는 지원하지 않습니다.
 - ComfyUI 이미지 생성은 선택 기능이며, ComfyUI와 모델 파일은 사용자가 별도로 설치해야 합니다.
 - 내장 Agent 자동 생성은 SD 1.5·SDXL·FLUX.1 split·FLUX.2 [klein] 4B의 텍스트→이미지 계약만 제공합니다. 다른 모델은 사용자가 검증한 API 워크플로를 연결해야 하며, Aiso가 모델별 사용법을 추측해 자동 구성하지 않습니다.
 - img2img, inpaint, ControlNet, 업스케일은 내장 자동 워크플로 범위가 아닙니다. 연결한 사용자 워크플로의 입력·출력 계약을 사용자가 확인해야 합니다.
@@ -404,21 +417,24 @@ python/.venv/Scripts/python.exe -m pytest python/tests -q
 - 애플리케이션 설정
 - 채팅 및 에이전트 대화 기록
 - 토큰 사용량 통계
-- 작업 폴더별 RAG 색인
+- 각 작업 폴더의 `.aiso/rag`에 저장되는 RAG 색인
 - 사용자가 만든 자동화 스킬
 - ComfyUI 모델 프로필, 자산 해시, 연결한 사용자 워크플로
 - Discord 설정과 예약 정보
+
+위 데이터는 로컬에 저장되지만 Discord 토큰을 제외하면 Aiso 전용 암호화 저장소를 사용하지 않습니다. 대화와 작업 데이터의 보호는 Windows 사용자 계정 권한과 디스크 보안 설정에 의존합니다. Discord 토큰도 `safeStorage`를 사용할 수 없는 환경에서는 Windows 사용자 파일 권한에 의존합니다.
 
 ### 외부 연결이 발생하는 경우
 
 | 기능 | 연결 대상 | 비고 |
 |---|---|---|
-| LLM 추론·임베딩 | 설정된 Ollama 호스트 | 기본값은 localhost |
+| LLM 추론·임베딩 | 설정된 Ollama 호스트 | 기본값은 localhost. 원격 호스트 사용 시 프롬프트와 임베딩 대상 문서 조각 전송 |
 | 모델 설치 | Ollama 모델 저장소 | 사용자가 설치를 실행할 때 |
-| 웹 조사 | DuckDuckGo 및 선택한 공개 웹 페이지 | 웹 검색이 활성화된 경우 |
+| 채팅 웹 조사 | DuckDuckGo 및 선택한 공개 웹 페이지 | 채팅 웹 조사가 활성화된 경우 |
 | Discord | Discord API | 연동을 활성화한 경우 |
+| Discord 예약 브리핑 | Discord API 및 공개 웹 페이지 | 웹 조사형 예약이 실행될 때 |
 | 이미지 생성 | 사용자가 설정한 로컬 ComfyUI | `127.0.0.1` 또는 `localhost` 주소만 허용 |
-| 업데이트 | GitHub Releases | 설치본의 업데이트 확인 시 |
+| 업데이트 | GitHub Releases | 사용자가 업데이트 확인·다운로드를 실행할 때 |
 
 Aiso는 공개 웹 페이지를 읽을 때 내부 네트워크 주소와 로컬 서비스를 차단합니다. 다만 외부 서비스 기능을 활성화하면 요청 내용이나 생성된 메시지가 해당 서비스로 전송될 수 있으므로 사용 전에 기능별 동작을 확인해야 합니다.
 
