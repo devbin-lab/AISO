@@ -17,7 +17,12 @@ function tempFile(t: test.TestContext): string {
   return join(dir, 'nvidia-credential.json')
 }
 
-function fakeCrypto(options?: { available?: boolean; backend?: string; failEncrypt?: boolean }) {
+function fakeCrypto(options?: {
+  available?: boolean
+  backend?: string
+  failEncrypt?: boolean
+  failDecrypt?: boolean
+}) {
   let generation = 0
   let rotate = false
   const adapter: AsyncSafeCrypto = {
@@ -30,6 +35,7 @@ function fakeCrypto(options?: { available?: boolean; backend?: string; failEncry
       return Buffer.concat([Buffer.from([mask]), Buffer.from(plaintext).map((byte) => byte ^ mask)])
     },
     decrypt: async (ciphertext) => {
+      if (options?.failDecrypt) throw new Error('wrong key context')
       const mask = ciphertext[0]
       const result = Buffer.from(ciphertext.subarray(1).map((byte) => byte ^ mask)).toString('utf8')
       return { result, shouldReEncrypt: rotate }
@@ -62,6 +68,7 @@ test('save/restart/status never persist or return the plaintext canary', async (
   const status = await restarted.status({ deploymentMode: 'build' })
   assert.equal(status.hasStoredCredential, true)
   assert.equal(status.matchesCurrentBinding, true)
+  assert.equal(status.usableForCurrentBinding, true)
   assert.equal(JSON.stringify(status).includes(canary), false)
   assert.equal(await restarted.readForTransfer({ deploymentMode: 'build' }), canary)
 })
@@ -73,6 +80,7 @@ test('Build credential is never reused for user NIM', async (t) => {
   await store.save({ deploymentMode: 'build' }, 'key')
   const status = await store.status({ deploymentMode: 'nim', endpoint: 'https://nim.example.com/v1' })
   assert.equal(status.matchesCurrentBinding, false)
+  assert.equal(status.usableForCurrentBinding, false)
   await assert.rejects(
     store.readForTransfer({ deploymentMode: 'nim', endpoint: 'https://nim.example.com/v1' }),
     /일치하지 않습니다/
@@ -86,6 +94,7 @@ test('user NIM credential is not reused after an endpoint change', async (t) => 
   await store.save({ deploymentMode: 'nim', endpoint: 'https://nim-a.example/v1' }, 'nim-key')
   const status = await store.status({ deploymentMode: 'nim', endpoint: 'https://nim-b.example/v1' })
   assert.equal(status.matchesCurrentBinding, false)
+  assert.equal(status.usableForCurrentBinding, false)
   await assert.rejects(
     store.readForTransfer({ deploymentMode: 'nim', endpoint: 'https://nim-b.example/v1' }),
     /일치하지 않습니다/
@@ -165,4 +174,27 @@ test('delete removes the encrypted credential', async (t) => {
   await store.save({ deploymentMode: 'build', endpoint: NVIDIA_BUILD_BASE_URL }, 'key')
   store.delete()
   assert.equal(existsSync(file), false)
+})
+
+test('a changed OS crypto context is reported as stored but unusable without exposing or deleting the key', async (t) => {
+  const file = tempFile(t)
+  const canary = 'CANARY-UNREADABLE-NVIDIA-KEY-7812'
+  const writer = fakeCrypto()
+  await new NvidiaCredentialStore(file, writer.adapter).save({ deploymentMode: 'build' }, canary)
+  const persisted = readFileSync(file, 'utf8')
+
+  const wrongContext = fakeCrypto({ failDecrypt: true })
+  const restarted = new NvidiaCredentialStore(file, wrongContext.adapter)
+  const status = await restarted.status({ deploymentMode: 'build' })
+
+  assert.equal(status.hasStoredCredential, true)
+  assert.equal(status.matchesCurrentBinding, true)
+  assert.equal(status.usableForCurrentBinding, false)
+  assert.match(status.detail ?? '', /다시 입력해 교체/)
+  assert.equal(JSON.stringify(status).includes(canary), false)
+  assert.equal(readFileSync(file, 'utf8'), persisted)
+  await assert.rejects(
+    restarted.readForTransfer({ deploymentMode: 'build' }),
+    (error: Error) => /다시 입력해 교체/.test(error.message) && !error.message.includes(canary)
+  )
 })

@@ -23,6 +23,16 @@ export interface ComfySelectionRequest {
   nvidiaGrantId?: string
 }
 
+const AGENT_APPROVAL_TIMEOUT_MS = 10_000
+
+function isApprovalTimeout(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')
+}
+
+function approvalTimeoutError(): Error {
+  return new Error('승인 응답 시간이 초과되었습니다. 백엔드 상태를 확인한 뒤 다시 시도해 주세요.')
+}
+
 /** 실제 Python 레지스트리에서 계산한 내장 Agent 도구 목록을 읽는다. */
 export async function fetchAgentToolCatalog(port: number): Promise<AgentToolCatalog> {
   const res = await fetch(`http://127.0.0.1:${port}/agent/tools`, {
@@ -121,9 +131,33 @@ export async function approveAgent(
   callId: string,
   approved: boolean
 ): Promise<void> {
-  await fetch(`http://127.0.0.1:${port}/agent/approve`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ session_id: sessionId, call_id: callId, approved })
-  })
+  let response: Response
+  try {
+    response = await fetch(`http://127.0.0.1:${port}/agent/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ session_id: sessionId, call_id: callId, approved }),
+      signal: AbortSignal.timeout(AGENT_APPROVAL_TIMEOUT_MS)
+    })
+  } catch (error) {
+    if (isApprovalTimeout(error)) throw approvalTimeoutError()
+    throw error
+  }
+  let result: unknown
+  try {
+    result = await response.json()
+  } catch (error) {
+    if (isApprovalTimeout(error)) throw approvalTimeoutError()
+    throw new Error(
+      response.ok
+        ? '승인 응답 형식이 올바르지 않습니다.'
+        : `승인 요청을 처리하지 못했습니다 (HTTP ${response.status})`
+    )
+  }
+  if (!response.ok) {
+    throw new Error(`승인 요청을 처리하지 못했습니다 (HTTP ${response.status})`)
+  }
+  if (!result || typeof result !== 'object' || (result as Record<string, unknown>).ok !== true) {
+    throw new Error('승인 요청이 만료되었거나 현재 작업과 일치하지 않습니다. 다시 시도해 주세요.')
+  }
 }

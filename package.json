@@ -1,6 +1,6 @@
 {
   "name": "aiso",
-  "version": "0.4.0-rc.1",
+  "version": "0.4.0-rc.2",
   "description": "로컬 작업·조사·자동화·검증 에이전트",
   "main": "./out/main/index.js",
   "author": "devbin-lab",
@@ -14,7 +14,7 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "test:comfy-model-analysis": "node --experimental-strip-types --test src/main/comfy-model-analysis.test.ts src/main/comfy-workflow-template.test.ts",
-    "test:gate2": "node --experimental-strip-types --test src/shared/nvidia.test.ts src/main/settings-storage.test.ts src/main/nvidia-credential-store.test.ts",
+    "test:gate2": "node --experimental-strip-types --test src/shared/nvidia.test.ts src/main/settings-storage.test.ts src/main/chromium-storage-paths.test.ts src/main/nvidia-credential-path.test.ts src/main/nvidia-credential-store.test.ts",
     "test:gate3": "node --experimental-strip-types --test src/main/nvidia-execution.test.ts",
     "test:gate4": "node --experimental-strip-types --test src/main/nvidia-capability-cache.test.ts",
     "test:gate5": "node --experimental-strip-types --test src/main/nvidia-agent-authorization.test.ts",

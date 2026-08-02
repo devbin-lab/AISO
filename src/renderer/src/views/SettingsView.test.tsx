@@ -20,7 +20,8 @@ function installApiStub(): void {
           status: vi.fn().mockResolvedValue({
             encryptionAvailable: true,
             hasStoredCredential: false,
-            matchesCurrentBinding: false
+            matchesCurrentBinding: false,
+            usableForCurrentBinding: false
           }),
           save: vi.fn().mockResolvedValue(undefined),
           replace: vi.fn().mockResolvedValue(undefined),
@@ -135,12 +136,37 @@ describe('SettingsView', () => {
     expect(window.api.nvidia.capabilities.probe).not.toHaveBeenCalled()
   })
 
+  it('marks an undecryptable stored NVIDIA key as unusable and asks for replacement', async () => {
+    window.api.nvidia.credential.status = vi.fn().mockResolvedValue({
+      encryptionAvailable: true,
+      hasStoredCredential: true,
+      matchesCurrentBinding: true,
+      usableForCurrentBinding: false,
+      detail: '저장된 NVIDIA API 키를 현재 보안 저장소로 해독할 수 없습니다. 설정 > LLM에서 키를 다시 입력해 교체하세요.'
+    })
+    render(
+      <SettingsView
+        settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'nvidia', nvidiaModel: 'model/a' }}
+        backend={READY_BACKEND}
+        health={null}
+        onSave={vi.fn().mockResolvedValue(true)}
+        active
+      />
+    )
+
+    expect(await screen.findByText(/저장된 키를 해독할 수 없습니다/)).toBeTruthy()
+    expect(screen.getByText(/같은 키를 다시 입력해 교체하세요/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: '모델 목록 새로고침' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '기능 검사' })).toHaveProperty('disabled', true)
+  })
+
   it('refreshes the NVIDIA model list only on explicit action and keeps manual IDs available', async () => {
     const user = userEvent.setup()
     window.api.nvidia.credential.status = vi.fn().mockResolvedValue({
       encryptionAvailable: true,
       hasStoredCredential: true,
-      matchesCurrentBinding: true
+      matchesCurrentBinding: true,
+      usableForCurrentBinding: true
     })
     const nvidiaSettings = {
       ...DEFAULT_SETTINGS,
@@ -166,7 +192,8 @@ describe('SettingsView', () => {
     window.api.nvidia.credential.status = vi.fn().mockResolvedValue({
       encryptionAvailable: true,
       hasStoredCredential: true,
-      matchesCurrentBinding: true
+      matchesCurrentBinding: true,
+      usableForCurrentBinding: true
     })
     const nvidiaSettings = {
       ...DEFAULT_SETTINGS,

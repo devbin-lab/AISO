@@ -23,6 +23,8 @@ export interface NvidiaCredentialStatus {
   encryptionAvailable: boolean
   hasStoredCredential: boolean
   matchesCurrentBinding: boolean
+  /** Main process verified that the stored secret decrypts and matches this exact binding. */
+  usableForCurrentBinding: boolean
   detail?: string
 }
 

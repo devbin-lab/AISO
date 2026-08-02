@@ -100,7 +100,10 @@ describe('streamAgent ComfyUI model-selection payload', () => {
   })
 
   it('sends only the approval ID to the approval endpoint', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true })
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({ ok: true })
+    })
     vi.stubGlobal('fetch', fetchMock)
 
     await approveAgent(8123, 'session-approval-01', 'approval-distinct-01', true)
@@ -113,6 +116,55 @@ describe('streamAgent ComfyUI model-selection payload', () => {
     })
     expect(JSON.stringify(body)).not.toContain('execution-distinct-01')
     expect(JSON.stringify(body)).not.toContain('provider-call-distinct-01')
+    expect(fetchMock.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('rejects an expired approval even when the backend returns HTTP 200', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({ ok: false })
+    }))
+
+    await expect(
+      approveAgent(8123, 'session-expired', 'approval-expired', true)
+    ).rejects.toThrow(/만료되었거나/)
+  })
+
+  it('rejects a non-success approval response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: vi.fn().mockResolvedValue({ ok: false })
+    }))
+
+    await expect(
+      approveAgent(8123, 'session-conflict', 'approval-conflict', true)
+    ).rejects.toThrow(/HTTP 409/)
+  })
+
+  it('turns an unresponsive approval request into a retryable timeout', async () => {
+    const timeout = new Error('timeout canary')
+    timeout.name = 'TimeoutError'
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(timeout))
+
+    await expect(
+      approveAgent(8123, 'session-timeout', 'approval-timeout', true)
+    ).rejects.toThrow(/응답 시간이 초과/)
+  })
+
+  it('keeps the timeout guidance when the approval body stalls after headers', async () => {
+    const timeout = new Error('body timeout canary')
+    timeout.name = 'AbortError'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockRejectedValue(timeout)
+    }))
+
+    await expect(
+      approveAgent(8123, 'session-body-timeout', 'approval-body-timeout', true)
+    ).rejects.toThrow(/응답 시간이 초과/)
   })
 
   it('requires a Main grant and strips workspace, RAG, and Comfy metadata from NVIDIA Agent', async () => {

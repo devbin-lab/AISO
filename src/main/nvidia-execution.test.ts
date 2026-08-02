@@ -22,6 +22,7 @@ function harness(options: {
   settings?: AppSettings[]
   hasStoredCredential?: boolean
   matchesCurrentBinding?: boolean
+  usableForCurrentBinding?: boolean
   sidecarHasCredential?: boolean
   sidecarEndpoint?: string
   sidecarInitiallyReady?: boolean
@@ -48,7 +49,8 @@ function harness(options: {
       return {
         encryptionAvailable: true,
         hasStoredCredential: options.hasStoredCredential ?? true,
-        matchesCurrentBinding: options.matchesCurrentBinding ?? true
+        matchesCurrentBinding: options.matchesCurrentBinding ?? true,
+        usableForCurrentBinding: options.usableForCurrentBinding ?? true
       }
     },
     readCredential: async (...args) => {
@@ -157,6 +159,15 @@ test('Build without an exact stored credential is denied without sidecar I/O', a
   await assert.rejects(
     prepareNvidiaExecution({ deploymentMode: 'build' }, deps),
     /API 키가 없습니다/
+  )
+  assert.deepEqual(calls.map((call) => call.name), ['credentialStatus'])
+})
+
+test('Build with an undecryptable stored credential is denied with recovery guidance', async () => {
+  const { deps, calls } = harness({ usableForCurrentBinding: false })
+  await assert.rejects(
+    prepareNvidiaExecution({ deploymentMode: 'build' }, deps),
+    /다시 입력해 교체/
   )
   assert.deepEqual(calls.map((call) => call.name), ['credentialStatus'])
 })

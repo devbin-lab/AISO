@@ -1,7 +1,7 @@
 import { app, safeStorage } from 'electron'
-import { join } from 'path'
 import type { NvidiaCredentialBindingInput, NvidiaCredentialStatus } from '../shared/nvidia'
 import { NvidiaCredentialStore, type AsyncSafeCrypto } from './nvidia-credential-store'
+import { nvidiaCredentialPath } from './nvidia-credential-path'
 
 const electronSafeCrypto: AsyncSafeCrypto = {
   isAvailable: () => safeStorage.isAsyncEncryptionAvailable(),
@@ -13,7 +13,10 @@ const electronSafeCrypto: AsyncSafeCrypto = {
 }
 
 function store(): NvidiaCredentialStore {
-  return new NvidiaCredentialStore(join(app.getPath('userData'), 'nvidia-credential.json'), electronSafeCrypto)
+  return new NvidiaCredentialStore(
+    nvidiaCredentialPath(app.getPath('userData'), app.isPackaged),
+    electronSafeCrypto
+  )
 }
 
 export async function saveNvidiaCredential(binding: NvidiaCredentialBindingInput, apiKey: unknown): Promise<void> {

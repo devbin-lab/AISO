@@ -2268,6 +2268,7 @@
 /* 눈에 띄는 승인 바 (입력창 바로 위) */
 .approve-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   margin-top: 10px;
@@ -2293,6 +2294,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.approve-bar__error {
+  order: 2;
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--danger);
 }
 
 /* ---------- settings ---------- */

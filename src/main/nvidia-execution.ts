@@ -74,9 +74,15 @@ async function prepareNvidiaExecutionLocked(
   }
 
   const status = await deps.credentialStatus(current)
-  const hasExactStoredCredential = status.hasStoredCredential && status.matchesCurrentBinding
+  const hasExactStoredCredential = status.hasStoredCredential &&
+    status.matchesCurrentBinding &&
+    status.usableForCurrentBinding
   if (!hasExactStoredCredential && current.deploymentMode === 'build') {
-    throw new Error('현재 NVIDIA Build 대상에 맞는 API 키가 없습니다.')
+    throw new Error(
+      status.hasStoredCredential && status.matchesCurrentBinding
+        ? '저장된 NVIDIA API 키를 사용할 수 없습니다. 설정 > LLM에서 키를 다시 입력해 교체하세요.'
+        : '현재 NVIDIA Build 대상에 맞는 API 키가 없습니다.'
+    )
   }
   let credentialState: NvidiaExecutionPrepareResult['credential'] =
     current.deploymentMode === 'nim' ? 'not_required' : 'stored'

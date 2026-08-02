@@ -142,6 +142,9 @@ function AgentView({
   const [nvidiaManifest, setNvidiaManifest] = useState<NvidiaAgentDataManifest | null>(null)
   const [nvidiaManifestApproved, setNvidiaManifestApproved] = useState(false)
   const [nvidiaManifestBusy, setNvidiaManifestBusy] = useState(false)
+  const [approvalSubmitting, setApprovalSubmitting] = useState<string | null>(null)
+  const [approvalError, setApprovalError] = useState<string | null>(null)
+  const approvalSubmittingRef = useRef<string | null>(null)
   const nvidiaManifestRequestRef = useRef(0)
   const runStartRef = useRef(0)
   const runTokensRef = useRef(0) // 완료 시 사용량 기록용(마지막 usage.total)
@@ -525,12 +528,15 @@ function AgentView({
           })
         }
       } else if (ev.type === 'approval_request') {
+        setApprovalError(null)
         return next.map((i) =>
           i.kind === 'tool' && i.callId === ev.executionId
             ? { ...i, approvalId: ev.approvalId, status: 'awaiting' as const }
             : i
         )
       } else if (ev.type === 'tool_result') {
+        setApprovalSubmitting((current) => current === ev.executionId ? null : current)
+        setApprovalError(null)
         return next.map((i) =>
           i.kind === 'tool' && i.callId === ev.executionId
             ? {
@@ -554,16 +560,25 @@ function AgentView({
   }
 
   const decide = async (callId: string, approvalId: string, approved: boolean): Promise<void> => {
-    if (backend.port == null) return
-    setItems((prev) =>
-      prev.map((i) =>
-        i.kind === 'tool' && i.callId === callId ? { ...i, status: approved ? 'running' : 'rejected' } : i
-      )
-    )
+    if (backend.port == null || approvalSubmittingRef.current === callId) return
+    approvalSubmittingRef.current = callId
+    setApprovalSubmitting(callId)
+    setApprovalError(null)
     try {
       await approveAgent(backend.port, sessionRef.current, approvalId, approved)
+      setItems((prev) =>
+        prev.map((i) =>
+          i.kind === 'tool' && i.callId === callId && i.status === 'awaiting'
+            ? { ...i, status: approved ? 'running' : 'rejected' }
+            : i
+        )
+      )
     } catch (err) {
       console.error('승인 전송 실패:', err)
+      setApprovalError((err as Error).message)
+    } finally {
+      if (approvalSubmittingRef.current === callId) approvalSubmittingRef.current = null
+      setApprovalSubmitting((current) => current === callId ? null : current)
     }
   }
 
@@ -821,8 +836,11 @@ function AgentView({
 
   const wsName = hasWorkspace ? settings.workspace.replace(/\\/g, '/').split('/').filter(Boolean).pop() : null
 
-  const modelOptions: DropdownOption[] =
-    health?.models && health.models.length
+  const modelOptions: DropdownOption[] = nvidiaSelected
+    ? settings.nvidiaModel
+      ? [{ value: settings.nvidiaModel, label: settings.nvidiaModel }]
+      : []
+    : health?.models && health.models.length
       ? health.models.map((m) => ({ value: m, label: m }))
       : settings.model
         ? [{ value: settings.model, label: settings.model }]
@@ -1009,10 +1027,19 @@ function AgentView({
             <b>{TOOL_LABEL[awaiting.name] ?? awaiting.name}</b>
             {argPath(awaiting.args) && <span className="mono"> · {argPath(awaiting.args)}</span>}
           </span>
-          <button className="btn btn--sm" onClick={() => void decide(awaiting.callId, awaiting.approvalId, true)}>
-            승인
+          {approvalError && <span className="approve-bar__error" role="alert">{approvalError}</span>}
+          <button
+            className="btn btn--sm"
+            disabled={approvalSubmitting === awaiting.callId}
+            onClick={() => void decide(awaiting.callId, awaiting.approvalId, true)}
+          >
+            {approvalSubmitting === awaiting.callId ? '처리 중…' : '승인'}
           </button>
-          <button className="btn btn--sm btn--ghost2" onClick={() => void decide(awaiting.callId, awaiting.approvalId, false)}>
+          <button
+            className="btn btn--sm btn--ghost2"
+            disabled={approvalSubmitting === awaiting.callId}
+            onClick={() => void decide(awaiting.callId, awaiting.approvalId, false)}
+          >
             거부
           </button>
         </div>
@@ -1216,9 +1243,9 @@ function AgentView({
 
         <div className="composer-tools__right">
           <Dropdown
-            value={settings.model}
+            value={nvidiaSelected ? settings.nvidiaModel : settings.model}
             options={modelOptions}
-            onChange={(v) => void onSaveSettings({ model: v })}
+            onChange={(v) => void onSaveSettings(nvidiaSelected ? { nvidiaModel: v } : { model: v })}
             mono
             align="right"
             title="모델"

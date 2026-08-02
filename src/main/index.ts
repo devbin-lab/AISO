@@ -108,6 +108,7 @@ import {
   assertNvidiaDiscordConsentCurrent,
   type ExactNvidiaDiscordTarget
 } from './nvidia-discord-apply'
+import { chromiumStoragePaths } from './chromium-storage-paths'
 
 // 로컬 LLM 앱: Chromium GPU 합성이 VRAM ~2.7GB를 점유해 16GB 카드에서
 // 무거운 모델(최대 gpt-oss:20b·13.8GB) 콜드 로드가 OOM(CUDA crash) 날 수 있다.
@@ -115,19 +116,20 @@ import {
 // (기본 모델 gemma4:12b는 여유가 있으나, 사용자가 gpt-oss로 바꿔도 안전하도록 상시 비활성.)
 app.disableHardwareAcceleration()
 
-// Chromium은 userData와 별개로 HTTP/GPU 캐시를 초기화한다. 기존 기본 cache 경로는
-// 다른 Electron 인스턴스·보안 프로그램과 경합할 때 Windows 접근 거부(0x5)로 cache 이동에
-// 실패했고, 개발 중에는 단일 인스턴스 잠금도 의도적으로 쓰지 않는다. 앱 데이터(설정·대화)는
-// 그대로 두고 Chromium 세션 캐시만 Aiso 전용 경로로 분리한다.
-// 개발 인스턴스는 PID별로 나눠 동시 실행 시에도 cache lock을 공유하지 않는다.
-const chromiumSessionRoot = join(
-  app.getPath(is.dev ? 'temp' : 'userData'),
-  is.dev ? `aiso-chromium-${process.pid}` : 'chromium-session'
-)
+// async safeStorage의 암호 키 메타데이터는 sessionData/Local State에 있으므로 sessionData는
+// 재실행 후에도 반드시 같은 경로를 써야 한다. HTTP/GPU 캐시만 개발 PID별로 분리해 동시 실행
+// 인스턴스의 Windows cache lock 충돌(0x5)을 피한다.
+const chromiumStorage = chromiumStoragePaths({
+  userData: app.getPath('userData'),
+  temp: app.getPath('temp'),
+  isDev: is.dev,
+  pid: process.pid
+})
 try {
-  mkdirSync(chromiumSessionRoot, { recursive: true })
-  app.setPath('sessionData', chromiumSessionRoot)
-  app.commandLine.appendSwitch('disk-cache-dir', join(chromiumSessionRoot, 'Cache'))
+  mkdirSync(chromiumStorage.sessionData, { recursive: true })
+  mkdirSync(chromiumStorage.diskCache, { recursive: true })
+  app.setPath('sessionData', chromiumStorage.sessionData)
+  app.commandLine.appendSwitch('disk-cache-dir', chromiumStorage.diskCache)
   // 하드웨어 가속은 이미 꺼져 있지만, Chromium이 별도의 GPU disk cache를 만들지 않게 한다.
   app.commandLine.appendSwitch('disable-gpu-shader-disk-cache')
 } catch {

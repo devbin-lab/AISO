@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import { DEFAULT_SETTINGS } from '../../../shared/settings'
@@ -130,6 +130,204 @@ describe('AgentView NVIDIA capability gate', () => {
     )
     await waitFor(() => expect(status).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(input.hasAttribute('disabled')).toBe(false))
+  })
+
+  it('shows the selected NVIDIA model instead of the Ollama model in the Agent model control', async () => {
+    const status = vi.fn().mockResolvedValue(capability('nvidia/model-selected'))
+    installApiStub(status)
+    const onSaveSettings = vi.fn().mockResolvedValue(true)
+    render(
+      <AgentView
+        {...commonProps}
+        onSaveSettings={onSaveSettings}
+        settings={{
+          ...DEFAULT_SETTINGS,
+          model: 'gpt-oss:20b',
+          activeLlmProvider: 'nvidia',
+          nvidiaModel: 'nvidia/model-selected'
+        }}
+      />
+    )
+
+    await waitFor(() => expect(status).toHaveBeenCalledTimes(1))
+    const modelControl = screen.getByRole('button', { name: '모델' })
+    expect(modelControl.textContent).toContain('nvidia/model-selected')
+    expect(modelControl.textContent).not.toContain('gpt-oss:20b')
+    fireEvent.click(modelControl)
+    const nvidiaOption = screen.getByRole('option', { name: 'nvidia/model-selected' })
+    expect(screen.queryByRole('option', { name: 'gpt-oss:20b' })).toBeNull()
+    fireEvent.click(nvidiaOption)
+    expect(onSaveSettings).toHaveBeenCalledWith({ nvidiaModel: 'nvidia/model-selected' })
+  })
+
+  it('keeps a tool approval visible and retryable when the backend rejects it', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const status = vi.fn().mockResolvedValue(capability('model/a'))
+    installApiStub(status)
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    let resolveApproval!: (value: { ok: boolean }) => void
+    const approvalResult = new Promise<{ ok: boolean }>((resolve) => { resolveApproval = resolve })
+    const encoder = new TextEncoder()
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/agent/approve')) {
+        return {
+          ok: true,
+          status: 200,
+          json: vi.fn(() => approvalResult)
+        }
+      }
+      if (url.endsWith('/agent')) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamController = controller
+            controller.enqueue(encoder.encode([
+              JSON.stringify({
+                type: 'tool_call',
+                executionId: 'execution-approval-ui',
+                approvalId: 'approval-ui',
+                providerToolCallId: 'provider-tool-ui',
+                assistantTurnId: 'assistant-turn-ui',
+                name: 'run_command',
+                args: { command: 'safe-test' }
+              }),
+              JSON.stringify({
+                type: 'approval_request',
+                executionId: 'execution-approval-ui',
+                approvalId: 'approval-ui',
+                providerToolCallId: 'provider-tool-ui',
+                assistantTurnId: 'assistant-turn-ui',
+                name: 'run_command',
+                args: { command: 'safe-test' }
+              })
+            ].join('\n') + '\n'))
+          }
+        })
+        return { ok: true, status: 200, body }
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({ indexed: false, count: 0, files: 0 })
+      }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(
+      <AgentView
+        {...commonProps}
+        settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'nvidia', nvidiaModel: 'model/a' }}
+      />
+    )
+    const manifestApprove = await screen.findByRole('button', { name: '이 범위 승인' })
+    fireEvent.click(manifestApprove)
+    await screen.findByRole('button', { name: '승인됨' })
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: '승인 UI 테스트' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+
+    const approve = await screen.findByRole('button', { name: '승인' })
+    fireEvent.click(approve)
+    fireEvent.click(approve)
+    await waitFor(() => {
+      expect(screen.getByText('승인 필요')).toBeTruthy()
+      expect(screen.getByRole('button', { name: '처리 중…' })).toHaveProperty('disabled', true)
+      expect(screen.getByRole('button', { name: '거부' })).toHaveProperty('disabled', true)
+    })
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/agent/approve'))).toHaveLength(1)
+
+    resolveApproval({ ok: false })
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/만료되었거나/))
+    expect(screen.getByText('승인 필요')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '승인' })).toHaveProperty('disabled', false)
+    expect(screen.getByRole('button', { name: '거부' })).toHaveProperty('disabled', false)
+    ;(streamController as ReadableStreamDefaultController<Uint8Array> | null)?.close()
+    consoleError.mockRestore()
+  })
+
+  it('does not let a late approval acknowledgement overwrite an earlier tool result', async () => {
+    const status = vi.fn().mockResolvedValue(capability('model/a'))
+    installApiStub(status)
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    let resolveApproval!: (value: { ok: boolean }) => void
+    const approvalResult = new Promise<{ ok: boolean }>((resolve) => { resolveApproval = resolve })
+    const encoder = new TextEncoder()
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/agent/approve')) {
+        return { ok: true, status: 200, json: vi.fn(() => approvalResult) }
+      }
+      if (url.endsWith('/agent')) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamController = controller
+            const identity = {
+              id: 'execution-fast-result',
+              executionId: 'execution-fast-result',
+              approvalId: 'approval-fast-result',
+              providerToolCallId: 'provider-fast-result',
+              assistantTurnId: 'assistant-fast-result'
+            }
+            controller.enqueue(encoder.encode([
+              JSON.stringify({
+                type: 'tool_call',
+                ...identity,
+                name: 'run_command',
+                args: { command: 'safe-test' }
+              }),
+              JSON.stringify({
+                type: 'approval_request',
+                ...identity,
+                name: 'run_command',
+                args: { command: 'safe-test' }
+              })
+            ].join('\n') + '\n'))
+          }
+        })
+        return { ok: true, status: 200, body }
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({ indexed: false, count: 0, files: 0 })
+      }
+    }))
+
+    render(
+      <AgentView
+        {...commonProps}
+        settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'nvidia', nvidiaModel: 'model/a' }}
+      />
+    )
+    fireEvent.click(await screen.findByRole('button', { name: '이 범위 승인' }))
+    await screen.findByRole('button', { name: '승인됨' })
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '승인 경쟁 테스트' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+    fireEvent.click(await screen.findByRole('button', { name: '승인' }))
+
+    await act(async () => {
+      ;(streamController as ReadableStreamDefaultController<Uint8Array>).enqueue(encoder.encode(
+        JSON.stringify({
+          type: 'tool_result',
+          id: 'execution-fast-result',
+          executionId: 'execution-fast-result',
+          approvalId: 'approval-fast-result',
+          providerToolCallId: 'provider-fast-result',
+          assistantTurnId: 'assistant-fast-result',
+          ok: true,
+          output: 'completed first'
+        }) + '\n'
+      ))
+    })
+    await waitFor(() => expect(document.querySelector('.tool__badge')?.textContent).toBe('완료'))
+
+    await act(async () => {
+      resolveApproval({ ok: true })
+      await Promise.resolve()
+    })
+    expect(document.querySelector('.tool__badge')?.textContent).toBe('완료')
+    expect(screen.queryByText('승인 필요')).toBeNull()
+    ;(streamController as ReadableStreamDefaultController<Uint8Array> | null)?.close()
   })
 
   it('reconfigures preview when only the provider changes from NVIDIA back to Ollama', async () => {

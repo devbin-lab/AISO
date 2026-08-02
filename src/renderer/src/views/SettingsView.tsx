@@ -167,7 +167,7 @@ function SettingsView({
     form.nvidiaModel !== settings.nvidiaModel
   const nvidiaCredentialReady =
     form.nvidiaDeploymentMode === 'nim' ||
-    (credentialStatus?.hasStoredCredential === true && credentialStatus.matchesCurrentBinding)
+    credentialStatus?.usableForCurrentBinding === true
   const nvidiaDiscoveryReady =
     backend.state === 'ready' && backend.port != null && !nvidiaConfigDirty && nvidiaCredentialReady
 
@@ -209,7 +209,7 @@ function SettingsView({
       setSettingsRecoveryMessage(status.kind === 'none' ? '' : status.message ?? '')
     }).catch(() => {})
     if (form.activeLlmProvider === 'nvidia') void refreshCredentialStatus()
-    // Status contains metadata only; this never decrypts or transfers the API key.
+    // Main verifies decryptability locally but never returns or transfers the API key.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, form.activeLlmProvider, form.nvidiaDeploymentMode, form.nvidiaNimEndpoint])
 
@@ -849,7 +849,9 @@ function SettingsView({
                     <div className="row__hint">
                       {credentialStatus?.hasStoredCredential
                         ? credentialStatus.matchesCurrentBinding
-                          ? '현재 배포 대상에 맞는 키가 암호화되어 있습니다.'
+                          ? credentialStatus.usableForCurrentBinding
+                            ? '현재 배포 대상에 맞는 키가 안전하게 저장되어 있습니다.'
+                            : '저장된 키를 해독할 수 없습니다. 같은 키를 다시 입력해 교체하세요.'
                           : '저장된 키가 다른 배포 대상에 묶여 있습니다. 새 키로 교체하세요.'
                         : '키는 일반 설정에 저장되지 않으며 Renderer로 다시 반환되지 않습니다.'}
                     </div>

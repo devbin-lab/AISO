@@ -120,23 +120,37 @@ export class NvidiaCredentialStore {
         encryptionAvailable: state.ok,
         hasStoredCredential: false,
         matchesCurrentBinding: false,
+        usableForCurrentBinding: false,
         detail: state.detail
       }
     }
     try {
       const envelope = parseEnvelope(this.ops.read(this.file))
       const current = bindingInput ? canonicalizeNvidiaBinding(bindingInput) : undefined
+      const matchesCurrentBinding = current ? sameNvidiaBinding(envelope.binding, current) : false
+      let usableForCurrentBinding = false
+      let detail = state.detail
+      if (state.ok && current && matchesCurrentBinding) {
+        try {
+          await this.decryptAndValidate(envelope, current, false)
+          usableForCurrentBinding = true
+        } catch {
+          detail = '저장된 NVIDIA API 키를 현재 보안 저장소로 해독할 수 없습니다. 설정 > LLM에서 키를 다시 입력해 교체하세요.'
+        }
+      }
       return {
         encryptionAvailable: state.ok,
         hasStoredCredential: true,
-        matchesCurrentBinding: current ? sameNvidiaBinding(envelope.binding, current) : false,
-        detail: state.detail
+        matchesCurrentBinding,
+        usableForCurrentBinding,
+        detail
       }
     } catch {
       return {
         encryptionAvailable: state.ok,
-        hasStoredCredential: false,
+        hasStoredCredential: true,
         matchesCurrentBinding: false,
+        usableForCurrentBinding: false,
         detail: '저장된 NVIDIA 자격 증명 파일을 읽을 수 없습니다.'
       }
     }
@@ -170,11 +184,19 @@ export class NvidiaCredentialStore {
       throw new Error('저장된 NVIDIA API 키가 현재 배포 대상과 일치하지 않습니다.')
     }
 
+    return (await this.decryptAndValidate(envelope, binding, true)).apiKey
+  }
+
+  private async decryptAndValidate(
+    envelope: CredentialEnvelope,
+    binding: NvidiaCredentialBinding,
+    rotate: boolean
+  ): Promise<EncryptedCredentialPayload> {
     let decrypted: { result: string; shouldReEncrypt: boolean }
     try {
       decrypted = await this.crypto.decrypt(Buffer.from(envelope.ciphertext, 'base64'))
     } catch {
-      throw new Error('운영체제 보안 저장소가 일시적으로 API 키를 해독하지 못했습니다.')
+      throw new Error('저장된 NVIDIA API 키를 현재 보안 저장소로 해독할 수 없습니다. 설정 > LLM에서 키를 다시 입력해 교체하세요.')
     }
     let payload: EncryptedCredentialPayload
     try {
@@ -182,7 +204,12 @@ export class NvidiaCredentialStore {
     } catch {
       throw new Error('해독한 NVIDIA 자격 증명 형식이 올바르지 않습니다.')
     }
-    const payloadBinding = canonicalizeNvidiaBinding(payload.binding)
+    let payloadBinding: NvidiaCredentialBinding
+    try {
+      payloadBinding = canonicalizeNvidiaBinding(payload.binding)
+    } catch {
+      throw new Error('NVIDIA 자격 증명 바인딩 검증에 실패했습니다.')
+    }
     if (
       payload.schemaVersion !== 1 || typeof payload.apiKey !== 'string' || !payload.apiKey ||
       !sameNvidiaBinding(payloadBinding, envelope.binding) ||
@@ -191,7 +218,7 @@ export class NvidiaCredentialStore {
       throw new Error('NVIDIA 자격 증명 바인딩 검증에 실패했습니다.')
     }
 
-    if (decrypted.shouldReEncrypt) {
+    if (rotate && decrypted.shouldReEncrypt) {
       let rotated: Buffer
       try {
         rotated = await this.crypto.encrypt(decrypted.result)
@@ -200,7 +227,7 @@ export class NvidiaCredentialStore {
       }
       this.atomicWrite({ schemaVersion: 1, binding, ciphertext: rotated.toString('base64') })
     }
-    return payload.apiKey
+    return payload
   }
 
   delete(): void {
