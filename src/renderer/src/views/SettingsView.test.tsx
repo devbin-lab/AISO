@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BackendInfo } from '../../../shared/backend'
 import { DEFAULT_SETTINGS } from '../../../shared/settings'
 import SettingsView from './SettingsView'
+import { ConfirmHost } from '../components/ConfirmDialog'
 
 const READY_BACKEND: BackendInfo = { state: 'ready', port: 8123 }
 
@@ -24,6 +25,26 @@ function installApiStub(): void {
           save: vi.fn().mockResolvedValue(undefined),
           replace: vi.fn().mockResolvedValue(undefined),
           delete: vi.fn().mockResolvedValue(undefined)
+        },
+        models: {
+          refresh: vi.fn().mockResolvedValue({
+            models: ['model/a', 'model/b'],
+            refreshedAt: '2026-08-02T05:00:00.000Z'
+          })
+        },
+        capabilities: {
+          status: vi.fn().mockResolvedValue(null),
+          probe: vi.fn().mockResolvedValue({
+            schemaVersion: 1,
+            binding: {
+              deploymentMode: 'build',
+              endpoint: 'https://integrate.api.nvidia.com/v1'
+            },
+            model: 'model/a',
+            capabilities: { chat: 'supported', stream: 'supported', tools: 'supported' },
+            checkedAt: '2026-08-02T05:01:00.000Z'
+          }),
+          clear: vi.fn().mockResolvedValue(undefined)
         }
       },
       backend: {
@@ -79,7 +100,7 @@ describe('SettingsView', () => {
 
     await user.click(screen.getByRole('button', { name: 'NVIDIA' }))
     expect(screen.getByDisplayValue('https://integrate.api.nvidia.com/v1')).toHaveProperty('readOnly', true)
-    expect(screen.getByText('v4 Gate 2 제한')).not.toBeNull()
+    expect(screen.getByText('Gate 4 사용 범위')).not.toBeNull()
 
     const keyInput = screen.getByPlaceholderText('API 키 입력')
     await user.type(keyInput, 'renderer-canary-key')
@@ -98,6 +119,77 @@ describe('SettingsView', () => {
     expect(persistedPatch.activeLlmProvider).toBe('nvidia')
     expect('nvidiaApiKey' in persistedPatch).toBe(false)
     expect(JSON.stringify(persistedPatch)).not.toContain('renderer-canary-key')
+  })
+
+  it('performs no model refresh or capability probe on startup or provider selection', async () => {
+    const user = userEvent.setup()
+    render(<SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={vi.fn().mockResolvedValue(true)} active />)
+
+    expect(window.api.nvidia.models.refresh).not.toHaveBeenCalled()
+    expect(window.api.nvidia.capabilities.probe).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'NVIDIA' }))
+    await Promise.resolve()
+    expect(window.api.nvidia.models.refresh).not.toHaveBeenCalled()
+    expect(window.api.nvidia.capabilities.probe).not.toHaveBeenCalled()
+  })
+
+  it('refreshes the NVIDIA model list only on explicit action and keeps manual IDs available', async () => {
+    const user = userEvent.setup()
+    window.api.nvidia.credential.status = vi.fn().mockResolvedValue({
+      encryptionAvailable: true,
+      hasStoredCredential: true,
+      matchesCurrentBinding: true
+    })
+    const nvidiaSettings = {
+      ...DEFAULT_SETTINGS,
+      activeLlmProvider: 'nvidia' as const,
+      nvidiaModel: 'model/a',
+      chatWebSearch: false
+    }
+    render(<SettingsView settings={nvidiaSettings} backend={READY_BACKEND} health={null} onSave={vi.fn().mockResolvedValue(true)} active />)
+
+    expect(window.api.nvidia.models.refresh).not.toHaveBeenCalled()
+    await waitFor(() => expect(
+      (screen.getByRole('button', { name: '모델 목록 새로고침' }) as HTMLButtonElement).disabled
+    ).toBe(false))
+    await user.click(screen.getByRole('button', { name: '모델 목록 새로고침' }))
+    await waitFor(() => expect(window.api.nvidia.models.refresh).toHaveBeenCalledTimes(1))
+    expect(screen.getByText('2개 모델을 확인했습니다.')).not.toBeNull()
+    expect(screen.getByRole('button', { name: '직접 입력' })).not.toBeNull()
+    expect(document.body.textContent).not.toMatch(/Nemotron|무료.*영구|free forever/i)
+  })
+
+  it('warns before the low-cost probe, reports neutral states, and executes no Aiso tool', async () => {
+    const user = userEvent.setup()
+    window.api.nvidia.credential.status = vi.fn().mockResolvedValue({
+      encryptionAvailable: true,
+      hasStoredCredential: true,
+      matchesCurrentBinding: true
+    })
+    const nvidiaSettings = {
+      ...DEFAULT_SETTINGS,
+      activeLlmProvider: 'nvidia' as const,
+      nvidiaModel: 'model/a',
+      chatWebSearch: false
+    }
+    render(<>
+      <SettingsView settings={nvidiaSettings} backend={READY_BACKEND} health={null} onSave={vi.fn().mockResolvedValue(true)} active />
+      <ConfirmHost />
+    </>)
+
+    await waitFor(() => expect(
+      (screen.getByRole('button', { name: '기능 검사' }) as HTMLButtonElement).disabled
+    ).toBe(false))
+    await user.click(screen.getByRole('button', { name: '기능 검사' }))
+    expect(window.api.nvidia.capabilities.probe).not.toHaveBeenCalled()
+    expect(screen.getByText(/토큰·할당량 또는 비용이 발생할 수 있습니다/)).not.toBeNull()
+    expect(screen.getByText(/실제 도구는 실행하지 않습니다/)).not.toBeNull()
+    await user.click(screen.getByRole('button', { name: '검사 실행' }))
+    await waitFor(() => expect(window.api.nvidia.capabilities.probe).toHaveBeenCalledTimes(1))
+    expect(screen.getByText(/채팅: 지원 확인/)).not.toBeNull()
+    expect(screen.getByText(/도구 호출: 지원 확인/)).not.toBeNull()
+    expect((screen.getByRole('button', { name: '검사 결과 초기화' }) as HTMLButtonElement).disabled)
+      .toBe(false)
   })
 
   it('loads the registry-backed tool catalog in its own settings tab', async () => {

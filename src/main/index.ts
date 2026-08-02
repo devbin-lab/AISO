@@ -14,7 +14,9 @@ import {
   clearBackendNvidiaCredential,
   setBackendNvidiaCredential,
   bindBackendNvidiaCredential,
-  backendNvidiaCredentialStatus
+  backendNvidiaCredentialStatus,
+  fetchBackendNvidiaModels,
+  probeBackendNvidiaCapabilities
 } from './backend'
 import { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
 import { recordUsage, usageSummary, clearUsage } from './usage'
@@ -36,6 +38,7 @@ import {
   saveNvidiaCredential
 } from './nvidia-credentials'
 import { prepareNvidiaExecution } from './nvidia-execution'
+import { NvidiaCapabilityCache, NvidiaCapabilityRevision } from './nvidia-capability-cache'
 import {
   destroyComfySurface,
   reloadComfySurface,
@@ -67,6 +70,8 @@ import type { AppSettings } from '../shared/settings'
 import {
   canonicalizeNvidiaBinding,
   sameNvidiaBinding,
+  type NvidiaCapabilityTargetInput,
+  type NvidiaCredentialBinding,
   type NvidiaCredentialBindingInput
 } from '../shared/nvidia'
 import type { ComfySurfaceRequest } from '../shared/comfy'
@@ -103,8 +108,77 @@ try {
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let isQuitting = false
+const nvidiaCapabilityRevision = new NvidiaCapabilityRevision()
 // 로그인 자동 실행으로 켜졌으면 창을 띄우지 않고 트레이로만 시작한다.
 const startedHidden = process.argv.includes('--hidden') || app.getLoginItemSettings().wasOpenedAtLogin
+
+function capabilityCache(): NvidiaCapabilityCache {
+  return new NvidiaCapabilityCache(join(app.getPath('userData'), 'nvidia-capabilities.json'))
+}
+
+function invalidateAllNvidiaCapabilities(): void {
+  nvidiaCapabilityRevision.invalidate()
+  capabilityCache().clearAll()
+}
+
+function currentNvidiaBinding(settings: AppSettings): NvidiaCredentialBinding | null {
+  if (settings.activeLlmProvider !== 'nvidia') return null
+  return canonicalizeNvidiaBinding({
+    deploymentMode: settings.nvidiaDeploymentMode,
+    endpoint: settings.nvidiaDeploymentMode === 'nim' ? settings.nvidiaNimEndpoint : undefined
+  })
+}
+
+function requireCurrentNvidiaTarget(
+  requestedInput: NvidiaCredentialBindingInput,
+  requestedModel?: unknown
+): { binding: NvidiaCredentialBinding; model?: string } {
+  const requested = canonicalizeNvidiaBinding(requestedInput)
+  const settings = loadSettings()
+  const current = currentNvidiaBinding(settings)
+  if (!current || !sameNvidiaBinding(requested, current)) {
+    throw new Error('요청한 NVIDIA 대상이 현재 저장된 설정과 일치하지 않습니다.')
+  }
+  if (requestedModel === undefined) return { binding: current }
+  if (typeof requestedModel !== 'string' || !requestedModel.trim() || requestedModel.trim().length > 512) {
+    throw new Error('NVIDIA 모델명 형식이 올바르지 않습니다.')
+  }
+  const model = requestedModel.trim()
+  if (model !== settings.nvidiaModel.trim()) {
+    throw new Error('검사할 모델이 현재 저장된 NVIDIA 모델과 일치하지 않습니다.')
+  }
+  return { binding: current, model }
+}
+
+function nvidiaPreparationDeps() {
+  return {
+    loadSettings,
+    credentialStatus: nvidiaCredentialStatus,
+    readCredential: readNvidiaCredentialForTransfer,
+    setSidecarCredential: setBackendNvidiaCredential,
+    bindSidecarNim: (endpoint: string) => bindBackendNvidiaCredential('nim', endpoint),
+    clearSidecarCredential: clearBackendNvidiaCredential,
+    sidecarStatus: backendNvidiaCredentialStatus
+  }
+}
+
+async function requireUnchangedNvidiaTarget(
+  binding: NvidiaCredentialBinding,
+  model: string | undefined,
+  expectedRevision: number
+): Promise<{ binding: NvidiaCredentialBinding; model?: string }> {
+  try {
+    if (!nvidiaCapabilityRevision.isCurrent(expectedRevision)) throw new Error('capability state changed')
+    return requireCurrentNvidiaTarget(binding, model)
+  } catch {
+    await clearBackendNvidiaCredential().catch(() => {})
+    throw new Error(
+      model
+        ? 'capability 검사 중 NVIDIA 대상 또는 모델이 변경되었습니다.'
+        : '모델 조회 중 NVIDIA 대상이 변경되었습니다.'
+    )
+  }
+}
 
 function isExternalHttpUrl(value: string): boolean {
   try {
@@ -337,6 +411,14 @@ app.whenReady().then(() => {
     if (previousBinding && (!nextBinding || !sameNvidiaBinding(previousBinding, nextBinding))) {
       void clearBackendNvidiaCredential().catch(() => {})
     }
+    if (
+      previous.activeLlmProvider !== next.activeLlmProvider ||
+      previous.nvidiaDeploymentMode !== next.nvidiaDeploymentMode ||
+      previous.nvidiaNimEndpoint !== next.nvidiaNimEndpoint ||
+      previous.nvidiaModel !== next.nvidiaModel
+    ) {
+      invalidateAllNvidiaCapabilities()
+    }
     return next
   })
 
@@ -438,6 +520,7 @@ app.whenReady().then(() => {
       requireMainRenderer(e.sender)
       await saveNvidiaCredential(binding, apiKey)
       await clearBackendNvidiaCredential().catch(() => {})
+      invalidateAllNvidiaCapabilities()
     }
   )
   ipcMain.handle(
@@ -446,28 +529,57 @@ app.whenReady().then(() => {
       requireMainRenderer(e.sender)
       await saveNvidiaCredential(binding, apiKey)
       await clearBackendNvidiaCredential().catch(() => {})
+      invalidateAllNvidiaCapabilities()
     }
   )
   ipcMain.handle('nvidia:credential:delete', async (e) => {
     requireMainRenderer(e.sender)
     await clearBackendNvidiaCredential().catch(() => {})
     deleteNvidiaCredential()
+    invalidateAllNvidiaCapabilities()
   })
   ipcMain.handle(
     'nvidia:execution:prepare',
     async (e, requestedInput: NvidiaCredentialBindingInput) => {
       requireMainRenderer(e.sender)
-      return prepareNvidiaExecution(requestedInput, {
-        loadSettings,
-        credentialStatus: nvidiaCredentialStatus,
-        readCredential: readNvidiaCredentialForTransfer,
-        setSidecarCredential: setBackendNvidiaCredential,
-        bindSidecarNim: (endpoint) => bindBackendNvidiaCredential('nim', endpoint),
-        clearSidecarCredential: clearBackendNvidiaCredential,
-        sidecarStatus: backendNvidiaCredentialStatus
-      })
+      return prepareNvidiaExecution(requestedInput, nvidiaPreparationDeps())
     }
   )
+  ipcMain.handle('nvidia:models:refresh', async (e, requestedInput: NvidiaCredentialBindingInput) => {
+    requireMainRenderer(e.sender)
+    const { binding } = requireCurrentNvidiaTarget(requestedInput)
+    const expectedRevision = nvidiaCapabilityRevision.snapshot()
+    await prepareNvidiaExecution(binding, nvidiaPreparationDeps())
+    const models = await fetchBackendNvidiaModels(binding.deploymentMode, binding.endpoint)
+    await requireUnchangedNvidiaTarget(binding, undefined, expectedRevision)
+    nvidiaCapabilityRevision.invalidate()
+    capabilityCache().removeModelsNotInList(binding, models)
+    return { models, refreshedAt: new Date().toISOString() }
+  })
+  ipcMain.handle('nvidia:capabilities:status', (e, target: NvidiaCapabilityTargetInput) => {
+    requireMainRenderer(e.sender)
+    return capabilityCache().get(target)
+  })
+  ipcMain.handle('nvidia:capabilities:clear', (e, target: NvidiaCapabilityTargetInput) => {
+    requireMainRenderer(e.sender)
+    nvidiaCapabilityRevision.invalidate()
+    capabilityCache().clearTarget(target)
+  })
+  ipcMain.handle('nvidia:capabilities:probe', async (e, target: NvidiaCapabilityTargetInput) => {
+    requireMainRenderer(e.sender)
+    const current = requireCurrentNvidiaTarget(target, target.model)
+    const binding = current.binding
+    const model = current.model!
+    const expectedRevision = nvidiaCapabilityRevision.snapshot()
+    await prepareNvidiaExecution(binding, nvidiaPreparationDeps())
+    const capabilities = await probeBackendNvidiaCapabilities(
+      binding.deploymentMode,
+      binding.endpoint,
+      model
+    )
+    await requireUnchangedNvidiaTarget(binding, model, expectedRevision)
+    return capabilityCache().put({ ...binding, model }, capabilities)
+  })
   onBackendChange((i) => {
     BrowserWindow.getAllWindows().forEach((w) => w.webContents.send('backend:status', i))
     // 백엔드가 준비되면 항상 디스코드 설정을 적용한다. enabled=false여도 apply는 예약 저장소를
@@ -507,6 +619,7 @@ app.whenReady().then(() => {
     freezeAppDataWrites()
     await clearBackendNvidiaCredential().catch(() => {})
     deleteNvidiaCredential()
+    invalidateAllNvidiaCapabilities()
     resetSettings()
     clearAllConversations()
     clearUsage()

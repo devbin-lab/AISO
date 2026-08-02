@@ -235,6 +235,65 @@ async def credential_status(request: Request):
     return _credential_memory.status()
 
 
+class NvidiaTargetRequest(BaseModel):
+    deployment_mode: Literal["build", "nim"]
+    endpoint: str = Field(min_length=1, max_length=2048)
+
+
+class NvidiaCapabilityProbeRequest(NvidiaTargetRequest):
+    model: str = Field(min_length=1, max_length=512)
+
+
+def _nvidia_runtime_for_target(body: NvidiaTargetRequest) -> LlmRuntime:
+    endpoint = canonicalize_nvidia_endpoint(body.deployment_mode, body.endpoint)
+    binding = {"deploymentMode": body.deployment_mode, "endpoint": endpoint}
+    credential = _credential_memory.credential_for(binding)
+    if body.deployment_mode == "build" and not credential:
+        raise HTTPException(status_code=409, detail="NVIDIA 자격 증명이 준비되지 않았습니다.")
+    return create_runtime(
+        "nvidia",
+        endpoint,
+        credential=credential,
+        deployment_mode=body.deployment_mode,
+    )
+
+
+def _raise_nvidia_discovery_error(error: Exception) -> None:
+    if isinstance(error, HTTPException):
+        raise error
+    if isinstance(error, LlmProviderError):
+        status = error.status if 400 <= error.status <= 599 else 502
+        raise HTTPException(status_code=status, detail=error.body) from None
+    if isinstance(error, (ValueError, TypeError)):
+        raise HTTPException(status_code=400, detail="NVIDIA 조회 설정을 확인하세요.") from None
+    raise HTTPException(status_code=502, detail="NVIDIA 조회 중 안전하게 처리할 수 없는 오류가 발생했습니다.") from None
+
+
+@app.post("/nvidia/models")
+async def nvidia_models(body: NvidiaTargetRequest):
+    """Explicit user-triggered model discovery for one credential-bound target."""
+    try:
+        return {"models": await _nvidia_runtime_for_target(body).list_models()}
+    except Exception as error:  # noqa: BLE001 - never expose upstream/raw credential detail
+        _raise_nvidia_discovery_error(error)
+
+
+@app.post("/nvidia/capabilities/probe")
+async def nvidia_capability_probe(body: NvidiaCapabilityProbeRequest):
+    """Run a non-executing forced-tool protocol probe for one exact model."""
+    try:
+        capabilities = await _nvidia_runtime_for_target(body).inspect_capabilities(body.model.strip())
+        return {
+            "capabilities": {
+                "chat": capabilities.chat,
+                "stream": capabilities.stream,
+                "tools": capabilities.tools,
+            }
+        }
+    except Exception as error:  # noqa: BLE001 - never expose upstream/raw credential detail
+        _raise_nvidia_discovery_error(error)
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str

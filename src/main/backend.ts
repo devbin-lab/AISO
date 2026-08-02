@@ -6,6 +6,7 @@ import { join } from 'path'
 import { existsSync } from 'fs'
 import { ensureSkillsDir } from './skills'
 import type { BackendInfo } from '../shared/backend'
+import type { LlmModelCapabilities, LlmCapabilityState } from '../shared/llm'
 
 /**
  * FastAPI 사이드카 수명주기 관리.
@@ -99,6 +100,72 @@ export async function clearBackendNvidiaCredential(): Promise<void> {
 
 export async function backendNvidiaCredentialStatus(): Promise<Record<string, unknown>> {
   return credentialChannelRequest('status')
+}
+
+async function nvidiaRuntimeRequest(
+  path: '/nvidia/models' | '/nvidia/capabilities/probe',
+  body: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  if (info.state !== 'ready' || info.port === null) throw new Error('사이드카가 준비되지 않았습니다.')
+  const response = await fetch(`http://127.0.0.1:${info.port}${path}`, {
+    method: 'POST',
+    redirect: 'error',
+    signal: AbortSignal.timeout(70_000),
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Aiso-Token': AUTH_TOKEN
+    },
+    body: JSON.stringify(body)
+  })
+  if (!response.ok) {
+    throw new Error(`NVIDIA 조회에 실패했습니다 (HTTP ${response.status}).`)
+  }
+  const payload = await response.json() as unknown
+  if (!payload || typeof payload !== 'object') throw new Error('NVIDIA 조회 응답 형식이 올바르지 않습니다.')
+  return payload as Record<string, unknown>
+}
+
+export async function fetchBackendNvidiaModels(
+  deploymentMode: 'build' | 'nim',
+  endpoint: string
+): Promise<string[]> {
+  const result = await nvidiaRuntimeRequest('/nvidia/models', {
+    deployment_mode: deploymentMode,
+    endpoint
+  })
+  if (!Array.isArray(result.models) || result.models.some((model) => typeof model !== 'string' || !model.trim())) {
+    throw new Error('NVIDIA 모델 목록 응답 형식이 올바르지 않습니다.')
+  }
+  return [...new Set(result.models.map((model) => String(model).trim()))]
+}
+
+function isCapabilityState(value: unknown): value is LlmCapabilityState {
+  return value === 'supported' || value === 'unsupported' || value === 'unknown'
+}
+
+export async function probeBackendNvidiaCapabilities(
+  deploymentMode: 'build' | 'nim',
+  endpoint: string,
+  model: string
+): Promise<LlmModelCapabilities> {
+  const result = await nvidiaRuntimeRequest('/nvidia/capabilities/probe', {
+    deployment_mode: deploymentMode,
+    endpoint,
+    model
+  })
+  const capabilities = result.capabilities
+  if (!capabilities || typeof capabilities !== 'object') {
+    throw new Error('NVIDIA capability 응답 형식이 올바르지 않습니다.')
+  }
+  const record = capabilities as Record<string, unknown>
+  if (
+    !isCapabilityState(record.chat) ||
+    !isCapabilityState(record.stream) ||
+    !isCapabilityState(record.tools)
+  ) {
+    throw new Error('NVIDIA capability 응답 형식이 올바르지 않습니다.')
+  }
+  return { chat: record.chat, stream: record.stream, tools: record.tools }
 }
 
 function freePort(): Promise<number> {

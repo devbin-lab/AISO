@@ -5,7 +5,7 @@ import itertools
 import pytest
 
 import main
-from llm import LlmEvent
+from llm import LlmEvent, ModelCapabilities
 
 try:
     from fastapi.testclient import TestClient
@@ -260,3 +260,125 @@ def test_nvidia_agent_is_blocked_before_workspace_or_tool_execution(client, monk
     assert response.status_code == 200
     assert '"type": "error"' in response.text
     assert calls == []
+
+
+def test_explicit_model_discovery_uses_exact_sidecar_binding_and_never_ollama(client, monkeypatch):
+    canary = "CANARY-DISCOVERY-SIDECAR-KEY-27145"
+    saved = client.post(
+        "/internal/credentials/set",
+        headers=headers(),
+        json={
+            "deploymentMode": "build",
+            "endpoint": main.NVIDIA_BUILD_BASE_URL,
+            "apiKey": canary,
+        },
+    )
+    assert saved.status_code == 200
+    calls = []
+
+    class FakeRuntime:
+        async def list_models(self):
+            return ["model/a", "model/b"]
+
+    def fake_create_runtime(name, endpoint, **kwargs):
+        calls.append((name, endpoint, kwargs))
+        assert name == "nvidia"
+        return FakeRuntime()
+
+    monkeypatch.setattr(main, "create_runtime", fake_create_runtime)
+    response = client.post(
+        "/nvidia/models",
+        headers=headers(ordinary=True, channel=False),
+        json={"deployment_mode": "build", "endpoint": main.NVIDIA_BUILD_BASE_URL},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"models": ["model/a", "model/b"]}
+    assert canary not in response.text
+    assert calls == [(
+        "nvidia",
+        main.NVIDIA_BUILD_BASE_URL,
+        {"credential": canary, "deployment_mode": "build"},
+    )]
+
+
+def test_discovery_binding_mismatch_is_rejected_before_factory_or_egress(client, monkeypatch):
+    saved = client.post(
+        "/internal/credentials/set",
+        headers=headers(),
+        json={
+            "deploymentMode": "build",
+            "endpoint": main.NVIDIA_BUILD_BASE_URL,
+            "apiKey": "CANARY-BUILD-ONLY-DISCOVERY-91923",
+        },
+    )
+    assert saved.status_code == 200
+    calls = []
+    monkeypatch.setattr(main, "create_runtime", lambda *args, **kwargs: calls.append((args, kwargs)))
+    response = client.post(
+        "/nvidia/models",
+        headers=headers(ordinary=True, channel=False),
+        json={"deployment_mode": "nim", "endpoint": "https://nim.example/v1"},
+    )
+    assert response.status_code == 409
+    assert calls == []
+    assert "CANARY" not in response.text
+
+
+def test_capability_probe_returns_only_neutral_states_and_executes_no_tool(client, monkeypatch):
+    saved = client.post(
+        "/internal/credentials/bind",
+        headers=headers(),
+        json={"deploymentMode": "nim", "endpoint": "https://nim.example/v1"},
+    )
+    assert saved.status_code == 200
+    calls = []
+    executions = []
+
+    class FakeRuntime:
+        async def inspect_capabilities(self, model):
+            calls.append(model)
+            return ModelCapabilities(chat="supported", stream="supported", tools="supported")
+
+    monkeypatch.setattr(main, "create_runtime", lambda name, _endpoint, **_kwargs: FakeRuntime() if name == "nvidia" else None)
+    response = client.post(
+        "/nvidia/capabilities/probe",
+        headers=headers(ordinary=True, channel=False),
+        json={
+            "deployment_mode": "nim",
+            "endpoint": "https://nim.example/v1/",
+            "model": "model/probe",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "capabilities": {"chat": "supported", "stream": "supported", "tools": "supported"}
+    }
+    assert calls == ["model/probe"]
+    assert executions == []
+
+
+def test_unexpected_discovery_failure_never_leaks_exception_or_key_canary(client, monkeypatch):
+    canary = "CANARY-UNEXPECTED-DISCOVERY-ERROR-32176"
+    saved = client.post(
+        "/internal/credentials/set",
+        headers=headers(),
+        json={
+            "deploymentMode": "build",
+            "endpoint": main.NVIDIA_BUILD_BASE_URL,
+            "apiKey": canary,
+        },
+    )
+    assert saved.status_code == 200
+
+    class BrokenRuntime:
+        async def list_models(self):
+            raise RuntimeError(f"raw failure {canary}")
+
+    monkeypatch.setattr(main, "create_runtime", lambda *_args, **_kwargs: BrokenRuntime())
+    response = client.post(
+        "/nvidia/models",
+        headers=headers(ordinary=True, channel=False),
+        json={"deployment_mode": "build", "endpoint": main.NVIDIA_BUILD_BASE_URL},
+    )
+    assert response.status_code == 502
+    assert canary not in response.text

@@ -2,7 +2,10 @@ import type { AppSettings, SettingsRecoveryStatus } from '../shared/settings'
 import type {
   NvidiaCredentialBindingInput,
   NvidiaCredentialStatus,
-  NvidiaExecutionPrepareResult
+  NvidiaExecutionPrepareResult,
+  NvidiaCapabilitySnapshot,
+  NvidiaCapabilityTargetInput,
+  NvidiaModelListResult
 } from '../shared/nvidia'
 import type { PingResult } from '../shared/ipc'
 import type { BackendInfo } from '../shared/backend'
@@ -43,6 +46,14 @@ export interface AisoAPI {
     }
     execution: {
       prepare: (binding: NvidiaCredentialBindingInput) => Promise<NvidiaExecutionPrepareResult>
+    }
+    models: {
+      refresh: (binding: NvidiaCredentialBindingInput) => Promise<NvidiaModelListResult>
+    }
+    capabilities: {
+      status: (target: NvidiaCapabilityTargetInput) => Promise<NvidiaCapabilitySnapshot | null>
+      probe: (target: NvidiaCapabilityTargetInput) => Promise<NvidiaCapabilitySnapshot>
+      clear: (target: NvidiaCapabilityTargetInput) => Promise<void>
     }
   }
   backend: {

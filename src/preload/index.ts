@@ -3,7 +3,10 @@ import type { AppSettings } from '../shared/settings'
 import type {
   NvidiaCredentialBindingInput,
   NvidiaCredentialStatus,
-  NvidiaExecutionPrepareResult
+  NvidiaExecutionPrepareResult,
+  NvidiaCapabilitySnapshot,
+  NvidiaCapabilityTargetInput,
+  NvidiaModelListResult
 } from '../shared/nvidia'
 import type { BackendInfo } from '../shared/backend'
 import type { UpdateStatus } from '../shared/update'
@@ -58,6 +61,18 @@ const api = {
     execution: {
       prepare: (binding: NvidiaCredentialBindingInput): Promise<NvidiaExecutionPrepareResult> =>
         ipcRenderer.invoke('nvidia:execution:prepare', binding)
+    },
+    models: {
+      refresh: (binding: NvidiaCredentialBindingInput): Promise<NvidiaModelListResult> =>
+        ipcRenderer.invoke('nvidia:models:refresh', binding)
+    },
+    capabilities: {
+      status: (target: NvidiaCapabilityTargetInput): Promise<NvidiaCapabilitySnapshot | null> =>
+        ipcRenderer.invoke('nvidia:capabilities:status', target),
+      probe: (target: NvidiaCapabilityTargetInput): Promise<NvidiaCapabilitySnapshot> =>
+        ipcRenderer.invoke('nvidia:capabilities:probe', target),
+      clear: (target: NvidiaCapabilityTargetInput): Promise<void> =>
+        ipcRenderer.invoke('nvidia:capabilities:clear', target)
     }
   },
   backend: {

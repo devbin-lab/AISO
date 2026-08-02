@@ -1,3 +1,5 @@
+import type { LlmModelCapabilities, LlmModelListResult } from './llm.ts'
+
 export const NVIDIA_BUILD_BASE_URL = 'https://integrate.api.nvidia.com/v1' as const
 
 export type NvidiaDeploymentMode = 'build' | 'nim'
@@ -28,6 +30,20 @@ export interface NvidiaExecutionPrepareResult {
   ready: true
   credential: 'stored' | 'not_required'
 }
+
+export interface NvidiaCapabilityTargetInput extends NvidiaCredentialBindingInput {
+  model: string
+}
+
+export interface NvidiaCapabilitySnapshot {
+  schemaVersion: 1
+  binding: NvidiaCredentialBinding
+  model: string
+  capabilities: LlmModelCapabilities
+  checkedAt: string
+}
+
+export type NvidiaModelListResult = LlmModelListResult
 
 function isLoopbackHostname(hostname: string): boolean {
   const host = hostname.toLowerCase()

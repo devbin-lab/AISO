@@ -27,6 +27,8 @@ from llm.contracts import (
 NVIDIA_BUILD_BASE_URL = "https://integrate.api.nvidia.com/v1"
 _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 _MAX_RETRY_AFTER_SECONDS = 2.0
+_CAPABILITY_PROBE_NAME = "aiso_capability_probe"
+_CAPABILITY_PROBE_ARGUMENT = 1
 
 
 def canonicalize_nvidia_endpoint(deployment_mode: str, endpoint: str) -> str:
@@ -148,7 +150,7 @@ def _status_error(status: int) -> LlmProviderError:
         return _safe_error(status, LlmFailureKind.RATE_LIMIT, "NVIDIA 요청 한도에 도달했습니다. 잠시 뒤 다시 시도하세요.")
     if status == 404:
         return _safe_error(status, LlmFailureKind.NOT_FOUND, "NVIDIA 모델 또는 API 경로를 찾을 수 없습니다.")
-    if status == 422:
+    if status in (400, 422):
         return _safe_error(status, LlmFailureKind.INVALID_REQUEST, "NVIDIA가 요청 형식을 거부했습니다. 모델 설정을 확인하세요.")
     if 300 <= status < 400:
         return _safe_error(status, LlmFailureKind.INVALID_REQUEST, "NVIDIA 요청 리디렉션을 보안상 거부했습니다.")
@@ -204,6 +206,9 @@ class NvidiaAdapter:
             payload["max_tokens"] = request.max_output_tokens
         if request.tools is not None:
             payload["tools"] = list(request.tools)
+        tool_choice = request.provider_options.get("tool_choice")
+        if isinstance(tool_choice, (str, dict)):
+            payload["tool_choice"] = tool_choice
         return payload
 
     def _headers(self) -> dict[str, str]:
@@ -407,16 +412,165 @@ class NvidiaAdapter:
                 raise failure.public from None
 
     async def list_models(self) -> list[str]:
-        raise LlmProviderError(
-            501,
-            "NVIDIA 모델 조회는 Gate 4에서 지원합니다.",
-            provider_name="NVIDIA",
-            kind=LlmFailureKind.TOOLS_UNSUPPORTED,
-        )
+        timeout = httpx.Timeout(15.0, connect=10.0, read=15.0, write=10.0, pool=10.0)
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                follow_redirects=False,
+                transport=self._transport,
+            ) as client:
+                response = await client.get(
+                    f"{self.endpoint}/models",
+                    headers={**self._headers(), "Accept": "application/json"},
+                )
+            if response.status_code != 200:
+                raise _status_error(response.status_code)
+            try:
+                payload = response.json()
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+                raise _safe_error(
+                    502,
+                    LlmFailureKind.MALFORMED,
+                    "NVIDIA 모델 목록 응답 형식이 올바르지 않습니다.",
+                ) from exc
+            if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+                raise _safe_error(
+                    502,
+                    LlmFailureKind.MALFORMED,
+                    "NVIDIA 모델 목록 응답 형식이 올바르지 않습니다.",
+                )
+            models: list[str] = []
+            seen: set[str] = set()
+            for item in payload["data"]:
+                if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip():
+                    raise _safe_error(
+                        502,
+                        LlmFailureKind.MALFORMED,
+                        "NVIDIA 모델 목록 항목 형식이 올바르지 않습니다.",
+                    )
+                model = item["id"].strip()
+                if model not in seen:
+                    seen.add(model)
+                    models.append(model)
+            return models
+        except LlmProviderError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise _safe_error(
+                504,
+                LlmFailureKind.TIMEOUT,
+                "NVIDIA 모델 목록 응답 시간이 초과되었습니다.",
+            ) from exc
+        except httpx.RequestError as exc:
+            raise _safe_error(
+                503,
+                LlmFailureKind.CONNECT,
+                "NVIDIA 모델 목록 서버에 연결할 수 없습니다.",
+            ) from exc
 
     async def inspect_capabilities(self, model: str) -> ModelCapabilities:
-        del model
-        return ModelCapabilities(chat="supported", stream="supported", tools="unknown")
+        target_model = model.strip()
+        if not target_model:
+            raise ValueError("NVIDIA 모델명이 필요합니다.")
+        probe = LlmRequest(
+            model=target_model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Call the capability probe function exactly once with value 1.",
+                }
+            ],
+            temperature=0,
+            max_output_tokens=32,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": _CAPABILITY_PROBE_NAME,
+                        "description": "Confirms function-call protocol support without executing a tool.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "value": {
+                                    "type": "integer",
+                                    "enum": [_CAPABILITY_PROBE_ARGUMENT],
+                                }
+                            },
+                            "required": ["value"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ],
+            provider_options={
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": _CAPABILITY_PROBE_NAME},
+                }
+            },
+        )
+        fragments: dict[int, dict[str, str]] = {}
+        completed = False
+        stream = self._stream_once(probe)
+        stream_consumed = False
+        try:
+            async for event in stream:
+                if event.kind == "tool_call_delta":
+                    for call in event.tool_calls or []:
+                        index = call.get("index")
+                        if not isinstance(index, int) or index < 0:
+                            return ModelCapabilities()
+                        current = fragments.setdefault(
+                            index,
+                            {"id": "", "name": "", "arguments": ""},
+                        )
+                        call_id = call.get("id")
+                        function = call.get("function")
+                        if isinstance(call_id, str):
+                            current["id"] += call_id
+                        if isinstance(function, Mapping):
+                            name = function.get("name")
+                            arguments = function.get("arguments")
+                            if isinstance(name, str):
+                                current["name"] += name
+                            if isinstance(arguments, str):
+                                current["arguments"] += arguments
+                elif event.kind == "done":
+                    completed = True
+                elif event.kind in ("error", "incomplete", "cancelled"):
+                    return ModelCapabilities()
+            stream_consumed = True
+        except _AttemptFailure as failure:
+            exc = failure.public
+            if exc.status in (400, 422) and exc.kind is LlmFailureKind.INVALID_REQUEST:
+                return ModelCapabilities(tools="unsupported")
+            if exc.kind in (
+                LlmFailureKind.CONNECT,
+                LlmFailureKind.TIMEOUT,
+                LlmFailureKind.UPSTREAM,
+                LlmFailureKind.MALFORMED,
+                LlmFailureKind.TRUNCATED,
+            ):
+                return ModelCapabilities()
+            raise exc from None
+        finally:
+            if not stream_consumed:
+                await stream.aclose()
+        if not completed:
+            return ModelCapabilities()
+        capabilities = ModelCapabilities(chat="supported", stream="supported", tools="unknown")
+        if len(fragments) != 1 or 0 not in fragments:
+            return capabilities
+        call = fragments[0]
+        if not call["id"] or call["name"] != _CAPABILITY_PROBE_NAME:
+            return capabilities
+        try:
+            arguments = json.loads(call["arguments"])
+        except (json.JSONDecodeError, TypeError):
+            return capabilities
+        if arguments == {"value": _CAPABILITY_PROBE_ARGUMENT}:
+            return ModelCapabilities(chat="supported", stream="supported", tools="supported")
+        return capabilities
 
     async def prepare_model(self, model: str) -> LlmModelRuntime:
         return LlmModelRuntime(model=model)

@@ -11,9 +11,12 @@ import {
 import {
   NVIDIA_BUILD_BASE_URL,
   canonicalizeNvidiaNimEndpoint,
+  type NvidiaCapabilitySnapshot,
+  type NvidiaCapabilityTargetInput,
   type NvidiaCredentialBindingInput,
   type NvidiaCredentialStatus
 } from '../../../shared/nvidia'
+import type { LlmCapabilityState } from '../../../shared/llm'
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import type { UpdateStatus } from '../../../shared/update'
 import type { SkillMeta } from '../../../shared/skill'
@@ -88,6 +91,12 @@ function rangeFill(pct: number): React.CSSProperties {
   return { background: `linear-gradient(to right, var(--accent) ${p}%, var(--track) ${p}%)` }
 }
 
+function capabilityLabel(state: LlmCapabilityState): string {
+  if (state === 'supported') return '지원 확인'
+  if (state === 'unsupported') return '지원하지 않음'
+  return '확인되지 않음'
+}
+
 type SectionId =
   | 'llm'
   | 'tools'
@@ -109,10 +118,19 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
   const [credentialStatus, setCredentialStatus] = useState<NvidiaCredentialStatus | null>(null)
   const [credentialBusy, setCredentialBusy] = useState(false)
   const [credentialMessage, setCredentialMessage] = useState('')
+  const [nvidiaModels, setNvidiaModels] = useState<string[]>([])
+  const [nvidiaModelsRefreshedAt, setNvidiaModelsRefreshedAt] = useState('')
+  const [nvidiaModelsBusy, setNvidiaModelsBusy] = useState(false)
+  const [nvidiaModelsMessage, setNvidiaModelsMessage] = useState('')
+  const [manualNvidiaModel, setManualNvidiaModel] = useState(false)
+  const [capability, setCapability] = useState<NvidiaCapabilitySnapshot | null>(null)
+  const [capabilityBusy, setCapabilityBusy] = useState(false)
+  const [capabilityMessage, setCapabilityMessage] = useState('')
   const [settingsRecoveryMessage, setSettingsRecoveryMessage] = useState('')
 
   const modelOptions = health?.models ?? []
   const useDropdown = modelOptions.length > 0 && !manualModel
+  const useNvidiaDropdown = nvidiaModels.length > 0 && !manualNvidiaModel
 
   // 외부 설정이 로드/변경되면 동기화하되, 사용자가 아직 저장하지 않은 필드는 보존한다.
   // 예: 개발자 모드 토글 저장이 ComfyUI 주소 입력 초안을 지우면 안 된다.
@@ -133,6 +151,16 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
   const comfyConnectionDirty = form.comfyBaseUrl !== settings.comfyBaseUrl ||
     form.comfyInstallPath !== settings.comfyInstallPath
   const comfyInstallPathDirty = form.comfyInstallPath !== settings.comfyInstallPath
+  const nvidiaConfigDirty =
+    form.activeLlmProvider !== settings.activeLlmProvider ||
+    form.nvidiaDeploymentMode !== settings.nvidiaDeploymentMode ||
+    form.nvidiaNimEndpoint !== settings.nvidiaNimEndpoint ||
+    form.nvidiaModel !== settings.nvidiaModel
+  const nvidiaCredentialReady =
+    form.nvidiaDeploymentMode === 'nim' ||
+    (credentialStatus?.hasStoredCredential === true && credentialStatus.matchesCurrentBinding)
+  const nvidiaDiscoveryReady =
+    backend.state === 'ready' && backend.port != null && !nvidiaConfigDirty && nvidiaCredentialReady
 
   const set = <K extends keyof AppSettings,>(k: K, v: AppSettings[K]): void => {
     setForm((f) => ({ ...f, [k]: v }))
@@ -144,6 +172,11 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
   const currentCredentialBinding = (): NvidiaCredentialBindingInput => ({
     deploymentMode: form.nvidiaDeploymentMode,
     endpoint: form.nvidiaDeploymentMode === 'nim' ? form.nvidiaNimEndpoint : undefined
+  })
+
+  const currentCapabilityTarget = (): NvidiaCapabilityTargetInput => ({
+    ...currentCredentialBinding(),
+    model: form.nvidiaModel.trim()
   })
 
   const refreshCredentialStatus = async (): Promise<void> => {
@@ -170,6 +203,30 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, form.activeLlmProvider, form.nvidiaDeploymentMode, form.nvidiaNimEndpoint])
 
+  useEffect(() => {
+    setNvidiaModels([])
+    setNvidiaModelsRefreshedAt('')
+    setNvidiaModelsMessage('')
+    setManualNvidiaModel(false)
+  }, [form.nvidiaDeploymentMode, form.nvidiaNimEndpoint])
+
+  useEffect(() => {
+    setCapability(null)
+    setCapabilityMessage('')
+    if (!active || form.activeLlmProvider !== 'nvidia' || !form.nvidiaModel.trim()) return
+    void window.api.nvidia.capabilities.status(currentCapabilityTarget())
+      .then(setCapability)
+      .catch(() => setCapability(null))
+    // Metadata-only local cache lookup. It performs no NVIDIA or Ollama request.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    active,
+    form.activeLlmProvider,
+    form.nvidiaDeploymentMode,
+    form.nvidiaNimEndpoint,
+    form.nvidiaModel
+  ])
+
   const saveCredential = async (): Promise<void> => {
     setCredentialBusy(true)
     setCredentialMessage('')
@@ -182,6 +239,7 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
       }
       setNvidiaApiKey('')
       setCredentialMessage('API 키를 운영체제 보안 저장소에 암호화해 저장했습니다.')
+      setCapability(null)
       await refreshCredentialStatus()
     } catch (error) {
       setCredentialMessage(error instanceof Error ? error.message : String(error))
@@ -197,11 +255,84 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
       await window.api.nvidia.credential.delete()
       setNvidiaApiKey('')
       setCredentialMessage('저장된 NVIDIA API 키를 삭제했습니다.')
+      setCapability(null)
       await refreshCredentialStatus()
     } catch (error) {
       setCredentialMessage(error instanceof Error ? error.message : String(error))
     } finally {
       setCredentialBusy(false)
+    }
+  }
+
+  const refreshNvidiaModels = async (): Promise<void> => {
+    if (nvidiaConfigDirty) {
+      setNvidiaModelsMessage('먼저 현재 NVIDIA 설정을 저장해 주세요.')
+      return
+    }
+    setNvidiaModelsBusy(true)
+    setNvidiaModelsMessage('')
+    try {
+      const result = await window.api.nvidia.models.refresh(currentCredentialBinding())
+      setNvidiaModels(result.models)
+      setNvidiaModelsRefreshedAt(result.refreshedAt)
+      if (form.nvidiaModel.trim() && !result.models.includes(form.nvidiaModel.trim())) {
+        setManualNvidiaModel(true)
+        setCapability(null)
+        setNvidiaModelsMessage('현재 모델 ID가 조회 목록에 없습니다. 직접 입력값은 유지됩니다.')
+      } else {
+        setNvidiaModelsMessage(
+          result.models.length > 0
+            ? `${result.models.length}개 모델을 확인했습니다.`
+            : '조회된 모델이 없습니다. 필요한 경우 모델 ID를 직접 입력하세요.'
+        )
+      }
+    } catch (error) {
+      setNvidiaModelsMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setNvidiaModelsBusy(false)
+    }
+  }
+
+  const probeNvidiaCapabilities = async (): Promise<void> => {
+    if (nvidiaConfigDirty) {
+      setCapabilityMessage('먼저 현재 NVIDIA 설정과 모델 ID를 저장해 주세요.')
+      return
+    }
+    if (!form.nvidiaModel.trim()) {
+      setCapabilityMessage('검사할 NVIDIA 모델 ID를 입력해 주세요.')
+      return
+    }
+    const confirmed = await confirmDialog({
+      title: 'NVIDIA 기능 검사',
+      message: '선택한 모델에 작은 API 요청을 1회 보냅니다. 토큰·할당량 또는 비용이 발생할 수 있습니다. Aiso의 실제 도구는 실행하지 않습니다.',
+      confirmLabel: '검사 실행'
+    })
+    if (!confirmed) return
+    setCapabilityBusy(true)
+    setCapabilityMessage('')
+    try {
+      const result = await window.api.nvidia.capabilities.probe(currentCapabilityTarget())
+      setCapability(result)
+      setCapabilityMessage('기능 검사가 완료되었습니다.')
+    } catch (error) {
+      setCapability(null)
+      setCapabilityMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setCapabilityBusy(false)
+    }
+  }
+
+  const clearNvidiaCapabilities = async (): Promise<void> => {
+    if (!form.nvidiaModel.trim()) return
+    setCapabilityBusy(true)
+    try {
+      await window.api.nvidia.capabilities.clear(currentCapabilityTarget())
+      setCapability(null)
+      setCapabilityMessage('저장된 기능 검사 결과를 초기화했습니다.')
+    } catch (error) {
+      setCapabilityMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setCapabilityBusy(false)
     }
   }
 
@@ -593,14 +724,52 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
                 <div className="row">
                   <div>
                     <div className="row__label">NVIDIA 모델</div>
-                    <div className="row__hint">모델 자동 조회는 다음 개발 단계에서 연결됩니다.</div>
+                    <div className="row__hint">
+                      자동으로 조회하지 않습니다. 저장한 배포 대상을 사용해 직접 새로고침하거나 모델 ID를 입력하세요.
+                    </div>
                   </div>
-                  <input
-                    className="input"
-                    value={form.nvidiaModel}
-                    onChange={(e) => set('nvidiaModel', e.target.value)}
-                    placeholder="예: nvidia/llama-3.1-nemotron-ultra-253b-v1"
-                  />
+                  <div className="row__control">
+                    {useNvidiaDropdown ? (
+                      <Select
+                        value={form.nvidiaModel}
+                        options={nvidiaModels}
+                        onChange={(value) => set('nvidiaModel', value)}
+                        placeholder="모델 선택"
+                      />
+                    ) : (
+                      <input
+                        className="input"
+                        value={form.nvidiaModel}
+                        onChange={(e) => set('nvidiaModel', e.target.value)}
+                        placeholder="모델 ID 직접 입력"
+                      />
+                    )}
+                    <div>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={!nvidiaDiscoveryReady || nvidiaModelsBusy}
+                        onClick={() => void refreshNvidiaModels()}
+                      >
+                        {nvidiaModelsBusy ? '조회 중…' : '모델 목록 새로고침'}
+                      </button>{' '}
+                      {nvidiaModels.length > 0 && (
+                        <button
+                          type="button"
+                          className="linklike"
+                          onClick={() => setManualNvidiaModel((manual) => !manual)}
+                        >
+                          {useNvidiaDropdown ? '직접 입력' : '목록에서 선택'}
+                        </button>
+                      )}
+                    </div>
+                    {nvidiaModelsRefreshedAt && (
+                      <div className="row__hint">
+                        확인 시각: {new Date(nvidiaModelsRefreshedAt).toLocaleString('ko-KR')}
+                      </div>
+                    )}
+                    {nvidiaModelsMessage && <div className="row__hint" role="status">{nvidiaModelsMessage}</div>}
+                  </div>
                 </div>
                 <div className="row">
                   <div>
@@ -662,11 +831,50 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
                 {credentialMessage && <div className="row__hint" role="status">{credentialMessage}</div>}
                 <div className="row">
                   <div>
-                    <div className="row__label">v4 Gate 2 제한</div>
+                    <div className="row__label">모델 기능 검사</div>
                     <div className="row__hint">
-                      현재 단계는 설정·키 보관만 준비하며 NVIDIA 요청과 모델 목록 조회는 실행하지 않습니다.
-                      이후 NVIDIA Build 실행 시 승인한 프롬프트·문맥이 NVIDIA 클라우드로 전송되고,
-                      사용자 NIM은 해당 서버 운영자에게 전송될 수 있습니다.
+                      채팅·스트리밍·도구 호출을 모델명이나 목록으로 추정하지 않고, 사용자가 요청할 때만 작은 API 검사로 확인합니다.
+                    </div>
+                  </div>
+                  <div className="row__control">
+                    <div className="row__hint">
+                      채팅: {capability ? capabilityLabel(capability.capabilities.chat) : '검사 안 됨'} ·{' '}
+                      스트리밍: {capability ? capabilityLabel(capability.capabilities.stream) : '검사 안 됨'} ·{' '}
+                      도구 호출: {capability ? capabilityLabel(capability.capabilities.tools) : '검사 안 됨'}
+                    </div>
+                    {capability && (
+                      <div className="row__hint">
+                        검사 시각: {new Date(capability.checkedAt).toLocaleString('ko-KR')}
+                      </div>
+                    )}
+                    <div>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={!nvidiaDiscoveryReady || !form.nvidiaModel.trim() || capabilityBusy}
+                        onClick={() => void probeNvidiaCapabilities()}
+                      >
+                        {capabilityBusy ? '검사 중…' : capability ? '다시 검사' : '기능 검사'}
+                      </button>{' '}
+                      <button
+                        type="button"
+                        className="btn btn--stop"
+                        disabled={!capability || capabilityBusy}
+                        onClick={() => void clearNvidiaCapabilities()}
+                      >
+                        검사 결과 초기화
+                      </button>
+                    </div>
+                    {capabilityMessage && <div className="row__hint" role="status">{capabilityMessage}</div>}
+                  </div>
+                </div>
+                <div className="row">
+                  <div>
+                    <div className="row__label">Gate 4 사용 범위</div>
+                    <div className="row__hint">
+                      일반 채팅은 도구 상태가 확인되지 않아도 사용할 수 있습니다. Agent·웹 조사·Discord 도구는 Gate 5가 완료될 때까지 실행하지 않습니다.
+                      {' '}NVIDIA Build 요청은 NVIDIA로, 사용자 NIM 요청은 해당 서버 운영자에게 전송됩니다.
+                      {form.nvidiaDeploymentMode === 'nim' && ' 사용자 NIM 호환은 실제 환경 검증 전까지 실험적입니다.'}
                     </div>
                   </div>
                 </div>
