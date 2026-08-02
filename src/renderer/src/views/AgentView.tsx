@@ -38,6 +38,7 @@ import Dropdown, { type DropdownOption } from '../components/Dropdown'
 import GeneratedImage from '../components/GeneratedImage'
 import { ensureComfyReadyForAgent, looksLikeImageGenerationRequest } from '../lib/comfy'
 import { getComfyAgentReadiness, type ComfyModelProfile } from '../../../shared/comfy-model'
+import type { NvidiaAgentDataManifest } from '../../../shared/nvidia'
 
 const EFFORT_OPTIONS: DropdownOption[] = [
   { value: 'low', label: '낮음', hint: '빠름' },
@@ -135,6 +136,13 @@ function AgentView({
   const [nvidiaAgentCapability, setNvidiaAgentCapability] = useState<
     'idle' | 'loading' | 'supported' | 'blocked'
   >('idle')
+  const [nvidiaWorkspaceScope, setNvidiaWorkspaceScope] = useState(false)
+  const [nvidiaRagScope, setNvidiaRagScope] = useState(false)
+  const [nvidiaImageScope, setNvidiaImageScope] = useState(false)
+  const [nvidiaManifest, setNvidiaManifest] = useState<NvidiaAgentDataManifest | null>(null)
+  const [nvidiaManifestApproved, setNvidiaManifestApproved] = useState(false)
+  const [nvidiaManifestBusy, setNvidiaManifestBusy] = useState(false)
+  const nvidiaManifestRequestRef = useRef(0)
   const runStartRef = useRef(0)
   const runTokensRef = useRef(0) // 완료 시 사용량 기록용(마지막 usage.total)
 
@@ -196,7 +204,6 @@ function AgentView({
   // RAG 색인 상태 로드 (작업 폴더·백엔드 준비 시)
   useEffect(() => {
     if (
-      settings.activeLlmProvider === 'ollama' &&
       backend.state === 'ready' &&
       backend.port &&
       settings.workspace.trim()
@@ -212,12 +219,109 @@ function AgentView({
       ? `http://127.0.0.1:${backend.port}/f/${previewPath.split('/').map(encodeURIComponent).join('/')}`
       : ''
   const abortRef = useRef<AbortController | null>(null)
+  const sendGuardRef = useRef(false)
   const sessionRef = useRef<string>('')
   const historyRef = useRef<AgentMessage[]>([])
   const finalTextRef = useRef<string>('') // 이번 run의 마지막 assistant 답변 (툴콜 이후 초기화)
   const autoIndexedRef = useRef<string>('') // 자동 색인을 이미 시도한 워크스페이스 (중복 방지)
   const scrollRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
+
+  const newNvidiaSession = useCallback((): string => {
+    const sessionId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}.${Math.random()}`
+    sessionRef.current = sessionId
+    return sessionId
+  }, [])
+
+  const describeNvidiaManifest = useCallback(async (): Promise<void> => {
+    if (settings.activeLlmProvider !== 'nvidia' || nvidiaAgentCapability !== 'supported') return
+    const sessionId = sessionRef.current || newNvidiaSession()
+    const requestId = ++nvidiaManifestRequestRef.current
+    setNvidiaManifestBusy(true)
+    setNvidiaManifestApproved(false)
+    try {
+      const manifest = await window.api.nvidia.agent.describeManifest({
+        sessionId,
+        scope: {
+          workspace: nvidiaWorkspaceScope,
+          rag: nvidiaRagScope,
+          image: nvidiaImageScope,
+          ...(nvidiaImageScope && settings.comfyModelSelectionMode === 'manual' && manualComfyProfileId
+            ? { selectedComfyModelId: manualComfyProfileId }
+            : {})
+        }
+      })
+      if (nvidiaManifestRequestRef.current === requestId && sessionRef.current === sessionId) {
+        setNvidiaManifest(manifest)
+      }
+    } catch (error) {
+      if (nvidiaManifestRequestRef.current === requestId) {
+        setNvidiaManifest(null)
+        setNote((error as Error).message)
+      }
+    } finally {
+      if (nvidiaManifestRequestRef.current === requestId) setNvidiaManifestBusy(false)
+    }
+  }, [
+    settings.activeLlmProvider,
+    settings.nvidiaDeploymentMode,
+    settings.nvidiaNimEndpoint,
+    settings.nvidiaModel,
+    settings.workspace,
+    settings.ragEnabled,
+    settings.ragTopK,
+    settings.ollamaHost,
+    settings.comfyBaseUrl,
+    settings.comfyInstallPath,
+    settings.comfyModelSelectionMode,
+    nvidiaAgentCapability,
+    nvidiaWorkspaceScope,
+    nvidiaRagScope,
+    nvidiaImageScope,
+    manualComfyProfileId,
+    newNvidiaSession
+  ])
+
+  useEffect(() => {
+    if (!active || settings.activeLlmProvider !== 'nvidia' || nvidiaAgentCapability !== 'supported') {
+      setNvidiaManifest(null)
+      setNvidiaManifestApproved(false)
+      return
+    }
+    void describeNvidiaManifest()
+  }, [active, settings.activeLlmProvider, nvidiaAgentCapability, describeNvidiaManifest])
+
+  const decideNvidiaManifest = async (approved: boolean): Promise<void> => {
+    if (!nvidiaManifest) return
+    const requestId = nvidiaManifestRequestRef.current
+    setNvidiaManifestBusy(true)
+    try {
+      const result = await window.api.nvidia.agent.decideManifest({
+        sessionId: nvidiaManifest.sessionId,
+        manifestId: nvidiaManifest.manifestId,
+        approved
+      })
+      if (nvidiaManifestRequestRef.current === requestId) {
+        setNvidiaManifestApproved(result.approved)
+      }
+      if (!approved) setNote('NVIDIA 전송을 거절했습니다. 외부 요청은 시작되지 않았습니다.')
+    } catch (error) {
+      if (nvidiaManifestRequestRef.current === requestId) {
+        setNvidiaManifestApproved(false)
+        setNote((error as Error).message)
+      }
+    } finally {
+      if (nvidiaManifestRequestRef.current === requestId) setNvidiaManifestBusy(false)
+    }
+  }
+
+  const invalidateNvidiaManifestChoice = (): void => {
+    nvidiaManifestRequestRef.current += 1
+    setNvidiaManifestApproved(false)
+    setNvidiaManifestBusy(true)
+  }
 
   // ── 대화방 (에이전트 작업 세션) ──
   const [convId, setConvId] = useState<string | null>(null)
@@ -229,6 +333,20 @@ function AgentView({
     window.api.conversations.list('agent').then(setConvList).catch(() => {})
   }
   useEffect(() => refreshConvs(), [])
+
+  const resetNvidiaSessionForConversation = (): void => {
+    if (!nvidiaSelected) return
+    const previousSessionId = sessionRef.current
+    nvidiaManifestRequestRef.current += 1
+    sessionRef.current = ''
+    setNvidiaManifest(null)
+    setNvidiaManifestApproved(false)
+    setNvidiaManifestBusy(false)
+    if (previousSessionId) {
+      void window.api.nvidia.agent.finish({ sessionId: previousSessionId }).catch(() => {})
+    }
+    window.setTimeout(() => void describeNvidiaManifest(), 0)
+  }
 
   const refreshManualComfyProfiles = useCallback(async (): Promise<void> => {
     setManualComfyLoading(true)
@@ -245,17 +363,13 @@ function AgentView({
   }, [])
 
   useEffect(() => {
-    if (
-      settings.activeLlmProvider !== 'nvidia' &&
-      settings.comfyModelSelectionMode === 'manual'
-    ) {
+    if (settings.comfyModelSelectionMode === 'manual') {
       void refreshManualComfyProfiles()
       return
     }
     setManualComfyProfiles([])
     setManualComfyProfileId('')
   }, [
-    settings.activeLlmProvider,
     settings.comfyModelSelectionMode,
     refreshManualComfyProfiles
   ])
@@ -278,6 +392,7 @@ function AgentView({
 
   const newConv = (): void => {
     if (running) return
+    resetNvidiaSessionForConversation()
     convIdRef.current = null
     setConvId(null)
     setConvTitle('새 대화')
@@ -292,6 +407,7 @@ function AgentView({
     if (running || id === convId) return
     const c = await window.api.conversations.get(id)
     if (!c) return
+    resetNvidiaSessionForConversation()
     const d = (c.data ?? {}) as { items?: Item[]; history?: AgentMessage[]; plan?: PlanStep[]; workspace?: string }
     convIdRef.current = id
     setConvId(id)
@@ -344,7 +460,9 @@ function AgentView({
   const ready = backendReady && (
     nvidiaSelected ? nvidiaAgentCapability === 'supported' : ollamaOk
   )
-  const canSend = ready && !running && input.trim().length > 0
+  const canSend =
+    ready && !running && !nvidiaManifestBusy && input.trim().length > 0 &&
+    (!nvidiaSelected || nvidiaManifestApproved)
 
   // ---- 이벤트 → 타임라인 리듀서 (순수: 기존 객체를 변형하지 않는다) ----
   const reduce = (ev: AgentEvent): void => {
@@ -451,66 +569,56 @@ function AgentView({
 
   const send = async (): Promise<void> => {
     const text = input.trim()
-    if (!text || !ready || running) return
-    const previousAssistant = [...historyRef.current]
-      .reverse()
-      .find((message) => message.role === 'assistant')?.content ?? ''
-    const imageRequested = !nvidiaSelected && looksLikeImageGenerationRequest(text, previousAssistant)
-    const manualSelection = !nvidiaSelected && settings.comfyModelSelectionMode === 'manual'
-    const availableComfyProfiles = nvidiaSelected
-      ? []
-      : await listComfyProfilesForAgent(manualSelection)
-    const selectedComfyProfile = availableComfyProfiles.find(
-      (profile) => profile.id === manualComfyProfileId
-    )
-    if (manualSelection && imageRequested && !selectedComfyProfile) {
-      setNote(
-        availableComfyProfiles.length === 0
-          ? '수동 선택에 사용할 준비된 ComfyUI 모델이 없습니다. 설정에서 모델과 워크플로 연결 상태를 확인하세요.'
-          : '수동 선택 모드입니다. 입력창 아래에서 이미지 생성 모델을 선택한 뒤 다시 실행하세요.'
-      )
+    if (!text || !ready || running || sendGuardRef.current) return
+    // 승인 전에는 history/items/conversation을 포함한 어떤 대화 상태도 변경하지 않는다.
+    if (nvidiaSelected && !nvidiaManifestApproved) {
+      setNote('아래 NVIDIA 전송 범위를 먼저 확인하고 승인하세요.')
       return
     }
-    // 수동 모드는 선택한 한 모델만 백엔드로 전달한다. LLM의 model_hint로 다른 모델을 고를 수 없다.
-    const comfyProfiles =
-      manualSelection
-        ? selectedComfyProfile
-          ? [selectedComfyProfile]
-          : []
-        : availableComfyProfiles
-    const selectedComfyModelId =
-      manualSelection ? selectedComfyProfile?.id ?? null : null
-    // 새 세션의 첫 지시 → 대화 id·제목 부여 (이후 저장 이펙트가 영속화)
-    if (!convIdRef.current) {
-      const id = newConversationId()
-      convIdRef.current = id
-      setConvId(id)
-      setConvTitle(titleFromText(text))
-    }
-    setInput('')
-    if (taRef.current) taRef.current.style.height = 'auto'
-
-    historyRef.current = [...historyRef.current, { role: 'user', content: text }]
-    finalTextRef.current = ''
-    setNote(null)
-    setPlan([])
-    setItems((prev) => [...prev, { kind: 'user', text }])
-    setRunning(true)
-    setLiveTokens(0)
-    runTokensRef.current = 0
+    sendGuardRef.current = true
+    if (nvidiaSelected) setNvidiaManifestBusy(true)
     const ac = new AbortController()
     abortRef.current = ac
-    sessionRef.current =
-      typeof crypto !== 'undefined' && 'randomUUID' in crypto
-        ? crypto.randomUUID()
-        : String(Math.random())
+    if (nvidiaSelected) {
+      if (!sessionRef.current) newNvidiaSession()
+    } else {
+      sessionRef.current =
+        typeof crypto !== 'undefined' && 'randomUUID' in crypto
+          ? crypto.randomUUID()
+          : String(Math.random())
+    }
     const assistantTurnId =
       typeof crypto !== 'undefined' && 'randomUUID' in crypto
         ? crypto.randomUUID()
         : `${Date.now()}.${Math.random()}`
+    let executionStarted = false
 
     try {
-      if (comfyProfiles.length > 0 && imageRequested) {
+      const previousAssistant = [...historyRef.current]
+        .reverse()
+        .find((message) => message.role === 'assistant')?.content ?? ''
+      const imageRequested = looksLikeImageGenerationRequest(text, previousAssistant)
+      const manualSelection = settings.comfyModelSelectionMode === 'manual'
+      const imageScopeEnabled = !nvidiaSelected || nvidiaImageScope
+      const availableComfyProfiles = imageScopeEnabled
+        ? await listComfyProfilesForAgent(manualSelection)
+        : []
+      const selectedComfyProfile = availableComfyProfiles.find(
+        (profile) => profile.id === manualComfyProfileId
+      )
+      if (imageScopeEnabled && manualSelection && imageRequested && !selectedComfyProfile) {
+        throw new Error(
+          availableComfyProfiles.length === 0
+            ? '수동 선택에 사용할 준비된 ComfyUI 모델이 없습니다. 설정에서 모델과 워크플로 연결 상태를 확인하세요.'
+            : '수동 선택 모드입니다. 입력창 아래에서 이미지 생성 모델을 선택한 뒤 다시 실행하세요.'
+        )
+      }
+      const comfyProfiles = manualSelection
+        ? selectedComfyProfile ? [selectedComfyProfile] : []
+        : availableComfyProfiles
+      const selectedComfyModelId = manualSelection ? selectedComfyProfile?.id ?? null : null
+
+      if (imageScopeEnabled && comfyProfiles.length > 0 && imageRequested) {
         setNote('ComfyUI 실행 상태를 확인하고 있습니다…')
         await ensureComfyReadyForAgent(
           backend.port!,
@@ -520,6 +628,32 @@ function AgentView({
         )
         setNote(null)
       }
+      const nvidiaGrantId = nvidiaSelected
+        ? (await window.api.nvidia.agent.prepare({
+            sessionId: sessionRef.current,
+            assistantTurnId
+          })).grantId
+        : undefined
+
+      // Main의 exact approval/credential/capability 재검증이 성공한 뒤에만 대화를 변경한다.
+      if (!convIdRef.current) {
+        const id = newConversationId()
+        convIdRef.current = id
+        setConvId(id)
+        setConvTitle(titleFromText(text))
+      }
+      setInput('')
+      if (taRef.current) taRef.current.style.height = 'auto'
+      historyRef.current = [...historyRef.current, { role: 'user', content: text }]
+      finalTextRef.current = ''
+      setNote(null)
+      setPlan([])
+      setItems((prev) => [...prev, { kind: 'user', text }])
+      setRunning(true)
+      setLiveTokens(0)
+      runTokensRef.current = 0
+      executionStarted = true
+
       await streamAgent(
         backend.port!,
         settings,
@@ -531,31 +665,51 @@ function AgentView({
         comfyProfiles,
         reduce,
         ac.signal,
-        { selectedComfyModelId: selectedComfyModelId ?? undefined }
+        {
+          selectedComfyModelId: selectedComfyModelId ?? undefined,
+          nvidiaGrantId
+        }
       )
     } catch (err) {
-      setNote(null)
-      if ((err as Error).name !== 'AbortError') reduce({ type: 'error', error: (err as Error).message })
+      if ((err as Error).name !== 'AbortError') {
+        if (executionStarted) {
+          setNote(null)
+          reduce({ type: 'error', error: (err as Error).message })
+        } else {
+          setNote((err as Error).message)
+        }
+      }
     } finally {
       setRunning(false)
+      sendGuardRef.current = false
       abortRef.current = null
       // 이번 실행에서 쓴 토큰을 사용량 통계에 기록 (홈의 일/주/월 집계)
-      if (runTokensRef.current > 0) {
+      if (executionStarted && runTokensRef.current > 0) {
         void window.api.usage.record(runTokensRef.current)
         // 이번 답변 아래에 토큰·소요시간 요약줄을 남긴다
         const secs = (Date.now() - runStartRef.current) / 1000
         setItems((prev) => [...prev, { kind: 'meta', tokens: runTokensRef.current, seconds: secs }])
       }
       // 이번 run의 마지막 assistant 답변을 대화 히스토리에 반영 (ref 기반 → 중복 없음)
-      if (finalTextRef.current.trim()) {
+      if (executionStarted && finalTextRef.current.trim()) {
         historyRef.current = [...historyRef.current, { role: 'assistant', content: finalTextRef.current }]
       }
       // 재색인은 백엔드에서 백그라운드로 돌므로, 잠시 뒤 색인 칩 수치를 갱신한다
-      if (!nvidiaSelected && backend.port && settings.workspace.trim()) {
+      if (backend.port && settings.workspace.trim()) {
         const port = backend.port
         window.setTimeout(() => {
           ragStatus(port, settings.workspace).then(setRag).catch(() => {})
         }, 1500)
+      }
+      if (nvidiaSelected) {
+        const completedSessionId = sessionRef.current
+        await window.api.nvidia.agent.finish({ sessionId: completedSessionId }).catch(() => {})
+        nvidiaManifestRequestRef.current += 1
+        sessionRef.current = ''
+        setNvidiaManifest(null)
+        setNvidiaManifestApproved(false)
+        setNvidiaManifestBusy(false)
+        window.setTimeout(() => void describeNvidiaManifest(), 0)
       }
     }
   }
@@ -592,7 +746,7 @@ function AgentView({
 
   // 작업 폴더를 임베딩 색인 (진행 상황 표시). 임베딩 모델은 채팅 모델과 무관.
   const runIndex = async (): Promise<void> => {
-    if (nvidiaSelected || !backendReady || !hasWorkspace || indexing) return
+    if (!backendReady || !hasWorkspace || indexing) return
     autoIndexedRef.current = settings.workspace // 이 워크스페이스는 (자동/수동) 색인 시도함 → 자동 재트리거 방지
     setIndexing(true)
     setRagNote(null)
@@ -632,7 +786,7 @@ function AgentView({
   // 색인이 없으면 자동으로 한 번 색인한다 (매번 수동 클릭 불필요). 이후 파일 변경은 백엔드가
   // 백그라운드로 재색인하므로 최초 1회만 트리거하면 된다.
   useEffect(() => {
-    if (nvidiaSelected || !settings.ragEnabled || !backendReady || !hasWorkspace || indexing) return
+    if (!settings.ragEnabled || !backendReady || !hasWorkspace || indexing) return
     if (rag == null || rag.indexed) return // 상태 미확인 or 이미 색인됨
     if (autoIndexedRef.current === settings.workspace) return // 이 워크스페이스는 이미 시도함
     // 임베딩 모델이 설치돼 있을 때만 (health 로드 대기 + 미설치면 조용히 대기 — 수동 버튼으로 처리)
@@ -690,7 +844,7 @@ function AgentView({
     }
   } else if (nvidiaSelected) {
     notice = {
-      text: 'NVIDIA Agent Gate 5 — 현재는 계획 갱신과 현재 시각 확인 도구만 사용할 수 있습니다.',
+      text: 'NVIDIA Agent는 승인한 범위에 따라 읽기 전용 작업 폴더, 로컬 RAG, ComfyUI 이미지 도구를 선택적으로 사용합니다. 대화와 선택한 도구 결과는 외부 전송 전에 범위를 확인하고 승인합니다.',
       kind: 'warn'
     }
   }
@@ -885,6 +1039,84 @@ function AgentView({
         </div>
       )}
 
+      {nvidiaSelected && nvidiaManifest && !running && (
+        <section className="nvidia-manifest" aria-label="NVIDIA 전송 범위 확인">
+          <div className="nvidia-manifest__title">
+            <b>NVIDIA 전송 범위 확인</b>
+            <span className="mono">{nvidiaManifest.model}</span>
+          </div>
+          <p>대화 내용은 NVIDIA 모델로 전송됩니다. 추가 항목은 기본적으로 꺼져 있습니다.</p>
+          <label>
+            <input
+              type="checkbox"
+              checked={nvidiaWorkspaceScope}
+              disabled={nvidiaManifestBusy}
+              onChange={(event) => {
+                invalidateNvidiaManifestChoice()
+                setNvidiaWorkspaceScope(event.target.checked)
+                if (!event.target.checked) setNvidiaRagScope(false)
+              }}
+            />
+            작업 폴더 읽기 {nvidiaManifest.scopeDetails.workspacePath
+              ? `(${nvidiaManifest.scopeDetails.workspacePath})`
+              : ''}
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={nvidiaRagScope}
+              disabled={nvidiaManifestBusy || !nvidiaWorkspaceScope}
+              onChange={(event) => {
+                invalidateNvidiaManifestChoice()
+                setNvidiaRagScope(event.target.checked)
+              }}
+            />
+            로컬 RAG 검색 (Ollama 임베딩{nvidiaManifest.scopeDetails.rag.enabled
+              ? `, 상위 ${nvidiaManifest.scopeDetails.rag.topK}개`
+              : ''})
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={nvidiaImageScope}
+              disabled={nvidiaManifestBusy}
+              onChange={(event) => {
+                invalidateNvidiaManifestChoice()
+                setNvidiaImageScope(event.target.checked)
+              }}
+            />
+            이미지 생성 프롬프트와 성공 여부·크기
+          </label>
+          <div className="nvidia-manifest__summary">
+            <span>전송: 대화, {nvidiaManifest.sends.toolResultDetails.join(', ')}</span>
+            <span>로컬 전용: {nvidiaManifest.localOnly.join(', ')}</span>
+          </div>
+          <div className="nvidia-manifest__actions">
+            <button
+              className="btn btn--sm"
+              disabled={nvidiaManifestBusy || nvidiaManifestApproved}
+              onClick={() => void decideNvidiaManifest(true)}
+            >
+              {nvidiaManifestApproved ? '승인됨' : '이 범위 승인'}
+            </button>
+            <button
+              className="btn btn--sm btn--ghost2"
+              disabled={nvidiaManifestBusy}
+              onClick={() => void decideNvidiaManifest(false)}
+            >
+              거절
+            </button>
+            <button
+              className="btn btn--sm btn--ghost2"
+              disabled={nvidiaManifestBusy}
+              onClick={() => void describeNvidiaManifest()}
+            >
+              새로 확인
+            </button>
+          </div>
+        </section>
+      )}
+
       {/* 입력창 위: 작업 폴더 + RAG (왼쪽 정렬) */}
       <div className="composer-head">
         <button
@@ -899,11 +1131,9 @@ function AgentView({
           <button
             className={`ws-pick rag-chip ${rag?.indexed ? 'rag-chip--on' : ''}`}
             onClick={() => void runIndex()}
-            disabled={nvidiaSelected || indexing || !backendReady}
+            disabled={indexing || !backendReady}
             data-tip={
-              nvidiaSelected
-                ? 'NVIDIA RAG 색인은 아직 지원하지 않습니다'
-                : rag?.indexed
+              rag?.indexed
                 ? `RAG 활성 · 조각 ${rag.count}개 (${rag.embed_model}) · 클릭하면 다시 만듭니다`
                 : 'RAG(검색 증강) — 작업 폴더를 의미 검색용으로 준비해 에이전트가 관련 코드·문서를 자동 참고 (자동 실행)'
             }
@@ -929,7 +1159,13 @@ function AgentView({
           rows={1}
           value={input}
           disabled={!ready || running}
-          placeholder={ready ? '무엇을 할까요? · Enter 전송' : '엔진 준비 후 사용 가능'}
+          placeholder={
+            ready
+              ? nvidiaSelected && !nvidiaManifestApproved
+                ? 'NVIDIA 전송 범위를 먼저 승인하세요'
+                : '무엇을 할까요? · Enter 전송'
+              : '엔진 준비 후 사용 가능'
+          }
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onKeyDown}
           onInput={autoGrow}
@@ -956,7 +1192,10 @@ function AgentView({
             <Dropdown
               value={manualComfyProfileId}
               options={manualComfyOptions}
-              onChange={setManualComfyProfileId}
+              onChange={(value) => {
+                if (nvidiaSelected) invalidateNvidiaManifestChoice()
+                setManualComfyProfileId(value)
+              }}
               align="left"
               disabled={running || manualComfyLoading}
               title="수동 선택 모드의 이미지 생성 모델"

@@ -9,6 +9,7 @@ import {
   type NvidiaCapabilityTargetInput,
   type NvidiaCredentialBinding
 } from '../shared/nvidia.ts'
+import type { NvidiaAgentExecutionScope } from './nvidia-agent-data-approval.ts'
 
 export interface NvidiaAgentAuthorizationDeps {
   loadSettings(): AppSettings
@@ -22,13 +23,18 @@ export interface NvidiaAgentAuthorizationDeps {
       endpoint: string
       model: string
       ttlSeconds: number
+      executionScope: NvidiaAgentExecutionScope
     }
   ): Promise<NvidiaAgentPrepareResult>
   revokeGrants(): Promise<void>
+  dataApprovalSnapshot(): number
+  dataApprovalIsCurrent(snapshot: number): boolean
+  getApprovedScope(sessionId: string, target: ExactNvidiaAgentTarget): NvidiaAgentExecutionScope
+  consumeApprovedScope(sessionId: string, target: ExactNvidiaAgentTarget): NvidiaAgentExecutionScope
   now(): number
 }
 
-type ExactNvidiaAgentTarget = NvidiaCredentialBinding & { model: string }
+export type ExactNvidiaAgentTarget = NvidiaCredentialBinding & { model: string }
 
 /** Fence new grants, revoke all outstanding bearers, then publish changed trust state. */
 export async function commitNvidiaCapabilityMutation<T>(
@@ -114,12 +120,18 @@ export async function prepareNvidiaAgentAuthorization(
   const target = savedTarget(deps.loadSettings())
   if (!target) throw new Error('현재 저장된 NVIDIA Agent 대상 또는 모델이 없습니다.')
   const revision = deps.revisionSnapshot()
-  if (!deps.revisionIsCurrent(revision)) {
+  const dataRevision = deps.dataApprovalSnapshot()
+  if (!deps.revisionIsCurrent(revision) || !deps.dataApprovalIsCurrent(dataRevision)) {
     throw new Error('NVIDIA Agent 기능 확인 상태가 변경 중입니다.')
   }
+  let executionScope = deps.getApprovedScope(input.sessionId, target)
   requireSupported(target, deps)
   await deps.prepareExecution(target)
   assertUnchanged(target, revision, deps)
+  if (!deps.dataApprovalIsCurrent(dataRevision)) {
+    throw new Error('NVIDIA Agent 전송 승인 범위가 변경되었습니다.')
+  }
+  executionScope = deps.getApprovedScope(input.sessionId, target)
   const capability = requireSupported(target, deps)
   const remainingMs = Date.parse(capability.checkedAt) + NVIDIA_CAPABILITY_MAX_AGE_MS - deps.now()
   if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
@@ -130,11 +142,19 @@ export async function prepareNvidiaAgentAuthorization(
     deploymentMode: target.deploymentMode,
     endpoint: target.endpoint,
     model: target.model,
-    ttlSeconds: Math.min(60, remainingMs / 1000)
+    ttlSeconds: Math.min(60, remainingMs / 1000),
+    executionScope
   })
   try {
     assertUnchanged(target, revision, deps)
+    if (!deps.dataApprovalIsCurrent(dataRevision)) {
+      throw new Error('NVIDIA Agent 전송 승인 범위가 변경되었습니다.')
+    }
     requireSupported(target, deps)
+    const consumed = deps.consumeApprovedScope(input.sessionId, target)
+    if (consumed.fingerprint !== executionScope.fingerprint) {
+      throw new Error('NVIDIA Agent 전송 승인 범위가 변경되었습니다.')
+    }
     return grant
   } catch (error) {
     await deps.revokeGrants().catch(() => {})

@@ -32,14 +32,19 @@ function nvidiaSettings(patch: Partial<AppSettings> = {}): AppSettings {
 
 describe('streamChat NVIDIA execution boundary', () => {
   let prepare: ReturnType<typeof vi.fn>
+  let prepareResearch: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
     prepare = vi.fn().mockResolvedValue({ ready: true, credential: 'stored' })
+    prepareResearch = vi.fn().mockResolvedValue({
+      grantId: 'research-one-use-grant',
+      expiresInSeconds: 60
+    })
     Object.defineProperty(window, 'api', {
       configurable: true,
       value: {
         backend: { token: () => 'renderer-session-token' },
-        nvidia: { execution: { prepare } }
+        nvidia: { execution: { prepare }, research: { prepare: prepareResearch } }
       }
     })
   })
@@ -83,8 +88,8 @@ describe('streamChat NVIDIA execution boundary', () => {
     expect(events).toEqual(['content', 'done'])
   })
 
-  it('blocks unsupported NVIDIA research before prepare or any network egress', async () => {
-    const fetchMock = vi.fn()
+  it('requires a dedicated Main research grant and sends it to one NVIDIA research request', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamResponse(['{"type":"done"}\n']))
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(streamChat(
@@ -92,8 +97,33 @@ describe('streamChat NVIDIA execution boundary', () => {
       nvidiaSettings({ chatWebSearch: true }),
       [{ role: 'user', content: 'research this' }],
       vi.fn()
-    )).rejects.toThrow()
+    )).resolves.toBeUndefined()
 
+    expect(prepare).not.toHaveBeenCalled()
+    expect(prepareResearch).toHaveBeenCalledWith({
+      deploymentMode: 'build',
+      endpoint: NVIDIA_BUILD_BASE_URL,
+      model: 'meta/llama-test'
+    })
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
+    expect(body).toMatchObject({
+      provider: 'nvidia',
+      research: true,
+      nvidia_research_grant: 'research-one-use-grant'
+    })
+    expect(body).not.toHaveProperty('ollama_host')
+  })
+
+  it('does not call /chat when Main refuses the NVIDIA research grant', async () => {
+    prepareResearch.mockRejectedValueOnce(new Error('research capability expired'))
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(streamChat(
+      8123,
+      nvidiaSettings({ chatWebSearch: true }),
+      [{ role: 'user', content: 'research this' }],
+      vi.fn()
+    )).rejects.toThrow('research capability expired')
     expect(prepare).not.toHaveBeenCalled()
     expect(fetchMock).not.toHaveBeenCalled()
   })

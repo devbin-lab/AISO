@@ -19,6 +19,8 @@ export interface AgentMessage {
  */
 export interface ComfySelectionRequest {
   selectedComfyModelId?: string
+  /** Main-issued, one-use grant. Renderer can carry it but cannot mint it. */
+  nvidiaGrantId?: string
 }
 
 /** 실제 Python 레지스트리에서 계산한 내장 Agent 도구 목록을 읽는다. */
@@ -47,9 +49,12 @@ export async function streamAgent(
   comfySelection?: ComfySelectionRequest
 ): Promise<void> {
   const target = snapshotLlmSettings(settings)
-  const nvidiaGrant = target.provider === 'nvidia'
-    ? await window.api.nvidia.agent.prepare({ sessionId, assistantTurnId })
-    : null
+  const nvidiaGrantId = target.provider === 'nvidia'
+    ? comfySelection?.nvidiaGrantId?.trim() ?? ''
+    : ''
+  if (target.provider === 'nvidia' && !nvidiaGrantId) {
+    throw new Error('NVIDIA Agent 실행 승인이 준비되지 않았습니다.')
+  }
   const lastUserText = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
   const comfySelectionMode = settings.comfyModelSelectionMode === 'manual' ? 'manual' : 'auto'
   const selectedComfyModelId =
@@ -65,7 +70,7 @@ export async function streamAgent(
       workspace: target.provider === 'nvidia' ? '' : workspace,
       model: target.model,
       assistant_turn_id: assistantTurnId,
-      nvidia_grant: nvidiaGrant?.grantId ?? '',
+      nvidia_grant: nvidiaGrantId,
       deployment_mode: target.deploymentMode,
       endpoint: target.endpoint,
       reasoning_effort: settings.reasoningEffort,

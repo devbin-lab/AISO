@@ -40,6 +40,8 @@ def client(monkeypatch):
     monkeypatch.setitem(auth_middleware.kwargs, "token", ORDINARY_TOKEN)
     main._credential_memory.clear_secret()
     main._nvidia_agent_grants.clear()
+    main._nvidia_research_grants.clear()
+    main._nvidia_discord_grants.clear()
     main._credential_memory._used_nonces.clear()
     main._credential_memory._nonce_order.clear()
     main.app.middleware_stack = None
@@ -47,6 +49,8 @@ def client(monkeypatch):
         yield TestClient(main.app)
     finally:
         main._nvidia_agent_grants.clear()
+        main._nvidia_research_grants.clear()
+        main._nvidia_discord_grants.clear()
         main._credential_memory.clear_secret()
         main.app.middleware_stack = None
 
@@ -82,6 +86,21 @@ def _issue_agent_grant(client, *, session="session-1234567890", turn="assistant-
             "endpoint": main.NVIDIA_BUILD_BASE_URL,
             "model": "model/a",
             "ttlSeconds": 60,
+            "executionScope": {
+                "fingerprint": "f" * 64,
+                "workspace": "",
+                "ragEnabled": False,
+                "ollamaHost": "",
+                "ragTopK": 0,
+                "allowedTools": ["update_plan", "get_system_time"],
+                "comfy": {
+                    "enabled": False,
+                    "baseUrl": "",
+                    "profiles": [],
+                    "selectionMode": "auto",
+                    "selectedProfileId": None,
+                },
+            },
         },
     )
     assert response.status_code == 200
@@ -168,6 +187,7 @@ def test_agent_grant_store_honors_subsecond_capability_ttl(monkeypatch):
         assistant_turn_id="assistant-turn-1234567890",
         binding=binding,
         model="model/a",
+        execution_scope={},
         ttl_seconds=0.25,
     )
     now = 100.251

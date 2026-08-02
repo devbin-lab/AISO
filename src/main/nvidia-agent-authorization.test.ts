@@ -8,6 +8,7 @@ import {
   prepareNvidiaAgentAuthorization,
   type NvidiaAgentAuthorizationDeps
 } from './nvidia-agent-authorization.ts'
+import type { NvidiaAgentExecutionScope } from './nvidia-agent-data-approval.ts'
 
 const input = {
   sessionId: 'session-1234567890',
@@ -41,6 +42,21 @@ function harness(options: {
   let reads = 0
   const states = options.states ?? [settings()]
   const calls: string[] = []
+  const executionScope: NvidiaAgentExecutionScope = {
+    fingerprint: 'f'.repeat(64),
+    workspace: '',
+    ragEnabled: false,
+    ollamaHost: '',
+    ragTopK: 0,
+    allowedTools: ['update_plan', 'get_system_time'],
+    comfy: {
+      enabled: false,
+      baseUrl: '',
+      profiles: [],
+      selectionMode: 'auto',
+      selectedProfileId: null
+    }
+  }
   const deps: NvidiaAgentAuthorizationDeps = {
     loadSettings: () => states[Math.min(reads++, states.length - 1)],
     getCapability: () => options.capability === undefined ? supported : options.capability,
@@ -60,6 +76,10 @@ function harness(options: {
       }
     },
     revokeGrants: async () => { calls.push('revoke') },
+    dataApprovalSnapshot: () => revision,
+    dataApprovalIsCurrent: (value) => value === revision,
+    getApprovedScope: () => structuredClone(executionScope),
+    consumeApprovedScope: () => structuredClone(executionScope),
     now: () => options.now ?? Date.parse(supported.checkedAt)
   }
   return { deps, calls }

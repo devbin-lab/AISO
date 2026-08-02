@@ -147,7 +147,7 @@ function App(): React.JSX.Element {
           {visitedViews.has('chat') && <div className={wrap('chat')}><Suspense fallback={<ViewFallback />}><ChatView settings={settings} backend={backend} health={health} onSaveSettings={saveSettings} convCollapsed={chatConvCollapsed} /></Suspense></div>}
           {visitedViews.has('agent') && <div className={wrap('agent')}><Suspense fallback={<ViewFallback />}><AgentView active={view === 'agent'} settings={settings} backend={backend} health={health} onPickWorkspace={pickWorkspace} onSaveSettings={saveSettings} convCollapsed={agentConvCollapsed} /></Suspense></div>}
           {visitedViews.has('comfy') && <div className={wrap('comfy')}><Suspense fallback={<ViewFallback />}><ComfyView settings={settings} backend={backend} active={view === 'comfy'} onSaveSettings={saveSettings} /></Suspense></div>}
-          {visitedViews.has('settings') && <div className={wrap('settings')}><Suspense fallback={<ViewFallback />}><SettingsView settings={settings} backend={backend} health={health} onSave={saveSettings} active={view === 'settings'} /></Suspense></div>}
+          {visitedViews.has('settings') && <div className={wrap('settings')}><Suspense fallback={<ViewFallback />}><SettingsView settings={settings} backend={backend} health={health} onSave={saveSettings} onExternalSettingsChange={setSettings} active={view === 'settings'} /></Suspense></div>}
         </main>
       </div>
       <TooltipHost />

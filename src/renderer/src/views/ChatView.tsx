@@ -137,7 +137,7 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
   const modelReady = !health || modelInstalled(health.models, settings.model)
   const nvidiaSelected = settings.activeLlmProvider === 'nvidia'
   const providerReady = nvidiaSelected
-    ? settings.nvidiaModel.trim().length > 0 && !settings.chatWebSearch
+    ? settings.nvidiaModel.trim().length > 0
     : ollamaOk && modelReady
   const canSend = backendReady && providerReady && !streaming && input.trim().length > 0
 
@@ -312,8 +312,6 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
     notice = { text: '백엔드 엔진 시작 중…', kind: 'warn' }
   } else if (nvidiaSelected && !settings.nvidiaModel.trim()) {
     notice = { text: '설정에서 NVIDIA 모델명을 입력하세요.', kind: 'err' }
-  } else if (nvidiaSelected && settings.chatWebSearch) {
-    notice = { text: 'NVIDIA 웹 조사 채팅은 아직 지원하지 않습니다. 설정에서 웹 검색을 끄면 일반 채팅을 사용할 수 있습니다.', kind: 'warn' }
   } else if (!nvidiaSelected && backendReady && health && !health.ollama) {
     notice = { text: 'Ollama에 연결할 수 없습니다 — Ollama 앱을 실행하세요', kind: 'err' }
   } else if (!nvidiaSelected && backendReady && ollamaOk && !modelReady) {
@@ -348,7 +346,9 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
             <div className="empty__title">무엇이든 물어보세요</div>
             <div className="empty__desc">
               {nvidiaSelected
-                ? '프롬프트와 대화 문맥이 선택한 NVIDIA 서비스로 전송됩니다 · 웹 조사와 도구는 아직 지원하지 않습니다'
+                ? settings.chatWebSearch
+                  ? '대화와 조사 도구 결과가 선택한 NVIDIA 서비스로 전송됩니다'
+                  : '프롬프트와 대화 문맥이 선택한 NVIDIA 서비스로 전송됩니다'
                 : settings.chatWebSearch
                 ? '필요할 때 자동으로 인터넷을 조사해 답합니다 · 검색이 불필요하면 로컬에서 처리 (설정에서 끌 수 있어요)'
                 : '모든 대화는 로컬에서 처리됩니다 · 사고 과정은 접힌 상태로 표시됩니다'}

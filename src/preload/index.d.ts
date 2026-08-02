@@ -7,7 +7,14 @@ import type {
   NvidiaCapabilityTargetInput,
   NvidiaModelListResult,
   NvidiaAgentPrepareInput,
-  NvidiaAgentPrepareResult
+  NvidiaAgentPrepareResult,
+  NvidiaAgentManifestDescribeInput,
+  NvidiaAgentDataManifest,
+  NvidiaAgentManifestDecisionInput,
+  NvidiaAgentManifestDecisionResult,
+  NvidiaAgentSessionFinishInput,
+  NvidiaResearchPrepareInput,
+  NvidiaResearchPrepareResult
 } from '../shared/nvidia'
 import type { PingResult } from '../shared/ipc'
 import type { BackendInfo } from '../shared/backend'
@@ -49,6 +56,9 @@ export interface AisoAPI {
     execution: {
       prepare: (binding: NvidiaCredentialBindingInput) => Promise<NvidiaExecutionPrepareResult>
     }
+    research: {
+      prepare: (target: NvidiaResearchPrepareInput) => Promise<NvidiaResearchPrepareResult>
+    }
     models: {
       refresh: (binding: NvidiaCredentialBindingInput) => Promise<NvidiaModelListResult>
     }
@@ -58,7 +68,10 @@ export interface AisoAPI {
       clear: (target: NvidiaCapabilityTargetInput) => Promise<void>
     }
     agent: {
+      describeManifest: (input: NvidiaAgentManifestDescribeInput) => Promise<NvidiaAgentDataManifest>
+      decideManifest: (input: NvidiaAgentManifestDecisionInput) => Promise<NvidiaAgentManifestDecisionResult>
       prepare: (input: NvidiaAgentPrepareInput) => Promise<NvidiaAgentPrepareResult>
+      finish: (input: NvidiaAgentSessionFinishInput) => Promise<void>
     }
   }
   backend: {
@@ -103,6 +116,7 @@ export interface AisoAPI {
   discord: {
     hasToken: () => Promise<boolean>
     saveToken: (token: string) => Promise<void>
+    setLlmProvider: (provider: 'ollama' | 'nvidia') => Promise<AppSettings>
     apply: () => Promise<{ ok: boolean; detail?: string }>
     status: () => Promise<DiscordStatus>
     schedules: () => Promise<{ jobs: DiscordSchedule[] }>

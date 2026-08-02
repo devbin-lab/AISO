@@ -47,15 +47,21 @@ export async function streamChat(
 ): Promise<void> {
   const lastUserText = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
   const snapshot = snapshotLlmSettings(settings)
+  let nvidiaResearchGrant = ''
   if (snapshot.provider === 'nvidia') {
-    if (settings.chatWebSearch) {
-      throw new Error('NVIDIA 웹 조사 채팅은 아직 지원하지 않습니다. 설정에서 웹 검색을 끄고 일반 채팅을 사용하세요.')
-    }
     if (!snapshot.model.trim()) throw new Error('설정에서 NVIDIA 모델명을 입력해 주세요.')
-    await window.api.nvidia.execution.prepare({
-      deploymentMode: snapshot.deploymentMode!,
-      endpoint: snapshot.endpoint
-    })
+    if (settings.chatWebSearch) {
+      nvidiaResearchGrant = (await window.api.nvidia.research.prepare({
+        deploymentMode: snapshot.deploymentMode!,
+        endpoint: snapshot.endpoint,
+        model: snapshot.model
+      })).grantId
+    } else {
+      await window.api.nvidia.execution.prepare({
+        deploymentMode: snapshot.deploymentMode!,
+        endpoint: snapshot.endpoint
+      })
+    }
   }
   const res = await fetch(`http://127.0.0.1:${port}/chat`, {
     method: 'POST',
@@ -71,7 +77,8 @@ export async function streamChat(
       context_length: settings.contextLength,
       ollama_host: snapshot.provider === 'ollama' ? snapshot.endpoint : undefined,
       keep_alive: settings.keepAlive,
-      research: settings.chatWebSearch
+      research: settings.chatWebSearch,
+      nvidia_research_grant: nvidiaResearchGrant
     }),
     signal
   })

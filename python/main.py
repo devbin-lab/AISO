@@ -5,14 +5,17 @@ Electron 메인 프로세스가 앱 시작 시 이 서버를 스폰한다:
 """
 
 import hmac
+import ipaddress
 import json
 import os
+import re
 import secrets
 import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -20,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent import MAX_GEN_TOKENS, resolve_approval, run_agent, run_research_chat
+from agent import MAX_GEN_TOKENS, _chat_turn, resolve_approval, run_agent, run_research_chat
 from agent_ledger import AgentExecutionLedger, LedgerError
 from toolspec import get_builtin_tool_catalog
 from comfy_client import (
@@ -63,6 +66,7 @@ AUTH_TOKEN = os.environ.get("AISO_AUTH_TOKEN", "")
 CREDENTIAL_CHANNEL_TOKEN = os.environ.get("AISO_CREDENTIAL_CHANNEL_TOKEN", "")
 AGENT_LEDGER_PATH = os.environ.get("AISO_AGENT_LEDGER_PATH", "")
 NVIDIA_AGENT_GRANT_TTL_SECONDS = 60
+NVIDIA_GRANT_STORE_MAX_RECORDS = 256
 
 
 class _CredentialMemory:
@@ -133,9 +137,12 @@ class _NvidiaAgentGrantStore:
         assistant_turn_id: str,
         binding: dict[str, str],
         model: str,
+        execution_scope: dict[str, Any],
         ttl_seconds: float = NVIDIA_AGENT_GRANT_TTL_SECONDS,
     ) -> str:
         self._prune()
+        while len(self._grants) >= NVIDIA_GRANT_STORE_MAX_RECORDS:
+            self._grants.pop(next(iter(self._grants)))
         # 32 random bytes = 256 bits. The token is never logged or persisted.
         token = secrets.token_urlsafe(32)
         self._grants[token] = {
@@ -143,6 +150,7 @@ class _NvidiaAgentGrantStore:
             "assistantTurnId": assistant_turn_id,
             "binding": dict(binding),
             "model": model,
+            "executionScope": execution_scope,
             "expires": time.monotonic() + min(NVIDIA_AGENT_GRANT_TTL_SECONDS, ttl_seconds),
         }
         return token
@@ -155,7 +163,7 @@ class _NvidiaAgentGrantStore:
         assistant_turn_id: str,
         binding: dict[str, str],
         model: str,
-    ) -> None:
+    ) -> dict[str, Any]:
         self._prune()
         # Pop before comparison: even a mismatched attempt consumes the bearer.
         grant = self._grants.pop(token, None)
@@ -168,9 +176,88 @@ class _NvidiaAgentGrantStore:
             or grant["model"] != model
         ):
             raise HTTPException(status_code=409, detail="NVIDIA Agent grant scope mismatch")
+        return dict(grant["executionScope"])
 
 
 _nvidia_agent_grants = _NvidiaAgentGrantStore()
+
+
+class _NvidiaResearchGrantStore:
+    """One-use exact target grants for NVIDIA web-research chat."""
+
+    def __init__(self) -> None:
+        self._grants: dict[str, dict[str, Any]] = {}
+
+    def clear(self) -> None:
+        self._grants.clear()
+
+    def _prune(self) -> None:
+        now = time.monotonic()
+        self._grants = {
+            token: grant for token, grant in self._grants.items() if grant["expires"] > now
+        }
+
+    def issue(self, binding: dict[str, str], model: str, ttl_seconds: float) -> str:
+        self._prune()
+        while len(self._grants) >= NVIDIA_GRANT_STORE_MAX_RECORDS:
+            self._grants.pop(next(iter(self._grants)))
+        token = secrets.token_urlsafe(32)
+        self._grants[token] = {
+            "binding": dict(binding),
+            "model": model,
+            "expires": time.monotonic() + min(NVIDIA_AGENT_GRANT_TTL_SECONDS, ttl_seconds),
+        }
+        return token
+
+    def consume(self, token: str, binding: dict[str, str], model: str) -> None:
+        self._prune()
+        grant = self._grants.pop(token, None)
+        if not grant:
+            raise HTTPException(status_code=409, detail="invalid or expired NVIDIA research grant")
+        if grant["binding"] != binding or grant["model"] != model:
+            raise HTTPException(status_code=409, detail="NVIDIA research grant scope mismatch")
+
+
+_nvidia_research_grants = _NvidiaResearchGrantStore()
+
+
+class _NvidiaDiscordGrantStore:
+    """One-use exact target grants for Main-authorized Discord configuration."""
+
+    def __init__(self) -> None:
+        self._grants: dict[str, dict[str, Any]] = {}
+
+    def clear(self) -> None:
+        self._grants.clear()
+
+    def _prune(self) -> None:
+        now = time.monotonic()
+        self._grants = {
+            token: grant for token, grant in self._grants.items() if grant["expires"] > now
+        }
+
+    def issue(self, binding: dict[str, str], model: str, ttl_seconds: float) -> str:
+        self._prune()
+        while len(self._grants) >= NVIDIA_GRANT_STORE_MAX_RECORDS:
+            self._grants.pop(next(iter(self._grants)))
+        token = secrets.token_urlsafe(32)
+        self._grants[token] = {
+            "binding": dict(binding),
+            "model": model,
+            "expires": time.monotonic() + min(NVIDIA_AGENT_GRANT_TTL_SECONDS, ttl_seconds),
+        }
+        return token
+
+    def consume(self, token: str, binding: dict[str, str], model: str) -> None:
+        self._prune()
+        grant = self._grants.pop(token, None)
+        if not grant:
+            raise HTTPException(status_code=409, detail="invalid or expired NVIDIA Discord grant")
+        if grant["binding"] != binding or grant["model"] != model:
+            raise HTTPException(status_code=409, detail="NVIDIA Discord grant scope mismatch")
+
+
+_nvidia_discord_grants = _NvidiaDiscordGrantStore()
 _agent_ledger_startup_error: str | None = None
 
 
@@ -203,6 +290,8 @@ async def _lifespan(_app: FastAPI):
                 ledger.close()
     yield
     _nvidia_agent_grants.clear()
+    _nvidia_research_grants.clear()
+    _nvidia_discord_grants.clear()
     _credential_memory.clear_secret()
     if discordbot is not None:
         await discordbot.stop()  # 앱 종료 시 디스코드 봇 게이트웨이 정리
@@ -235,7 +324,12 @@ class TokenAuthMiddleware:
         method = scope.get("method", "")
         path = scope.get("path", "")
         headers = dict(scope.get("headers") or [])
-        if path.startswith("/internal/credentials/") or path.startswith("/internal/nvidia-agent/"):
+        if (
+            path.startswith("/internal/credentials/")
+            or path.startswith("/internal/nvidia-agent/")
+            or path.startswith("/internal/nvidia-research/")
+            or path.startswith("/internal/nvidia-discord/")
+        ):
             supplied = headers.get(b"x-aiso-credential-token", b"").decode("latin-1")
             if not CREDENTIAL_CHANNEL_TOKEN or not hmac.compare_digest(supplied, CREDENTIAL_CHANNEL_TOKEN):
                 resp = JSONResponse({"detail": "unauthorized"}, status_code=401)
@@ -292,12 +386,137 @@ class NvidiaAgentGrantRequest(BaseModel):
     endpoint: str = Field(min_length=1, max_length=2048)
     model: str = Field(min_length=1, max_length=512)
     ttlSeconds: float = Field(gt=0, le=NVIDIA_AGENT_GRANT_TTL_SECONDS)
+    executionScope: dict[str, Any]
+
+
+class NvidiaResearchGrantRequest(BaseModel):
+    deploymentMode: Literal["build", "nim"]
+    endpoint: str = Field(min_length=1, max_length=2048)
+    model: str = Field(min_length=1, max_length=512)
+    ttlSeconds: float = Field(gt=0, le=NVIDIA_AGENT_GRANT_TTL_SECONDS)
+
+
+class NvidiaDiscordGrantRequest(NvidiaResearchGrantRequest):
+    pass
+
+
+_NVIDIA_AGENT_SCOPE_TOOLS = frozenset({
+    "update_plan", "get_system_time",
+    "list_dir", "list_tree", "read_file", "grep", "glob",
+    "search_docs", "generate_image",
+})
+
+
+def _require_local_ollama_host(value: str) -> str:
+    try:
+        parsed = urlsplit(str(value or "").strip())
+        _ = parsed.port
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="local Ollama endpoint is invalid") from error
+    host = (parsed.hostname or "").lower()
+    loopback = host == "localhost"
+    try:
+        address = ipaddress.ip_address(host)
+        loopback = loopback or (address.is_loopback and getattr(address, "ipv4_mapped", None) is None)
+    except ValueError:
+        pass
+    if (
+        parsed.scheme not in ("http", "https")
+        or not loopback
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in ("", "/")
+    ):
+        raise HTTPException(status_code=400, detail="RAG requires a local Ollama endpoint")
+    return str(value).strip().rstrip("/")
+
+
+def _validate_nvidia_agent_execution_scope(raw: dict[str, Any]) -> dict[str, Any]:
+    if set(raw) != {
+        "fingerprint", "workspace", "ragEnabled", "ollamaHost", "ragTopK", "allowedTools", "comfy"
+    }:
+        raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
+    fingerprint = raw.get("fingerprint")
+    workspace = raw.get("workspace")
+    rag_enabled = raw.get("ragEnabled")
+    ollama_host = raw.get("ollamaHost")
+    rag_top_k = raw.get("ragTopK")
+    allowed_tools = raw.get("allowedTools")
+    comfy = raw.get("comfy")
+    if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
+    if not isinstance(workspace, str) or len(workspace) > 32768 or "\x00" in workspace:
+        raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
+    if not isinstance(rag_enabled, bool) or (rag_enabled and not workspace):
+        raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
+    if (
+        not isinstance(ollama_host, str)
+        or isinstance(rag_top_k, bool)
+        or not isinstance(rag_top_k, int)
+        or rag_top_k < 0
+        or rag_top_k > 20
+        or (rag_enabled and (not ollama_host or rag_top_k < 1))
+        or (not rag_enabled and (ollama_host or rag_top_k != 0))
+    ):
+        raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
+    if rag_enabled:
+        _require_local_ollama_host(ollama_host)
+    if (
+        not isinstance(allowed_tools, list)
+        or len(allowed_tools) > len(_NVIDIA_AGENT_SCOPE_TOOLS)
+        or any(not isinstance(name, str) or name not in _NVIDIA_AGENT_SCOPE_TOOLS for name in allowed_tools)
+        or len(set(allowed_tools)) != len(allowed_tools)
+    ):
+        raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
+    required = {"update_plan", "get_system_time"}
+    if not required.issubset(allowed_tools):
+        raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
+    workspace_tools = {"list_dir", "list_tree", "read_file", "grep", "glob"}
+    if not workspace and any(name in workspace_tools or name == "search_docs" for name in allowed_tools):
+        raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
+    if ("search_docs" in allowed_tools) != rag_enabled:
+        raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
+    if not isinstance(comfy, dict) or set(comfy) != {
+        "enabled", "baseUrl", "profiles", "selectionMode", "selectedProfileId"
+    }:
+        raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
+    enabled = comfy.get("enabled")
+    profiles = comfy.get("profiles")
+    selection_mode = comfy.get("selectionMode")
+    selected_profile_id = comfy.get("selectedProfileId")
+    if (
+        not isinstance(enabled, bool)
+        or not isinstance(comfy.get("baseUrl"), str)
+        or not isinstance(profiles, list)
+        or len(profiles) > 100
+        or selection_mode not in ("auto", "manual")
+        or (selected_profile_id is not None and not isinstance(selected_profile_id, str))
+        or ("generate_image" in allowed_tools) != enabled
+    ):
+        raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
+    if enabled:
+        if not comfy["baseUrl"] or not profiles:
+            raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
+        if selection_mode == "manual" and not selected_profile_id:
+            raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
+    elif comfy["baseUrl"] or profiles or selected_profile_id is not None:
+        raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
+    try:
+        if len(json.dumps(raw, ensure_ascii=False)) > 1_000_000:
+            raise HTTPException(status_code=413, detail="NVIDIA Agent data scope is too large")
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope") from error
+    return json.loads(json.dumps(raw, ensure_ascii=False))
 
 
 @app.post("/internal/credentials/set")
 async def credential_set(request: Request, body: CredentialSetRequest):
     _credential_nonce(request)
     _nvidia_agent_grants.clear()
+    _nvidia_research_grants.clear()
+    _nvidia_discord_grants.clear()
     binding = _credential_binding(body.deploymentMode, body.endpoint)
     _credential_memory.set(binding, body.apiKey)
     return {"ok": True}
@@ -307,6 +526,8 @@ async def credential_set(request: Request, body: CredentialSetRequest):
 async def credential_clear(request: Request):
     _credential_nonce(request)
     _nvidia_agent_grants.clear()
+    _nvidia_research_grants.clear()
+    _nvidia_discord_grants.clear()
     _credential_memory.clear_secret()
     return {"ok": True}
 
@@ -315,6 +536,8 @@ async def credential_clear(request: Request):
 async def credential_bind(request: Request, body: CredentialBindRequest):
     _credential_nonce(request)
     _nvidia_agent_grants.clear()
+    _nvidia_research_grants.clear()
+    _nvidia_discord_grants.clear()
     binding = _credential_binding(body.deploymentMode, body.endpoint)
     if body.deploymentMode == "build":
         raise HTTPException(status_code=400, detail="NVIDIA Build requires a credential")
@@ -340,6 +563,7 @@ async def nvidia_agent_grant(request: Request, body: NvidiaAgentGrantRequest):
         assistant_turn_id=body.assistantTurnId,
         binding=binding,
         model=body.model.strip(),
+        execution_scope=_validate_nvidia_agent_execution_scope(body.executionScope),
         ttl_seconds=body.ttlSeconds,
     )
     return {"grantId": token, "expiresInSeconds": body.ttlSeconds}
@@ -349,6 +573,42 @@ async def nvidia_agent_grant(request: Request, body: NvidiaAgentGrantRequest):
 async def nvidia_agent_grant_clear(request: Request):
     _credential_nonce(request)
     _nvidia_agent_grants.clear()
+    return {"ok": True}
+
+
+@app.post("/internal/nvidia-research/grant")
+async def nvidia_research_grant(request: Request, body: NvidiaResearchGrantRequest):
+    _credential_nonce(request)
+    binding = _credential_binding(body.deploymentMode, body.endpoint)
+    credential = _credential_memory.credential_for(binding)
+    if body.deploymentMode == "build" and not credential:
+        raise HTTPException(status_code=409, detail="NVIDIA credential is not ready")
+    token = _nvidia_research_grants.issue(binding, body.model.strip(), body.ttlSeconds)
+    return {"grantId": token, "expiresInSeconds": body.ttlSeconds}
+
+
+@app.post("/internal/nvidia-research/clear")
+async def nvidia_research_grant_clear(request: Request):
+    _credential_nonce(request)
+    _nvidia_research_grants.clear()
+    return {"ok": True}
+
+
+@app.post("/internal/nvidia-discord/grant")
+async def nvidia_discord_grant(request: Request, body: NvidiaDiscordGrantRequest):
+    _credential_nonce(request)
+    binding = _credential_binding(body.deploymentMode, body.endpoint)
+    credential = _credential_memory.credential_for(binding)
+    if body.deploymentMode == "build" and not credential:
+        raise HTTPException(status_code=409, detail="NVIDIA credential is not ready")
+    token = _nvidia_discord_grants.issue(binding, body.model.strip(), body.ttlSeconds)
+    return {"grantId": token, "expiresInSeconds": body.ttlSeconds}
+
+
+@app.post("/internal/nvidia-discord/clear")
+async def nvidia_discord_grant_clear(request: Request):
+    _credential_nonce(request)
+    _nvidia_discord_grants.clear()
     return {"ok": True}
 
 
@@ -431,6 +691,7 @@ class ChatRequest(BaseModel):
     keep_alive: str = "30m"
     # 웹 검색(리서치) — 켜면 web_search·web_fetch 조사 루프로 흐른다(파일 툴 없음). 기본 꺼짐(로컬 처리).
     research: bool = False
+    nvidia_research_grant: str = ""
 
 
 # ---- 라이브 미리보기: 작업 폴더를 정적 서빙 (우측 패널 iframe이 이걸 띄운다) ----
@@ -592,7 +853,11 @@ async def _prepare_model(host: str, model: str) -> LlmModelRuntime:
 @app.post("/chat")
 async def chat(req: ChatRequest):
     """NDJSON 스트리밍 채팅. think(추론 강도)는 지원 모델(gemma4·gpt-oss 등)에 적용된다."""
-    host = (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
+    host = (
+        _require_local_ollama_host(req.ollama_host or DEFAULT_OLLAMA)
+        if req.provider == "nvidia" and req.research
+        else (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
+    )
     runtime: LlmRuntime | None = None
     if req.provider == "ollama":
         runtime = create_runtime("ollama", host)
@@ -609,12 +874,6 @@ async def chat(req: ChatRequest):
 
     async def gen():
         if req.provider == "nvidia":
-            if req.research:
-                yield json.dumps(
-                    {"type": "error", "error": "NVIDIA 웹 조사 채팅은 Gate 4 이후에 지원합니다. 웹 검색을 끄고 일반 채팅을 사용하세요."},
-                    ensure_ascii=False,
-                ) + "\n"
-                return
             if not req.model.strip():
                 yield json.dumps(
                     {"type": "error", "error": "NVIDIA 모델명을 설정해 주세요."}, ensure_ascii=False
@@ -624,6 +883,10 @@ async def chat(req: ChatRequest):
                 mode = req.deployment_mode or "build"
                 endpoint = canonicalize_nvidia_endpoint(mode, req.endpoint or "")
                 binding = {"deploymentMode": mode, "endpoint": endpoint}
+                if req.research:
+                    _nvidia_research_grants.consume(
+                        req.nvidia_research_grant, binding, req.model.strip()
+                    )
                 credential = _credential_memory.credential_for(binding)
                 if mode == "build" and not credential:
                     raise ValueError("NVIDIA Build API 키가 준비되지 않았습니다.")
@@ -633,7 +896,21 @@ async def chat(req: ChatRequest):
                     credential=credential,
                     deployment_mode=mode,
                 )
-                chat_stream = _stream_chat(nvidia_runtime, base)
+                chat_stream = (
+                    run_research_chat(
+                        host=host,
+                        model=req.model,
+                        messages=[{"role": m.role, "content": m.content} for m in req.messages],
+                        reasoning_effort=req.reasoning_effort,
+                        temperature=req.temperature,
+                        context_length=req.context_length,
+                        keep_alive=req.keep_alive,
+                        runtime=nvidia_runtime,
+                        strict_tool_protocol=True,
+                    )
+                    if req.research
+                    else _stream_chat(nvidia_runtime, base)
+                )
                 completed = False
                 try:
                     async for chunk in chat_stream:
@@ -736,6 +1013,9 @@ async def _discord_step(
     keep_alive: str,
     host: str,
     tools: list | None = None,
+    provider: Literal["ollama", "nvidia"] = "ollama",
+    deployment_mode: Literal["build", "nim"] | None = None,
+    endpoint: str | None = None,
 ) -> dict:
     """디스코드 봇용 한 턴 생성 — 전체 텍스트와 툴 호출을 모아 돌려준다(오프로드 사다리 재사용)."""
     base = LlmRequest(
@@ -746,20 +1026,43 @@ async def _discord_step(
         max_output_tokens=MAX_GEN_TOKENS,
         provider_options={"keep_alive": keep_alive, "num_ctx": context_length},
     )
-    runtime = create_runtime("ollama", host)
-    model_runtime = await _prepare_model(host, model)
+    if provider == "nvidia":
+        mode = deployment_mode or "build"
+        exact_endpoint = canonicalize_nvidia_endpoint(mode, endpoint or "")
+        binding = {"deploymentMode": mode, "endpoint": exact_endpoint}
+        credential = _credential_memory.credential_for(binding)
+        if mode == "build" and not credential:
+            return {"content": "(NVIDIA 자격 증명이 준비되지 않았습니다.)", "tool_calls": []}
+        runtime = create_runtime(
+            "nvidia", exact_endpoint, credential=credential, deployment_mode=mode
+        )
+        model_runtime = await runtime.prepare_model(model)
+    else:
+        runtime = create_runtime("ollama", host)
+        model_runtime = await _prepare_model(host, model)
     attempts = runtime.prepare_attempts(base, "medium", model_runtime)
     for i, attempt in enumerate(attempts):
         parse_tries = 0
         while True:  # 파싱오류는 같은 payload 재생성(에이전트 경로와 동일 회복 계약), 그 외는 아래에서 분기
             try:
                 parts: list[str] = []
+                final_content: str | None = None
                 calls: list = []
-                chat_stream = _stream_chat(runtime, attempt)
+                chat_stream = (
+                    _chat_turn(host, attempt, runtime, strict_tool_protocol=True)
+                    if provider == "nvidia"
+                    else _stream_chat(runtime, attempt)
+                )
                 chat_completed = False
                 try:
                     async for chunk in chat_stream:
-                        if chunk.get("type") == "content":
+                        if chunk.get("_final"):
+                            if provider == "nvidia":
+                                final_content = chunk.get("content", "")
+                            else:
+                                parts.append(chunk.get("content", ""))
+                            calls.extend(chunk.get("tool_calls") or [])
+                        elif chunk.get("type") == "content":
                             parts.append(chunk["text"])
                         elif chunk.get("type") == "tool_calls":
                             calls.extend(chunk["calls"])
@@ -767,16 +1070,21 @@ async def _discord_step(
                 finally:
                     if not chat_completed:
                         await chat_stream.aclose()
-                return {"content": "".join(parts).strip(), "tool_calls": calls}
+                content = final_content if provider == "nvidia" and final_content is not None else "".join(parts)
+                return {"content": content.strip(), "tool_calls": calls}
             except LlmProviderError as e:
                 # 모델이 도구를 지원하지 않으면(400) 도구 없이 한 번 더 시도(도구 못 붙인다고 채팅 전체가 죽지 않게).
-                if tools and e.kind is LlmFailureKind.TOOLS_UNSUPPORTED:
+                if provider == "ollama" and tools and e.kind is LlmFailureKind.TOOLS_UNSUPPORTED:
                     return await _discord_step(
                         messages, model=model, context_length=context_length,
                         keep_alive=keep_alive, host=host, tools=None,
                     )
                 # gpt-oss 툴콜 파싱 오류 → 같은 payload로 재생성(대개 회복). 안 그러면 서버구성이 무응답으로 실패.
-                if e.kind is LlmFailureKind.TOOL_PARSE and parse_tries < MAX_DISCORD_PARSE_RETRIES:
+                if (
+                    provider == "ollama"
+                    and e.kind is LlmFailureKind.TOOL_PARSE
+                    and parse_tries < MAX_DISCORD_PARSE_RETRIES
+                ):
                     parse_tries += 1
                     continue
                 if i < len(attempts) - 1 and e.kind in (
@@ -791,26 +1099,46 @@ async def _discord_step(
 
 
 async def _discord_generate(
-    messages: list, *, model: str, context_length: int, keep_alive: str, host: str
+    messages: list, *, model: str, context_length: int, keep_alive: str, host: str,
+    provider: Literal["ollama", "nvidia"] = "ollama",
+    deployment_mode: Literal["build", "nim"] | None = None,
+    endpoint: str | None = None,
 ) -> str:
     """디스코드 봇용 — 전체 응답 텍스트만 필요할 때(_discord_step의 얇은 래퍼)."""
     r = await _discord_step(
-        messages, model=model, context_length=context_length, keep_alive=keep_alive, host=host
+        messages, model=model, context_length=context_length, keep_alive=keep_alive, host=host,
+        provider=provider, deployment_mode=deployment_mode, endpoint=endpoint,
     )
     return r["content"] or "(빈 응답)"
 
 
 async def _discord_research(
-    messages: list, *, model: str, context_length: int, keep_alive: str, host: str
+    messages: list, *, model: str, context_length: int, keep_alive: str, host: str,
+    provider: Literal["ollama", "nvidia"] = "ollama",
+    deployment_mode: Literal["build", "nim"] | None = None,
+    endpoint: str | None = None,
 ) -> str:
     """브리핑 예약용 — 웹 조사 루프(run_research_chat)를 돌려 최종 본문 텍스트를 모아 돌려준다."""
     parts: list[str] = []
+    runtime = None
+    if provider == "nvidia":
+        mode = deployment_mode or "build"
+        exact_endpoint = canonicalize_nvidia_endpoint(mode, endpoint or "")
+        binding = {"deploymentMode": mode, "endpoint": exact_endpoint}
+        credential = _credential_memory.credential_for(binding)
+        if mode == "build" and not credential:
+            return "(브리핑 생성 실패: NVIDIA 자격 증명이 준비되지 않았습니다.)"
+        runtime = create_runtime(
+            "nvidia", exact_endpoint, credential=credential, deployment_mode=mode
+        )
     research_stream = run_research_chat(
         host=host, model=model,
         messages=[{"role": m["role"], "content": m["content"]} for m in messages],
         context_length=context_length, keep_alive=keep_alive,
+        runtime=runtime, strict_tool_protocol=provider == "nvidia",
     )
     research_completed = False
+    terminal_failure = False
     try:
         async for ev in research_stream:
             t = ev.get("type")
@@ -820,12 +1148,16 @@ async def _discord_research(
                 # 리서치 루프가 '스니펫만 본 임시 답'을 폐기하라는 신호 — 누적분을 버린다
                 # (안 그러면 서두·폐기 초안·최종답이 뒤섞인 브리핑이 자율 전송된다).
                 parts.clear()
+            elif t in ("error", "incomplete", "cancelled"):
+                terminal_failure = True
         research_completed = True
     except Exception as e:  # noqa: BLE001
         return f"(브리핑 생성 실패: {e})"
     finally:
         if not research_completed:
             await research_stream.aclose()
+    if terminal_failure:
+        return "(브리핑 생성 실패: 선택한 모델의 조사 응답이 안전하게 완료되지 않았습니다.)"
     return "".join(parts).strip() or "(빈 브리핑)"
 
 
@@ -834,10 +1166,14 @@ class DiscordConfig(BaseModel):
     token: str = ""
     # 소유자·채널·허용목록은 런타임 자동 판별/동적 관리 — 여기서 받지 않는다.
     data_dir: str = ""  # 봇 동적 상태(guild·channel·allowlist) 영속 폴더
+    provider: Literal["ollama", "nvidia"] = "ollama"
+    deployment_mode: Literal["build", "nim"] | None = None
+    endpoint: str = ""
     model: str = "gemma4:12b"
     context_length: int = 16384
     keep_alive: str = "30m"
     ollama_host: str | None = None
+    nvidia_runtime_grant: str = Field(default="", max_length=256)
 
 
 @app.post("/discord/config")
@@ -847,7 +1183,22 @@ async def discord_config_ep(req: DiscordConfig):
     봇 토큰은 여기서 받아 discordbot 프로세스 메모리에만 둔다(env·디스크 미기록)."""
     if discordbot is None:
         raise HTTPException(status_code=503, detail="discord.py가 설치되어 있지 않습니다.")
-    host = (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
+    host = _require_local_ollama_host(req.ollama_host or DEFAULT_OLLAMA)
+    exact_endpoint = ""
+    if req.provider == "nvidia":
+        try:
+            mode = req.deployment_mode or "build"
+            exact_endpoint = canonicalize_nvidia_endpoint(mode, req.endpoint)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="invalid NVIDIA Discord target") from error
+        if req.enabled:
+            binding = {"deploymentMode": mode, "endpoint": exact_endpoint}
+            _nvidia_discord_grants.consume(
+                req.nvidia_runtime_grant, binding, req.model.strip()
+            )
+            credential = _credential_memory.credential_for(binding)
+            if mode == "build" and not credential:
+                raise HTTPException(status_code=409, detail="NVIDIA credential is not ready")
 
     async def gen(messages: list) -> str:
         return await _discord_generate(
@@ -856,6 +1207,9 @@ async def discord_config_ep(req: DiscordConfig):
             context_length=req.context_length,
             keep_alive=req.keep_alive,
             host=host,
+            provider=req.provider,
+            deployment_mode=req.deployment_mode,
+            endpoint=exact_endpoint,
         )
 
     async def step(messages: list, tools: list | None = None) -> dict:
@@ -866,6 +1220,9 @@ async def discord_config_ep(req: DiscordConfig):
             keep_alive=req.keep_alive,
             host=host,
             tools=tools,
+            provider=req.provider,
+            deployment_mode=req.deployment_mode,
+            endpoint=exact_endpoint,
         )
 
     async def research(messages: list) -> str:
@@ -875,9 +1232,16 @@ async def discord_config_ep(req: DiscordConfig):
             context_length=req.context_length,
             keep_alive=req.keep_alive,
             host=host,
+            provider=req.provider,
+            deployment_mode=req.deployment_mode,
+            endpoint=exact_endpoint,
         )
 
-    await discordbot.apply_config(req.model_dump(), gen, step, research)
+    # The one-use bearer authorizes this configuration only and is never kept
+    # in the long-lived Discord bot state.
+    await discordbot.apply_config(
+        req.model_dump(exclude={"nvidia_runtime_grant"}), gen, step, research
+    )
     return {"ok": True, **discordbot.status()}
 
 
@@ -923,7 +1287,7 @@ async def ollama_unload(req: UnloadRequest):
 
     LLM runtime이 현재 적재 모델을 찾아 best-effort로 해제한다.
     생성 중인 모델은 그 요청이 끝난 뒤 내려간다(Ollama가 직렬 처리)."""
-    host = (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
+    host = _require_local_ollama_host(req.ollama_host or DEFAULT_OLLAMA)
     try:
         unloaded = await create_runtime("ollama", host).release_accelerator_memory()
         return {"ok": True, "unloaded": unloaded}
@@ -973,13 +1337,14 @@ async def agent(req: AgentRequest):
     """에이전트 하네스 — 파일 툴 콜링 루프. NDJSON 이벤트 스트림."""
     runtime: LlmRuntime | None = None
     ledger: AgentExecutionLedger | None = None
+    nvidia_execution_scope: dict[str, Any] | None = None
     if req.provider == "nvidia":
         if not req.deployment_mode or not req.endpoint or not req.model.strip():
             raise HTTPException(status_code=400, detail="NVIDIA Agent target is incomplete")
         if len(req.session_id) < 16 or len(req.assistant_turn_id) < 16 or not req.nvidia_grant:
             raise HTTPException(status_code=400, detail="NVIDIA Agent execution scope is invalid")
         binding = _credential_binding(req.deployment_mode, req.endpoint)
-        _nvidia_agent_grants.consume(
+        nvidia_execution_scope = _nvidia_agent_grants.consume(
             req.nvidia_grant,
             session_id=req.session_id,
             assistant_turn_id=req.assistant_turn_id,
@@ -995,17 +1360,45 @@ async def agent(req: AgentRequest):
         runtime = _nvidia_runtime_for_target(
             NvidiaTargetRequest(deployment_mode=req.deployment_mode, endpoint=binding["endpoint"])
         )
-    host = (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
+    host = (
+        _require_local_ollama_host(str(nvidia_execution_scope.get("ollamaHost") or DEFAULT_OLLAMA))
+        if nvidia_execution_scope is not None and nvidia_execution_scope.get("ragEnabled")
+        else (
+            DEFAULT_OLLAMA.rstrip("/")
+            if nvidia_execution_scope is not None
+            else (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
+        )
+    )
+    authoritative_workspace = (
+        str(nvidia_execution_scope.get("workspace") or "")
+        if nvidia_execution_scope is not None
+        else req.workspace
+    )
+    authoritative_rag = (
+        bool(nvidia_execution_scope.get("ragEnabled"))
+        if nvidia_execution_scope is not None
+        else req.rag_enabled
+    )
+    authoritative_rag_top_k = (
+        int(nvidia_execution_scope.get("ragTopK") or 0)
+        if nvidia_execution_scope is not None else req.rag_top_k
+    )
+    authoritative_comfy = (
+        nvidia_execution_scope.get("comfy")
+        if nvidia_execution_scope is not None
+        else None
+    )
     global _preview_root
+    _preview_root = None
     try:  # 에이전트가 만드는 파일을 우측 미리보기에서 바로 볼 수 있게 루트 설정
-        _preview_root = validate_workspace(req.workspace)
+        _preview_root = validate_workspace(authoritative_workspace)
     except ToolError:
         pass
 
     async def gen():
         agent_stream = run_agent(
             host=host,
-            workspace="" if req.provider == "nvidia" else req.workspace,
+            workspace=authoritative_workspace,
             model=req.model,
             messages=[{"role": m.role, "content": m.content} for m in req.messages],
             reasoning_effort=req.reasoning_effort,
@@ -1013,17 +1406,35 @@ async def agent(req: AgentRequest):
             context_length=req.context_length,
             approval_mode=req.approval_mode,
             session_id=req.session_id,
-            rag_enabled=False if req.provider == "nvidia" else req.rag_enabled,
-            rag_top_k=req.rag_top_k,
+            rag_enabled=authoritative_rag,
+            rag_top_k=authoritative_rag_top_k,
             keep_alive=req.keep_alive,
-            comfy_base_url=None if req.provider == "nvidia" else req.comfy_base_url,
-            comfy_profiles=[] if req.provider == "nvidia" else req.comfy_profiles,
-            comfy_selection_mode=req.comfy_selection_mode,
-            selected_comfy_model_id=req.selected_comfy_model_id,
+            comfy_base_url=(
+                str(authoritative_comfy.get("baseUrl") or "")
+                if isinstance(authoritative_comfy, dict) and authoritative_comfy.get("enabled")
+                else (None if req.provider == "nvidia" else req.comfy_base_url)
+            ),
+            comfy_profiles=(
+                list(authoritative_comfy.get("profiles") or [])
+                if isinstance(authoritative_comfy, dict) and authoritative_comfy.get("enabled")
+                else ([] if req.provider == "nvidia" else req.comfy_profiles)
+            ),
+            comfy_selection_mode=(
+                str(authoritative_comfy.get("selectionMode") or "auto")
+                if isinstance(authoritative_comfy, dict) else req.comfy_selection_mode
+            ),
+            selected_comfy_model_id=(
+                authoritative_comfy.get("selectedProfileId")
+                if isinstance(authoritative_comfy, dict) else req.selected_comfy_model_id
+            ),
             provider=req.provider,
             runtime=runtime,
             assistant_turn_id=req.assistant_turn_id,
             execution_ledger=ledger,
+            nvidia_allowed_tools=(
+                list(nvidia_execution_scope.get("allowedTools") or [])
+                if nvidia_execution_scope is not None else None
+            ),
         )
         agent_completed = False
         try:
@@ -1062,7 +1473,7 @@ class RagIndexRequest(BaseModel):
 @app.post("/rag/index")
 async def rag_index(req: RagIndexRequest):
     """작업 폴더를 색인한다. 진행 상황을 NDJSON으로 스트리밍."""
-    host = (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
+    host = _require_local_ollama_host(req.ollama_host or DEFAULT_OLLAMA)
 
     async def gen():
         try:
@@ -1162,7 +1573,7 @@ class RagSearchRequest(BaseModel):
 @app.post("/rag/search")
 async def rag_search_ep(req: RagSearchRequest):
     """의미 검색 (진단·수동 검색용)."""
-    host = (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
+    host = _require_local_ollama_host(req.ollama_host or DEFAULT_OLLAMA)
     try:
         root = validate_workspace(req.workspace)
     except ToolError as e:

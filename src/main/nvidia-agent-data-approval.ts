@@ -1,0 +1,392 @@
+import { createHash, randomBytes } from 'node:crypto'
+import { isIP } from 'node:net'
+import type { AppSettings } from '../shared/settings.ts'
+import { getComfyAgentReadiness, type ComfyModelProfile } from '../shared/comfy-model.ts'
+import {
+  canonicalizeNvidiaBinding,
+  type NvidiaAgentDataManifest,
+  type NvidiaAgentDataScopeRequest,
+  type NvidiaAgentManifestDecisionInput,
+  type NvidiaAgentManifestDescribeInput,
+  type NvidiaCredentialBinding
+} from '../shared/nvidia.ts'
+
+export const NVIDIA_AGENT_BASE_TOOLS = ['update_plan', 'get_system_time'] as const
+export const NVIDIA_AGENT_WORKSPACE_TOOLS = [
+  'list_dir', 'list_tree', 'read_file', 'grep', 'glob'
+] as const
+export const NVIDIA_AGENT_RAG_TOOLS = ['search_docs'] as const
+export const NVIDIA_AGENT_IMAGE_TOOLS = ['generate_image'] as const
+export const NVIDIA_AGENT_MANIFEST_TTL_MS = 10 * 60 * 1000
+
+export interface NvidiaAgentExecutionScope {
+  fingerprint: string
+  workspace: string
+  ragEnabled: boolean
+  ollamaHost: string
+  ragTopK: number
+  allowedTools: string[]
+  comfy: {
+    enabled: boolean
+    baseUrl: string
+    profiles: ComfyModelProfile[]
+    selectionMode: 'auto' | 'manual'
+    selectedProfileId: string | null
+  }
+}
+
+export interface NvidiaAgentManifestAuthority {
+  manifest: Omit<NvidiaAgentDataManifest, 'manifestId' | 'expiresInSeconds'>
+  request: NvidiaAgentDataScopeRequest
+  target: NvidiaCredentialBinding & { model: string }
+  executionScope: NvidiaAgentExecutionScope
+}
+
+interface PendingRecord extends NvidiaAgentManifestAuthority {
+  manifestId: string
+  expiresAt: number
+}
+
+interface ApprovedRecord extends NvidiaAgentManifestAuthority {
+  approvedAt: number
+  expiresAt: number
+}
+
+function validSessionId(value: unknown): value is string {
+  return typeof value === 'string' && value.length >= 16 && value.length <= 256 &&
+    /^[A-Za-z0-9._:-]+$/.test(value)
+}
+
+function validateScope(raw: unknown): NvidiaAgentDataScopeRequest {
+  if (!raw || typeof raw !== 'object') throw new Error('NVIDIA Agent 전송 범위를 확인할 수 없습니다.')
+  const value = raw as Record<string, unknown>
+  if (
+    typeof value.workspace !== 'boolean' ||
+    typeof value.rag !== 'boolean' ||
+    typeof value.image !== 'boolean'
+  ) {
+    throw new Error('NVIDIA Agent 전송 범위 형식이 올바르지 않습니다.')
+  }
+  if (value.rag && !value.workspace) {
+    throw new Error('RAG 결과 전송은 작업 폴더 전송 승인과 함께 선택해야 합니다.')
+  }
+  let selectedComfyModelId: string | undefined
+  if (value.selectedComfyModelId !== undefined) {
+    if (
+      typeof value.selectedComfyModelId !== 'string' ||
+      !/^[A-Za-z0-9._-]{1,128}$/.test(value.selectedComfyModelId)
+    ) {
+      throw new Error('ComfyUI 선택 정보가 올바르지 않습니다.')
+    }
+    selectedComfyModelId = value.selectedComfyModelId
+  }
+  return {
+    workspace: value.workspace,
+    rag: value.rag,
+    image: value.image,
+    ...(selectedComfyModelId ? { selectedComfyModelId } : {})
+  }
+}
+
+export function validateManifestDescribeInput(raw: unknown): NvidiaAgentManifestDescribeInput {
+  if (!raw || typeof raw !== 'object') throw new Error('NVIDIA Agent 세션 정보가 필요합니다.')
+  const value = raw as Record<string, unknown>
+  if (!validSessionId(value.sessionId)) throw new Error('NVIDIA Agent 세션 형식이 올바르지 않습니다.')
+  return { sessionId: value.sessionId, scope: validateScope(value.scope) }
+}
+
+export function validateManifestDecisionInput(raw: unknown): NvidiaAgentManifestDecisionInput {
+  if (!raw || typeof raw !== 'object') throw new Error('NVIDIA Agent 승인 정보가 필요합니다.')
+  const value = raw as Record<string, unknown>
+  if (
+    !validSessionId(value.sessionId) ||
+    typeof value.manifestId !== 'string' ||
+    !/^[A-Za-z0-9_-]{32,128}$/.test(value.manifestId) ||
+    typeof value.approved !== 'boolean'
+  ) {
+    throw new Error('NVIDIA Agent 승인 형식이 올바르지 않습니다.')
+  }
+  return {
+    sessionId: value.sessionId,
+    manifestId: value.manifestId,
+    approved: value.approved
+  }
+}
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function fingerprint(value: unknown): string {
+  return createHash('sha256').update(canonical(value), 'utf8').digest('hex')
+}
+
+function requireLocalOllamaHost(value: string): string {
+  let url: URL
+  try {
+    url = new URL(value.trim())
+  } catch {
+    throw new Error('로컬 Ollama 주소가 올바르지 않습니다.')
+  }
+  const host = url.hostname.toLowerCase()
+  const loopback = host === 'localhost' || host === '[::1]' || host === '::1' ||
+    (isIP(host) === 4 && host.split('.')[0] === '127')
+  if (
+    !loopback || (url.protocol !== 'http:' && url.protocol !== 'https:') ||
+    url.username || url.password || url.search || url.hash || (url.pathname && url.pathname !== '/')
+  ) {
+    throw new Error('NVIDIA Agent의 RAG는 로컬 Ollama 주소만 사용할 수 있습니다.')
+  }
+  return url.toString().replace(/\/$/, '')
+}
+
+export function buildNvidiaAgentManifestAuthority(
+  settings: AppSettings,
+  sessionId: string,
+  request: NvidiaAgentDataScopeRequest,
+  profiles: ComfyModelProfile[]
+): NvidiaAgentManifestAuthority {
+  if (settings.activeLlmProvider !== 'nvidia' || !settings.nvidiaModel.trim()) {
+    throw new Error('현재 저장된 NVIDIA Agent 대상이 없습니다.')
+  }
+  const target = {
+    ...canonicalizeNvidiaBinding({
+      deploymentMode: settings.nvidiaDeploymentMode,
+      endpoint: settings.nvidiaDeploymentMode === 'nim' ? settings.nvidiaNimEndpoint : undefined
+    }),
+    model: settings.nvidiaModel.trim()
+  }
+  if (request.workspace && !settings.workspace.trim()) {
+    throw new Error('전송할 작업 폴더가 선택되지 않았습니다.')
+  }
+  if (request.rag && (!request.workspace || !settings.ragEnabled)) {
+    throw new Error('RAG 결과 전송을 사용하려면 작업 폴더와 RAG 사용을 먼저 켜 주세요.')
+  }
+  const ollamaHost = request.rag ? requireLocalOllamaHost(settings.ollamaHost) : ''
+  const ragTopK = request.rag ? Math.max(1, Math.min(20, Math.trunc(settings.ragTopK))) : 0
+
+  const selectionMode = settings.comfyModelSelectionMode === 'manual' ? 'manual' : 'auto'
+  const selectedProfileId = request.image && selectionMode === 'manual'
+    ? request.selectedComfyModelId ?? null
+    : null
+  let imageProfiles: ComfyModelProfile[] = []
+  if (request.image) {
+    if (!settings.comfyBaseUrl.trim()) {
+      throw new Error('NVIDIA Agent에서 사용할 수 있는 로컬 ComfyUI 구성이 없습니다.')
+    }
+    if (selectionMode === 'manual') {
+      const selected = selectedProfileId
+        ? profiles.find((profile) => profile.id === selectedProfileId)
+        : undefined
+      if (!selected || !getComfyAgentReadiness(selected).ready) {
+        throw new Error('선택한 ComfyUI 모델이 Agent 실행 준비 상태가 아닙니다.')
+      }
+      imageProfiles = [structuredClone(selected)]
+    } else {
+      imageProfiles = structuredClone(profiles.filter(
+        (profile) => profile.agentEnabled && getComfyAgentReadiness(profile).ready
+      ))
+      if (imageProfiles.length === 0) {
+        throw new Error('Agent 자동 선택에 사용할 준비 완료 ComfyUI 모델이 없습니다.')
+      }
+    }
+  }
+
+  const allowedTools = [
+    ...NVIDIA_AGENT_BASE_TOOLS,
+    ...(request.workspace ? NVIDIA_AGENT_WORKSPACE_TOOLS : []),
+    ...(request.rag ? NVIDIA_AGENT_RAG_TOOLS : []),
+    ...(request.image ? NVIDIA_AGENT_IMAGE_TOOLS : [])
+  ]
+  const privateScope = {
+    target,
+    workspace: request.workspace ? settings.workspace.trim() : '',
+    ragEnabled: request.rag,
+    ollamaHost,
+    ragTopK,
+    allowedTools,
+    comfy: {
+      enabled: request.image,
+      baseUrl: request.image ? settings.comfyBaseUrl.trim() : '',
+      profiles: imageProfiles,
+      selectionMode,
+      selectedProfileId
+    } satisfies NvidiaAgentExecutionScope['comfy']
+  }
+  const scopeFingerprint = fingerprint(privateScope)
+  const localOnly = [
+    'NVIDIA API 키와 승인 토큰',
+    'ComfyUI 설치 경로·모델/체크포인트 경로·등록 정보·workflow JSON',
+    ...(request.workspace ? [] : ['작업 폴더와 파일 내용']),
+    ...(request.rag ? [] : ['로컬 RAG 검색 결과']),
+    ...(request.image ? ['로컬 이미지 파일과 상세 생성 메타데이터'] : ['ComfyUI 이미지 생성 정보']),
+    'Discord 데이터와 사용자 스킬'
+  ]
+  return {
+    request: structuredClone(request),
+    target,
+    executionScope: {
+      fingerprint: scopeFingerprint,
+      workspace: privateScope.workspace,
+      ragEnabled: privateScope.ragEnabled,
+      ollamaHost: privateScope.ollamaHost,
+      ragTopK: privateScope.ragTopK,
+      allowedTools: [...allowedTools],
+      comfy: structuredClone(privateScope.comfy)
+    },
+    manifest: {
+      schemaVersion: 1,
+      sessionId,
+      model: target.model,
+      deploymentMode: target.deploymentMode,
+      sends: {
+        conversation: true,
+        workspace: request.workspace,
+        rag: request.rag,
+        imagePrompt: request.image,
+        toolResults: [...allowedTools],
+        toolResultDetails: [
+          '계획 갱신 내용과 로컬 시스템 시각',
+          ...(request.workspace ? ['승인한 작업 폴더의 읽기 결과'] : []),
+          ...(request.rag ? ['로컬 Ollama RAG 검색 결과'] : []),
+          ...(request.image ? ['이미지 생성 성공 여부와 크기 정보'] : [])
+        ]
+      },
+      scopeDetails: {
+        workspacePath: request.workspace ? settings.workspace.trim() : null,
+        rag: { enabled: request.rag, localOllama: true, topK: ragTopK },
+        image: { enabled: request.image, selectionMode }
+      },
+      localOnly,
+      allowedTools: [...allowedTools]
+    }
+  }
+}
+
+export class NvidiaAgentDataApprovalStore {
+  private readonly pending = new Map<string, PendingRecord>()
+  private readonly approved = new Map<string, ApprovedRecord>()
+  private readonly now: () => number
+  private revision = 0
+
+  constructor(now: () => number = Date.now) {
+    this.now = now
+  }
+
+  private prune(): void {
+    const now = this.now()
+    for (const [id, record] of this.pending) {
+      if (record.expiresAt <= now) this.pending.delete(id)
+    }
+    for (const [sessionId, record] of this.approved) {
+      if (record.expiresAt <= now) this.approved.delete(sessionId)
+    }
+    while (this.pending.size > 256) this.pending.delete(this.pending.keys().next().value!)
+    while (this.approved.size > 256) this.approved.delete(this.approved.keys().next().value!)
+  }
+
+  private enforceRecordLimit(records: Map<string, unknown>): void {
+    while (records.size > 256) records.delete(records.keys().next().value!)
+  }
+
+  snapshot(): number {
+    return this.revision
+  }
+
+  isCurrent(snapshot: number): boolean {
+    return snapshot === this.revision
+  }
+
+  clearAll(): void {
+    this.pending.clear()
+    this.approved.clear()
+    this.revision++
+  }
+
+  clearSession(sessionId: string): void {
+    for (const [id, record] of this.pending) {
+      if (record.manifest.sessionId === sessionId) this.pending.delete(id)
+    }
+    this.approved.delete(sessionId)
+    this.revision++
+  }
+
+  describe(authority: NvidiaAgentManifestAuthority): NvidiaAgentDataManifest {
+    this.prune()
+    this.clearSession(authority.manifest.sessionId)
+    const manifestId = randomBytes(32).toString('base64url')
+    const expiresAt = this.now() + NVIDIA_AGENT_MANIFEST_TTL_MS
+    this.pending.set(manifestId, {
+      ...structuredClone(authority),
+      manifestId,
+      expiresAt
+    })
+    this.enforceRecordLimit(this.pending)
+    return {
+      ...structuredClone(authority.manifest),
+      manifestId,
+      expiresInSeconds: NVIDIA_AGENT_MANIFEST_TTL_MS / 1000
+    }
+  }
+
+  decide(input: NvidiaAgentManifestDecisionInput): { approved: boolean } {
+    this.prune()
+    const pending = this.pending.get(input.manifestId)
+    this.pending.delete(input.manifestId)
+    this.revision++
+    if (!pending || pending.manifest.sessionId !== input.sessionId || pending.expiresAt <= this.now()) {
+      this.approved.delete(input.sessionId)
+      throw new Error('NVIDIA Agent 전송 승인이 만료되었거나 현재 세션과 일치하지 않습니다.')
+    }
+    if (!input.approved) {
+      this.approved.delete(input.sessionId)
+      return { approved: false }
+    }
+    this.approved.set(input.sessionId, {
+      request: structuredClone(pending.request),
+      target: structuredClone(pending.target),
+      executionScope: structuredClone(pending.executionScope),
+      manifest: structuredClone(pending.manifest),
+      approvedAt: this.now(),
+      expiresAt: pending.expiresAt
+    })
+    this.enforceRecordLimit(this.approved)
+    return { approved: true }
+  }
+
+  approvedRequest(sessionId: string): NvidiaAgentDataScopeRequest {
+    this.prune()
+    const record = this.approved.get(sessionId)
+    if (!record) throw new Error('이 NVIDIA Agent 세션의 전송 범위가 승인되지 않았습니다.')
+    return structuredClone(record.request)
+  }
+
+  requireExact(sessionId: string, authority: NvidiaAgentManifestAuthority): NvidiaAgentExecutionScope {
+    this.prune()
+    const record = this.approved.get(sessionId)
+    if (
+      !record ||
+      record.executionScope.fingerprint !== authority.executionScope.fingerprint ||
+      record.target.deploymentMode !== authority.target.deploymentMode ||
+      record.target.endpoint !== authority.target.endpoint ||
+      record.target.model !== authority.target.model
+    ) {
+      throw new Error('NVIDIA Agent 전송 범위가 변경되어 다시 승인이 필요합니다.')
+    }
+    return structuredClone(authority.executionScope)
+  }
+
+  consumeExact(sessionId: string, authority: NvidiaAgentManifestAuthority): NvidiaAgentExecutionScope {
+    const scope = this.requireExact(sessionId, authority)
+    this.approved.delete(sessionId)
+    this.revision++
+    return scope
+  }
+}

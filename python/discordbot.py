@@ -467,21 +467,65 @@ async def _tool_chat(channel, author_id: str, convo: list) -> str:
         discordsched.SCHEDULE_ADD_SCHEMA, discordsched.SCHEDULE_LIST_SCHEMA,
         discordsched.SCHEDULE_REMOVE_SCHEMA,
     ]
+    allowed_tool_names = {
+        str((tool.get("function") or {}).get("name") or "") for tool in tools
+    }
     convo = list(convo)
+    completed_provider_calls: dict[str, tuple[str, str]] = {}
     for _ in range(MAX_TOOL_TURNS):
         async with _S.gen_lock:  # 생성만 직렬화한다 — 뒤이은 승인 대기는 락 밖에서
             resp = await _S.step(convo, tools)
         calls = resp.get("tool_calls") or []
         if not calls:
             return (resp.get("content") or "").strip() or "(빈 응답)"
-        convo.append({"role": "assistant", "content": resp.get("content") or "", "tool_calls": calls})
+        requested_names = [_parse_call(call)[0] for call in calls]
+        if any(name not in allowed_tool_names for name in requested_names):
+            return "(모델이 Discord 승인 범위 밖의 도구를 요청해 실행하지 않았습니다.)"
+        batch_provider_ids: set[str] = set()
+        batch_signatures: list[tuple[str | None, str]] = []
         for call in calls:
+            provider_id = call.get("provider_tool_call_id") or call.get("id")
             name, args = _parse_call(call)
-            try:
-                result = await _run_bot_tool(channel, author_id, name, args)
-            except Exception as e:  # noqa: BLE001 — 도구 실패는 모델에게 알리고 계속
-                result = f"[오류] {e}"
-            convo.append({"role": "tool", "content": result})
+            signature = f"{name}:{json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
+            if provider_id:
+                if provider_id in batch_provider_ids:
+                    return "(Discord 도구 호출 ID가 한 응답에서 중복되어 실행하지 않았습니다.)"
+                batch_provider_ids.add(provider_id)
+                previous = completed_provider_calls.get(provider_id)
+                if previous is not None and previous[0] != signature:
+                    return "(Discord 도구 호출 ID가 다른 작업에 재사용되어 실행하지 않았습니다.)"
+            batch_signatures.append((provider_id, signature))
+        wire_calls = []
+        for call in calls:
+            provider_id = call.get("provider_tool_call_id") or call.get("id")
+            fn = call.get("function") or {}
+            canonical = call.get("canonical_arguments")
+            if provider_id and isinstance(canonical, str):
+                wire_calls.append({
+                    "id": provider_id,
+                    "type": "function",
+                    "function": {"name": fn.get("name", ""), "arguments": canonical},
+                })
+            else:
+                wire_calls.append(call)
+        convo.append({"role": "assistant", "content": resp.get("content") or "", "tool_calls": wire_calls})
+        for call, (provider_id, signature) in zip(calls, batch_signatures):
+            name, args = _parse_call(call)
+            previous = completed_provider_calls.get(provider_id) if provider_id else None
+            if previous is not None:
+                result = previous[1]
+            else:
+                try:
+                    result = await _run_bot_tool(channel, author_id, name, args)
+                except Exception as e:  # noqa: BLE001 — 도구 실패는 모델에게 알리고 계속
+                    result = f"[오류] {e}"
+                if provider_id:
+                    completed_provider_calls[provider_id] = (signature, result)
+            convo.append({
+                "role": "tool",
+                **({"tool_call_id": provider_id} if provider_id else {}),
+                "content": result,
+            })
     return "(작업이 너무 길어져 중단했습니다 — 요청을 나눠서 다시 시도해 주세요)"
 
 

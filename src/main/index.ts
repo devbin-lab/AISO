@@ -18,7 +18,11 @@ import {
   fetchBackendNvidiaModels,
   probeBackendNvidiaCapabilities,
   issueBackendNvidiaAgentGrant,
-  clearBackendNvidiaAgentGrants
+  clearBackendNvidiaAgentGrants,
+  issueBackendNvidiaResearchGrant,
+  clearBackendNvidiaResearchGrants,
+  issueBackendNvidiaDiscordGrant,
+  clearBackendNvidiaDiscordGrants
 } from './backend'
 import { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
 import { recordUsage, usageSummary, clearUsage } from './usage'
@@ -27,10 +31,12 @@ import {
   saveDiscordToken,
   hasDiscordToken,
   applyDiscordConfig,
+  disableDiscordConfig,
   discordStatus,
   discordSchedules,
   discordScheduleRemove,
-  clearDiscordData
+  clearDiscordData,
+  type NvidiaDiscordRuntime
 } from './discord'
 import { freezeAppDataWrites } from './appdata-guard'
 import {
@@ -40,11 +46,21 @@ import {
   saveNvidiaCredential
 } from './nvidia-credentials'
 import { prepareNvidiaExecution } from './nvidia-execution'
-import { NvidiaCapabilityCache, NvidiaCapabilityRevision } from './nvidia-capability-cache'
+import {
+  NvidiaCapabilityCache,
+  NvidiaCapabilityRevision
+} from './nvidia-capability-cache'
 import {
   commitNvidiaCapabilityMutation,
-  prepareNvidiaAgentAuthorization
+  prepareNvidiaAgentAuthorization,
+  type ExactNvidiaAgentTarget
 } from './nvidia-agent-authorization'
+import {
+  NvidiaAgentDataApprovalStore,
+  buildNvidiaAgentManifestAuthority,
+  validateManifestDecisionInput,
+  validateManifestDescribeInput
+} from './nvidia-agent-data-approval'
 import {
   destroyComfySurface,
   reloadComfySurface,
@@ -78,10 +94,20 @@ import {
   sameNvidiaBinding,
   type NvidiaCapabilityTargetInput,
   type NvidiaCredentialBinding,
-  type NvidiaCredentialBindingInput
+  type NvidiaCredentialBindingInput,
+  type NvidiaAgentSessionFinishInput
 } from '../shared/nvidia'
 import type { ComfySurfaceRequest } from '../shared/comfy'
 import type { ConversationKind, ConversationSave } from '../shared/conversation'
+import {
+  clearNvidiaCredentialWhenUnused
+} from './nvidia-runtime-demand'
+import { capabilityBoundGrantTtlSeconds } from './nvidia-grant-ttl'
+import {
+  NvidiaDiscordApplyCoordinator,
+  assertNvidiaDiscordConsentCurrent,
+  type ExactNvidiaDiscordTarget
+} from './nvidia-discord-apply'
 
 // 로컬 LLM 앱: Chromium GPU 합성이 VRAM ~2.7GB를 점유해 16GB 카드에서
 // 무거운 모델(최대 gpt-oss:20b·13.8GB) 콜드 로드가 OOM(CUDA crash) 날 수 있다.
@@ -115,6 +141,9 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let isQuitting = false
 const nvidiaCapabilityRevision = new NvidiaCapabilityRevision()
+const nvidiaAgentDataApprovals = new NvidiaAgentDataApprovalStore()
+const nvidiaDiscordApplyCoordinator = new NvidiaDiscordApplyCoordinator()
+let trustedDiscordNvidiaRuntime: NvidiaDiscordRuntime | null = null
 // 로그인 자동 실행으로 켜졌으면 창을 띄우지 않고 트레이로만 시작한다.
 const startedHidden = process.argv.includes('--hidden') || app.getLoginItemSettings().wasOpenedAtLogin
 
@@ -137,13 +166,79 @@ async function revokeBackendNvidiaAgentTrust(): Promise<void> {
   }
 }
 
+async function revokeBackendNvidiaResearchTrust(): Promise<void> {
+  try {
+    await clearBackendNvidiaResearchGrants()
+  } catch (error) {
+    stopBackend()
+    throw error
+  }
+}
+
+async function revokeBackendNvidiaDiscordTrust(): Promise<void> {
+  try {
+    await clearBackendNvidiaDiscordGrants()
+  } catch (error) {
+    stopBackend()
+    throw error
+  }
+}
+
+async function revokeBackendNvidiaAllToolTrust(): Promise<void> {
+  await revokeBackendNvidiaAgentTrust()
+  await revokeBackendNvidiaResearchTrust()
+  await revokeBackendNvidiaDiscordTrust()
+}
+
+function currentApprovedNvidiaAgentScope(
+  sessionId: string,
+  target: ExactNvidiaAgentTarget,
+  consume = false
+) {
+  const request = nvidiaAgentDataApprovals.approvedRequest(sessionId)
+  const settings = loadSettings()
+  const registry = listComfyModelProfiles()
+  const authority = buildNvidiaAgentManifestAuthority(
+    settings,
+    sessionId,
+    request,
+    registry.profiles
+  )
+  if (
+    authority.target.deploymentMode !== target.deploymentMode ||
+    authority.target.endpoint !== target.endpoint ||
+    authority.target.model !== target.model
+  ) {
+    throw new Error('NVIDIA Agent 대상이 승인된 전송 manifest와 일치하지 않습니다.')
+  }
+  return consume
+    ? nvidiaAgentDataApprovals.consumeExact(sessionId, authority)
+    : nvidiaAgentDataApprovals.requireExact(sessionId, authority)
+}
+
+async function invalidateNvidiaAgentDataTrust(): Promise<void> {
+  nvidiaAgentDataApprovals.clearAll()
+  await revokeBackendNvidiaAgentTrust()
+}
+
+async function invalidateDiscordNvidiaRuntime(): Promise<void> {
+  trustedDiscordNvidiaRuntime = null
+  await revokeBackendNvidiaDiscordTrust()
+  // Queue the final untrusted configuration behind any in-flight apply. The
+  // stale operation also compensates itself, and this queued write wins last.
+  await applyTrustedDiscordConfig().catch(() => {})
+}
+
 async function saveNvidiaCredentialWithTrustReset(
   binding: NvidiaCredentialBindingInput,
   apiKey: unknown
 ): Promise<void> {
+  nvidiaAgentDataApprovals.clearAll()
+  await invalidateDiscordNvidiaRuntime()
   await commitNvidiaCapabilityMutation(
     nvidiaCapabilityRevision,
     async () => {
+      await revokeBackendNvidiaAllToolTrust()
       await saveNvidiaCredential(binding, apiKey)
       try {
         await clearBackendNvidiaCredential()
@@ -156,6 +251,17 @@ async function saveNvidiaCredentialWithTrustReset(
     () => capabilityCache().clearAll(),
     () => capabilityCache().clearAll()
   )
+}
+
+async function mutateComfyRegistryWithTrustReset<T>(mutate: () => T | Promise<T>): Promise<T> {
+  await invalidateNvidiaAgentDataTrust()
+  try {
+    return await mutate()
+  } finally {
+    // Imports may run for minutes. Revoke any approval created while the old
+    // registry was still authoritative before publishing the changed registry.
+    await invalidateNvidiaAgentDataTrust()
+  }
 }
 
 function currentNvidiaBinding(settings: AppSettings): NvidiaCredentialBinding | null {
@@ -197,6 +303,53 @@ function nvidiaPreparationDeps() {
     clearSidecarCredential: clearBackendNvidiaCredential,
     sidecarStatus: backendNvidiaCredentialStatus
   }
+}
+
+async function clearNvidiaCredentialWithoutDemand(settings: AppSettings = loadSettings()): Promise<void> {
+  try {
+    await clearNvidiaCredentialWhenUnused(
+      settings,
+      trustedDiscordNvidiaRuntime,
+      clearBackendNvidiaCredential
+    )
+  } catch (error) {
+    stopBackend()
+    throw error
+  }
+}
+
+function discordNvidiaFenceDeps() {
+  return {
+    loadSettings,
+    revisionIsCurrent: (revision: number) => nvidiaCapabilityRevision.isCurrent(revision),
+    getCapability: (target: ExactNvidiaDiscordTarget) => capabilityCache().get(target)
+  }
+}
+
+async function applyTrustedDiscordConfig() {
+  return nvidiaDiscordApplyCoordinator.apply({
+    ...discordNvidiaFenceDeps(),
+    revisionSnapshot: () => nvidiaCapabilityRevision.snapshot(),
+    getTrustedRuntime: () => trustedDiscordNvidiaRuntime,
+    clearTrustedRuntimeIf: (expected) => {
+      if (trustedDiscordNvidiaRuntime === expected) trustedDiscordNvidiaRuntime = null
+    },
+    prepareExecution: async (binding) => {
+      await prepareNvidiaExecution(binding, nvidiaPreparationDeps(), 'discord')
+    },
+    issueGrant: ({ deploymentMode, endpoint, model, ttlSeconds }) => issueBackendNvidiaDiscordGrant({
+      deploymentMode,
+      endpoint,
+      model,
+      ttlSeconds
+    }),
+    revokeGrants: revokeBackendNvidiaDiscordTrust,
+    applyConfig: applyDiscordConfig,
+    disableConfig: disableDiscordConfig,
+    failClosed: stopBackend,
+    clearCredentialWhenUnused: () => clearNvidiaCredentialWithoutDemand(),
+    now: Date.now
+  })
 }
 
 async function requireUnchangedNvidiaTarget(
@@ -417,6 +570,9 @@ app.whenReady().then(() => {
   ipcMain.handle('settings:set', async (_e, patch: Partial<AppSettings>) => {
     console.log('[ipc] settings:set', Object.keys(patch ?? {}))
     const previous = loadSettings()
+    if (patch?.discordLlmProvider === 'nvidia' && previous.discordLlmProvider !== 'nvidia') {
+      throw new Error('Discord NVIDIA는 전용 전송 범위 확인을 거쳐야 활성화할 수 있습니다.')
+    }
     const next = saveSettings(patch)
     if ('comfyInstallPath' in patch && next.comfyInstallPath !== previous.comfyInstallPath) {
       // 설치본이 바뀌면 이전 ComfyUI에만 있던 파일을 새 설치본에도 있다고 가정할 수 없다.
@@ -430,31 +586,49 @@ app.whenReady().then(() => {
     }
     // 디스코드 봇 On/Off를 공용 '저장'으로 바꿔도 런타임 봇이 즉시 시작/중지되도록 재적용
     // (예전엔 '연결/적용' 버튼으로만 반영돼, 토글 후 저장하면 플래그만 바뀌고 봇 상태는 그대로였다).
-    // 공급자 전환도 즉시 재적용한다. 실행 중인 Ollama Discord 봇이 NVIDIA
-    // 선택 뒤에도 계속 남아 공급자 우회 경로가 되지 않도록 NVIDIA에서는 중지한다.
-    if ('discordEnabled' in patch || 'activeLlmProvider' in patch) void applyDiscordConfig()
-    const previousBinding = previous.activeLlmProvider === 'nvidia'
-      ? canonicalizeNvidiaBinding({
-          deploymentMode: previous.nvidiaDeploymentMode,
-          endpoint: previous.nvidiaDeploymentMode === 'nim' ? previous.nvidiaNimEndpoint : undefined
-        })
-      : null
-    const nextBinding = next.activeLlmProvider === 'nvidia'
-      ? canonicalizeNvidiaBinding({
-          deploymentMode: next.nvidiaDeploymentMode,
-          endpoint: next.nvidiaDeploymentMode === 'nim' ? next.nvidiaNimEndpoint : undefined
-        })
-      : null
-    const nvidiaTrustChanged = (
-      previous.activeLlmProvider !== next.activeLlmProvider ||
+    const previousBinding = canonicalizeNvidiaBinding({
+      deploymentMode: previous.nvidiaDeploymentMode,
+      endpoint: previous.nvidiaDeploymentMode === 'nim' ? previous.nvidiaNimEndpoint : undefined
+    })
+    const nextBinding = canonicalizeNvidiaBinding({
+      deploymentMode: next.nvidiaDeploymentMode,
+      endpoint: next.nvidiaDeploymentMode === 'nim' ? next.nvidiaNimEndpoint : undefined
+    })
+    const nvidiaTargetChanged = (
       previous.nvidiaDeploymentMode !== next.nvidiaDeploymentMode ||
       previous.nvidiaNimEndpoint !== next.nvidiaNimEndpoint ||
       previous.nvidiaModel !== next.nvidiaModel
     )
-    if (nvidiaTrustChanged) {
+    const nvidiaAgentProviderChanged = previous.activeLlmProvider !== next.activeLlmProvider
+    const nvidiaAgentTrustChanged = nvidiaTargetChanged || nvidiaAgentProviderChanged
+    if (nvidiaTargetChanged) await invalidateDiscordNvidiaRuntime()
+    const nvidiaDataScopeChanged = (
+      nvidiaAgentTrustChanged ||
+      previous.workspace !== next.workspace ||
+      previous.ragEnabled !== next.ragEnabled ||
+      previous.ragTopK !== next.ragTopK ||
+      previous.ollamaHost !== next.ollamaHost ||
+      previous.comfyBaseUrl !== next.comfyBaseUrl ||
+      previous.comfyInstallPath !== next.comfyInstallPath ||
+      previous.comfyModelSelectionMode !== next.comfyModelSelectionMode
+    )
+    if (nvidiaDataScopeChanged) nvidiaAgentDataApprovals.clearAll()
+    if (
+      'discordEnabled' in patch || 'discordLlmProvider' in patch || nvidiaTargetChanged ||
+      'model' in patch || 'ollamaHost' in patch
+    ) await applyTrustedDiscordConfig()
+    if (
+      previous.discordEnabled && !next.discordEnabled &&
+      previous.discordLlmProvider === 'nvidia'
+    ) {
+      trustedDiscordNvidiaRuntime = null
+      await revokeBackendNvidiaDiscordTrust()
+      await clearNvidiaCredentialWithoutDemand(next)
+    }
+    if (nvidiaTargetChanged) {
       nvidiaCapabilityRevision.beginMutation()
       try {
-        if (previousBinding && (!nextBinding || !sameNvidiaBinding(previousBinding, nextBinding))) {
+        if (!sameNvidiaBinding(previousBinding, nextBinding)) {
           try {
             await clearBackendNvidiaCredential()
           } catch (error) {
@@ -462,11 +636,17 @@ app.whenReady().then(() => {
             throw error
           }
         }
-        await revokeBackendNvidiaAgentTrust()
+        await revokeBackendNvidiaAllToolTrust()
         capabilityCache().clearAll()
       } finally {
         nvidiaCapabilityRevision.endMutation()
       }
+      await clearNvidiaCredentialWithoutDemand(next)
+    } else if (nvidiaAgentProviderChanged) {
+      await revokeBackendNvidiaAllToolTrust()
+      await clearNvidiaCredentialWithoutDemand(next)
+    } else if (nvidiaDataScopeChanged) {
+      await revokeBackendNvidiaAgentTrust()
     }
     return next
   })
@@ -511,42 +691,46 @@ app.whenReady().then(() => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win || win !== mainWindow) throw new Error('모델을 가져올 Aiso 창을 확인할 수 없습니다.')
     const settings = loadSettings()
-    return pickAndImportComfyModelAssets(win, settings.comfyInstallPath, request, (progress) => {
-      if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
-        win.webContents.send('comfy:model-import-progress', progress)
-      }
-    }, () => loadSettings().comfyInstallPath === settings.comfyInstallPath)
+    return mutateComfyRegistryWithTrustReset(() =>
+      pickAndImportComfyModelAssets(win, settings.comfyInstallPath, request, (progress) => {
+        if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+          win.webContents.send('comfy:model-import-progress', progress)
+        }
+      }, () => loadSettings().comfyInstallPath === settings.comfyInstallPath)
+    )
   })
   ipcMain.handle('comfy:models:import:cancel', (e, operationId: unknown) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win || win !== mainWindow) throw new Error('모델 가져오기를 취소할 Aiso 창을 확인할 수 없습니다.')
     return cancelComfyModelImport(operationId)
   })
-  ipcMain.handle('comfy:models:update', (e, id: unknown, patch: unknown) => {
+  ipcMain.handle('comfy:models:update', async (e, id: unknown, patch: unknown) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win || win !== mainWindow) throw new Error('모델을 변경할 Aiso 창을 확인할 수 없습니다.')
     const settings = loadSettings()
-    return updateComfyModelProfile(
-      id,
-      patch,
-      settings.comfyInstallPath,
-      () => loadSettings().comfyInstallPath === settings.comfyInstallPath
+    return mutateComfyRegistryWithTrustReset(() =>
+      updateComfyModelProfile(
+        id,
+        patch,
+        settings.comfyInstallPath,
+        () => loadSettings().comfyInstallPath === settings.comfyInstallPath
+      )
     )
   })
   ipcMain.handle('comfy:models:workflow:import', async (e, id: unknown) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win || win !== mainWindow) throw new Error('워크플로를 연결할 Aiso 창을 확인할 수 없습니다.')
-    return pickAndImportComfyWorkflowTemplate(win, id)
+    return mutateComfyRegistryWithTrustReset(() => pickAndImportComfyWorkflowTemplate(win, id))
   })
-  ipcMain.handle('comfy:models:workflow:remove', (e, id: unknown) => {
+  ipcMain.handle('comfy:models:workflow:remove', async (e, id: unknown) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win || win !== mainWindow) throw new Error('워크플로를 변경할 Aiso 창을 확인할 수 없습니다.')
-    return removeComfyWorkflowTemplate(id)
+    return mutateComfyRegistryWithTrustReset(() => removeComfyWorkflowTemplate(id))
   })
-  ipcMain.handle('comfy:models:unregister', (e, id: unknown) => {
+  ipcMain.handle('comfy:models:unregister', async (e, id: unknown) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win || win !== mainWindow) throw new Error('모델 등록을 해제할 Aiso 창을 확인할 수 없습니다.')
-    return unregisterComfyModelProfile(id)
+    return mutateComfyRegistryWithTrustReset(() => unregisterComfyModelProfile(id))
   })
 
   // ---- IPC: FastAPI 사이드카 상태 ----
@@ -579,9 +763,12 @@ app.whenReady().then(() => {
   )
   ipcMain.handle('nvidia:credential:delete', async (e) => {
     requireMainRenderer(e.sender)
+    nvidiaAgentDataApprovals.clearAll()
+    await invalidateDiscordNvidiaRuntime()
     nvidiaCapabilityRevision.beginMutation()
     try {
       try {
+        await revokeBackendNvidiaAllToolTrust()
         await clearBackendNvidiaCredential()
       } catch (error) {
         stopBackend()
@@ -601,8 +788,44 @@ app.whenReady().then(() => {
       return prepareNvidiaExecution(requestedInput, nvidiaPreparationDeps())
     }
   )
+  ipcMain.handle('nvidia:research:prepare', async (e, rawTarget: NvidiaCapabilityTargetInput) => {
+    requireMainRenderer(e.sender)
+    const current = requireCurrentNvidiaTarget(rawTarget, rawTarget?.model)
+    const binding = current.binding
+    const model = current.model!
+    const expectedRevision = nvidiaCapabilityRevision.snapshot()
+    const capability = capabilityCache().get({ ...binding, model })
+    if (capability?.capabilities.tools !== 'supported') {
+      throw new Error('NVIDIA 조사 채팅에는 최신 도구 기능 확인이 필요합니다.')
+    }
+    await prepareNvidiaExecution(binding, nvidiaPreparationDeps())
+    await requireUnchangedNvidiaTarget(binding, model, expectedRevision)
+    const rechecked = capabilityCache().get({ ...binding, model })
+    if (rechecked?.capabilities.tools !== 'supported') {
+      throw new Error('NVIDIA 도구 기능 확인이 만료되거나 변경되었습니다.')
+    }
+    const ttlSeconds = capabilityBoundGrantTtlSeconds(rechecked.checkedAt)
+    if (ttlSeconds < 1) throw new Error('NVIDIA 도구 기능 확인이 만료되었습니다.')
+    const grant = await issueBackendNvidiaResearchGrant({
+      ...binding,
+      model,
+      ttlSeconds
+    })
+    try {
+      await requireUnchangedNvidiaTarget(binding, model, expectedRevision)
+      if (capabilityCache().get({ ...binding, model })?.capabilities.tools !== 'supported') {
+        throw new Error('NVIDIA 도구 기능 확인이 변경되었습니다.')
+      }
+      return grant
+    } catch (error) {
+      await clearBackendNvidiaResearchGrants().catch(() => {})
+      throw error
+    }
+  })
   ipcMain.handle('nvidia:models:refresh', async (e, requestedInput: NvidiaCredentialBindingInput) => {
     requireMainRenderer(e.sender)
+    nvidiaAgentDataApprovals.clearAll()
+    await invalidateDiscordNvidiaRuntime()
     const { binding } = requireCurrentNvidiaTarget(requestedInput)
     const expectedRevision = nvidiaCapabilityRevision.snapshot()
     await prepareNvidiaExecution(binding, nvidiaPreparationDeps())
@@ -610,7 +833,7 @@ app.whenReady().then(() => {
     await requireUnchangedNvidiaTarget(binding, undefined, expectedRevision)
     await commitNvidiaCapabilityMutation(
       nvidiaCapabilityRevision,
-      revokeBackendNvidiaAgentTrust,
+      revokeBackendNvidiaAllToolTrust,
       () => capabilityCache().removeModelsNotInList(binding, models),
       () => capabilityCache().clearBinding(binding)
     )
@@ -622,15 +845,19 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('nvidia:capabilities:clear', async (e, target: NvidiaCapabilityTargetInput) => {
     requireMainRenderer(e.sender)
+    nvidiaAgentDataApprovals.clearAll()
+    await invalidateDiscordNvidiaRuntime()
     await commitNvidiaCapabilityMutation(
       nvidiaCapabilityRevision,
-      revokeBackendNvidiaAgentTrust,
+      revokeBackendNvidiaAllToolTrust,
       () => capabilityCache().clearTarget(target),
       () => capabilityCache().clearTarget(target)
     )
   })
   ipcMain.handle('nvidia:capabilities:probe', async (e, target: NvidiaCapabilityTargetInput) => {
     requireMainRenderer(e.sender)
+    nvidiaAgentDataApprovals.clearAll()
+    await invalidateDiscordNvidiaRuntime()
     const current = requireCurrentNvidiaTarget(target, target.model)
     const binding = current.binding
     const model = current.model!
@@ -644,10 +871,43 @@ app.whenReady().then(() => {
     await requireUnchangedNvidiaTarget(binding, model, expectedRevision)
     return commitNvidiaCapabilityMutation(
       nvidiaCapabilityRevision,
-      revokeBackendNvidiaAgentTrust,
+      revokeBackendNvidiaAllToolTrust,
       () => capabilityCache().put({ ...binding, model }, capabilities),
       () => capabilityCache().clearTarget({ ...binding, model })
     )
+  })
+  ipcMain.handle('nvidia:agent:manifest:describe', async (e, rawInput: unknown) => {
+    requireMainRenderer(e.sender)
+    const input = validateManifestDescribeInput(rawInput)
+    // Invalidate synchronously before yielding to sidecar revocation. Otherwise
+    // an old approval could mint a grant while this expanded scope is pending.
+    nvidiaAgentDataApprovals.clearSession(input.sessionId)
+    await revokeBackendNvidiaAgentTrust()
+    const settings = loadSettings()
+    const registry = listComfyModelProfiles()
+    const authority = buildNvidiaAgentManifestAuthority(
+      settings,
+      input.sessionId,
+      input.scope,
+      registry.profiles
+    )
+    return nvidiaAgentDataApprovals.describe(authority)
+  })
+  ipcMain.handle('nvidia:agent:manifest:decide', (e, rawInput: unknown) => {
+    requireMainRenderer(e.sender)
+    return nvidiaAgentDataApprovals.decide(validateManifestDecisionInput(rawInput))
+  })
+  ipcMain.handle('nvidia:agent:finish', async (e, rawInput: NvidiaAgentSessionFinishInput) => {
+    requireMainRenderer(e.sender)
+    const sessionId = rawInput?.sessionId
+    if (
+      typeof sessionId !== 'string' || sessionId.length < 16 || sessionId.length > 256 ||
+      !/^[A-Za-z0-9._:-]+$/.test(sessionId)
+    ) {
+      throw new Error('NVIDIA Agent 세션 형식이 올바르지 않습니다.')
+    }
+    nvidiaAgentDataApprovals.clearSession(sessionId)
+    await revokeBackendNvidiaAgentTrust()
   })
   ipcMain.handle('nvidia:agent:prepare', async (e, rawInput: unknown) => {
     requireMainRenderer(e.sender)
@@ -661,6 +921,10 @@ app.whenReady().then(() => {
       },
       issueGrant: issueBackendNvidiaAgentGrant,
       revokeGrants: revokeBackendNvidiaAgentTrust,
+      dataApprovalSnapshot: () => nvidiaAgentDataApprovals.snapshot(),
+      dataApprovalIsCurrent: (revision) => nvidiaAgentDataApprovals.isCurrent(revision),
+      getApprovedScope: (sessionId, target) => currentApprovedNvidiaAgentScope(sessionId, target),
+      consumeApprovedScope: (sessionId, target) => currentApprovedNvidiaAgentScope(sessionId, target, true),
       now: Date.now
     })
   })
@@ -670,7 +934,9 @@ app.whenReady().then(() => {
     // configure(data_dir)로 초기화하므로, 봇을 껐어도 설정 탭 예약 목록이 디스크값을 반영한다
     // (봇 미활성 시 apply_config는 봇을 시작하지 않고 저장소만 준비하고 반환).
     if (i.state === 'ready') {
-      void applyDiscordConfig()
+      void applyTrustedDiscordConfig()
+    } else {
+      nvidiaAgentDataApprovals.clearAll()
     }
   })
 
@@ -685,7 +951,90 @@ app.whenReady().then(() => {
   // ---- IPC: 디스코드 봇 (MVP: 기본 채팅) ----
   ipcMain.handle('discord:has-token', () => hasDiscordToken())
   ipcMain.handle('discord:save-token', (_e, token: string) => saveDiscordToken(token))
-  ipcMain.handle('discord:apply', () => applyDiscordConfig())
+  ipcMain.handle('discord:set-llm-provider', async (e, provider: unknown) => {
+    requireMainRenderer(e.sender)
+    if (provider !== 'ollama' && provider !== 'nvidia') {
+      throw new Error('지원하지 않는 Discord LLM 공급자입니다.')
+    }
+    if (provider === 'ollama') {
+      trustedDiscordNvidiaRuntime = null
+      await revokeBackendNvidiaDiscordTrust()
+      const next = saveSettings({ discordLlmProvider: 'ollama' })
+      await applyTrustedDiscordConfig()
+      await clearNvidiaCredentialWithoutDemand(next)
+      return next
+    }
+
+    const before = loadSettings()
+    const binding = canonicalizeNvidiaBinding({
+      deploymentMode: before.nvidiaDeploymentMode,
+      endpoint: before.nvidiaDeploymentMode === 'nim' ? before.nvidiaNimEndpoint : undefined
+    })
+    const model = before.nvidiaModel.trim()
+    if (!model) throw new Error('Discord에 사용할 NVIDIA 모델을 먼저 설정하세요.')
+    const consentTarget = { ...binding, model }
+    const consentRevision = nvidiaCapabilityRevision.snapshot()
+    assertNvidiaDiscordConsentCurrent(
+      consentTarget,
+      before.discordLlmProvider,
+      consentRevision,
+      discordNvidiaFenceDeps()
+    )
+    const win = BrowserWindow.fromWebContents(e.sender)
+    const decision = await dialog.showMessageBox(win!, {
+      type: 'warning',
+      title: 'Discord NVIDIA 실험 기능 확인',
+      message: 'Discord 대화를 NVIDIA 모델로 처리할까요?',
+      detail: [
+        `대상: ${binding.deploymentMode === 'build' ? 'NVIDIA Build' : binding.endpoint} / ${model}`,
+        '전송: Discord 사용자의 메시지, 최근 대화 문맥, 도구 호출 결과, 웹 조사 결과',
+        '로컬 전용: NVIDIA API 키, Discord 봇 토큰, 승인 토큰',
+        '이 기능은 실험적이며 앱 재시작·모델/대상/키/기능 변경 후 다시 확인해야 합니다.'
+      ].join('\n'),
+      buttons: ['확인하고 활성화', '취소'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true
+    })
+    if (decision.response !== 0) return loadSettings()
+
+    // The native dialog can remain open while settings or capability evidence
+    // changes. Never treat consent for an old target as consent for the new one.
+    assertNvidiaDiscordConsentCurrent(
+      consentTarget,
+      before.discordLlmProvider,
+      consentRevision,
+      discordNvidiaFenceDeps()
+    )
+
+    saveSettings({ discordLlmProvider: 'nvidia' })
+    try {
+      await prepareNvidiaExecution(binding, nvidiaPreparationDeps(), 'discord')
+      assertNvidiaDiscordConsentCurrent(
+        consentTarget,
+        'nvidia',
+        consentRevision,
+        discordNvidiaFenceDeps()
+      )
+      trustedDiscordNvidiaRuntime = {
+        provider: 'nvidia',
+        deploymentMode: binding.deploymentMode,
+        endpoint: binding.endpoint,
+        model
+      }
+      const applied = await applyTrustedDiscordConfig()
+      if (!applied.ok) throw new Error(applied.detail ?? 'Discord NVIDIA 적용에 실패했습니다.')
+      return loadSettings()
+    } catch (error) {
+      trustedDiscordNvidiaRuntime = null
+      await revokeBackendNvidiaDiscordTrust().catch(() => {})
+      if (before.discordLlmProvider !== 'nvidia') saveSettings({ discordLlmProvider: 'ollama' })
+      await applyTrustedDiscordConfig().catch(() => stopBackend())
+      await clearNvidiaCredentialWithoutDemand().catch(() => {})
+      throw error
+    }
+  })
+  ipcMain.handle('discord:apply', () => applyTrustedDiscordConfig())
   ipcMain.handle('discord:status', () => discordStatus())
   ipcMain.handle('discord:schedules', () => discordSchedules())
   ipcMain.handle('discord:schedule-remove', (_e, id: string) => discordScheduleRemove(id))
@@ -701,6 +1050,9 @@ app.whenReady().then(() => {
   ipcMain.handle('app:factory-reset', async () => {
     // 삭제 전에 쓰기를 잠근다 — 진행 중이던 스트림의 지연 저장이 지운 파일을 되살리지 않게(리로드 시간 확보)
     freezeAppDataWrites()
+    nvidiaAgentDataApprovals.clearAll()
+    trustedDiscordNvidiaRuntime = null
+    await revokeBackendNvidiaAllToolTrust().catch(() => {})
     await clearBackendNvidiaCredential().catch(() => {})
     deleteNvidiaCredential()
     invalidateAllNvidiaCapabilities()
@@ -710,7 +1062,7 @@ app.whenReady().then(() => {
     clearComfyModelRegistry() // Aiso 메타데이터만 삭제하며 ComfyUI의 실제 모델 파일은 보존한다.
     // 디스코드 비밀·상태·예약도 지우고(리셋 후 설정은 기본값=봇 꺼짐), 실행 중 봇을 중지한다.
     clearDiscordData()
-    void applyDiscordConfig() // 설정 기본값(discordEnabled=false)+토큰 삭제 → 사이드카 봇 중지
+    void applyTrustedDiscordConfig() // 설정 기본값(discordEnabled=false)+토큰 삭제 → 사이드카 봇 중지
   })
 
   // ---- IPC: 자동 업데이트 (GitHub 릴리스 기반) ----

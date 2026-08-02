@@ -135,13 +135,12 @@ describe('streamAgent ComfyUI model-selection payload', () => {
       'assistant-turn-0001',
       'read',
       [profile],
-      vi.fn()
+      vi.fn(),
+      undefined,
+      { nvidiaGrantId: 'one-use-grant' }
     )
 
-    expect(window.api.nvidia.agent.prepare).toHaveBeenCalledWith({
-      sessionId: 'session-nvidia-0001',
-      assistantTurnId: 'assistant-turn-0001'
-    })
+    expect(window.api.nvidia.agent.prepare).not.toHaveBeenCalled()
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
     expect(body).toMatchObject({
       provider: 'nvidia',
@@ -158,8 +157,7 @@ describe('streamAgent ComfyUI model-selection payload', () => {
     expect(body).not.toHaveProperty('selected_comfy_model_id')
   })
 
-  it('does not call the sidecar when Main refuses the NVIDIA Agent grant', async () => {
-    vi.mocked(window.api.nvidia.agent.prepare).mockRejectedValueOnce(new Error('capability denied'))
+  it('does not call the sidecar without a pre-issued Main NVIDIA Agent grant', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
 
@@ -173,22 +171,32 @@ describe('streamAgent ComfyUI model-selection payload', () => {
       'read',
       [profile],
       vi.fn()
-    )).rejects.toThrow('capability denied')
+    )).rejects.toThrow('NVIDIA Agent')
 
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('blocks NVIDIA RAG indexing before Ollama or backend egress', async () => {
-    const fetchMock = vi.fn()
+  it('keeps NVIDIA Agent RAG indexing local through the configured Ollama endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamResponse())
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(ragIndex(
       8123,
-      { ...DEFAULT_SETTINGS, activeLlmProvider: 'nvidia' },
+      {
+        ...DEFAULT_SETTINGS,
+        activeLlmProvider: 'nvidia',
+        nvidiaModel: 'NVIDIA-MODEL-CANARY'
+      },
       'C:/workspace',
       vi.fn()
-    )).rejects.toThrow()
+    )).resolves.toBeUndefined()
 
-    expect(fetchMock).not.toHaveBeenCalled()
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
+    expect(body).toMatchObject({
+      workspace: 'C:/workspace',
+      ollama_host: DEFAULT_SETTINGS.ollamaHost,
+      embed_model: DEFAULT_SETTINGS.embeddingModel
+    })
+    expect(JSON.stringify(body)).not.toContain('NVIDIA-MODEL-CANARY')
   })
 })

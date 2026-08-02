@@ -57,6 +57,7 @@ export const APP_SETTING_KEYS = new Set<keyof AppSettings>([
   'devMode',
   'forceOnboarding',
   'discordEnabled',
+  'discordLlmProvider',
   'trayResident',
   'autoLaunch',
   'comfyBaseUrl',
@@ -167,6 +168,9 @@ export function normalizeSettingsRecord(rawValue: unknown, legacy: boolean): App
     devMode: boolValue(raw, 'devMode', DEFAULT_SETTINGS.devMode),
     forceOnboarding: boolValue(raw, 'forceOnboarding', DEFAULT_SETTINGS.forceOnboarding),
     discordEnabled: boolValue(raw, 'discordEnabled', DEFAULT_SETTINGS.discordEnabled),
+    discordLlmProvider: legacy
+      ? 'ollama'
+      : enumValue(raw, 'discordLlmProvider', ['ollama', 'nvidia'] as const, 'ollama'),
     trayResident: boolValue(raw, 'trayResident', DEFAULT_SETTINGS.trayResident),
     autoLaunch: boolValue(raw, 'autoLaunch', DEFAULT_SETTINGS.autoLaunch),
     comfyBaseUrl: textValue(raw, 'comfyBaseUrl', DEFAULT_SETTINGS.comfyBaseUrl),

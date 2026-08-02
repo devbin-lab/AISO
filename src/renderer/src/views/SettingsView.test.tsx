@@ -69,7 +69,8 @@ function installApiStub(): void {
         hasToken: vi.fn().mockResolvedValue(false),
         status: vi.fn().mockResolvedValue(null),
         schedules: vi.fn().mockResolvedValue({ jobs: [] }),
-        scheduleRemove: vi.fn().mockResolvedValue(undefined)
+        scheduleRemove: vi.fn().mockResolvedValue(undefined),
+        setLlmProvider: vi.fn()
       }
     }
   })
@@ -100,7 +101,8 @@ describe('SettingsView', () => {
 
     await user.click(screen.getByRole('button', { name: 'NVIDIA' }))
     expect(screen.getByDisplayValue('https://integrate.api.nvidia.com/v1')).toHaveProperty('readOnly', true)
-    expect(screen.getByText('Gate 4 사용 범위')).not.toBeNull()
+    expect(screen.getByText('NVIDIA 기능 사용 범위')).not.toBeNull()
+    expect(screen.getByText(/최신 tools=supported 확인과 기능별 전송 승인 또는 동의/)).not.toBeNull()
 
     const keyInput = screen.getByPlaceholderText('API 키 입력')
     await user.type(keyInput, 'renderer-canary-key')
@@ -266,6 +268,76 @@ describe('SettingsView', () => {
 
     expect((screen.getByDisplayValue('http://127.0.0.1:8288') as HTMLInputElement).value)
       .toBe('http://127.0.0.1:8288')
+  })
+
+  it('accepts later external settings after saving dirty fields for a provider transition', async () => {
+    const user = userEvent.setup()
+    let persisted = { ...DEFAULT_SETTINGS }
+    const onSave = vi.fn().mockImplementation(async (next) => {
+      persisted = { ...next }
+      return true
+    })
+    window.api.discord.setLlmProvider = vi.fn().mockImplementation(async () => ({
+      ...persisted,
+      discordLlmProvider: 'nvidia' as const
+    }))
+    const { rerender } = render(
+      <SettingsView settings={persisted} backend={READY_BACKEND} health={null} onSave={onSave} active />
+    )
+
+    await user.click(screen.getByRole('button', { name: 'ComfyUI' }))
+    const baseUrl = screen.getByDisplayValue(DEFAULT_SETTINGS.comfyBaseUrl) as HTMLInputElement
+    await user.clear(baseUrl)
+    await user.type(baseUrl, 'http://127.0.0.1:8288')
+    await user.click(screen.getByRole('button', { name: '디스코드' }))
+    await user.click(screen.getByRole('button', { name: 'NVIDIA 실험' }))
+
+    await waitFor(() => expect(window.api.discord.setLlmProvider).toHaveBeenCalledWith('nvidia'))
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      comfyBaseUrl: 'http://127.0.0.1:8288'
+    }))
+
+    persisted = {
+      ...persisted,
+      comfyBaseUrl: 'http://127.0.0.1:8388',
+      discordLlmProvider: 'nvidia'
+    }
+    rerender(
+      <SettingsView settings={persisted} backend={READY_BACKEND} health={null} onSave={onSave} active />
+    )
+    await user.click(screen.getByRole('button', { name: 'ComfyUI' }))
+    expect((screen.getByDisplayValue('http://127.0.0.1:8388') as HTMLInputElement).value)
+      .toBe('http://127.0.0.1:8388')
+  })
+
+  it('clears successfully saved dirty fields even when the provider IPC fails', async () => {
+    const user = userEvent.setup()
+    const onSave = vi.fn().mockResolvedValue(true)
+    window.api.discord.setLlmProvider = vi.fn().mockRejectedValue(new Error('provider failed'))
+    const { rerender } = render(
+      <SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={onSave} active />
+    )
+
+    await user.click(screen.getByRole('button', { name: 'ComfyUI' }))
+    const baseUrl = screen.getByDisplayValue(DEFAULT_SETTINGS.comfyBaseUrl) as HTMLInputElement
+    await user.clear(baseUrl)
+    await user.type(baseUrl, 'http://127.0.0.1:8288')
+    await user.click(screen.getByRole('button', { name: '디스코드' }))
+    await user.click(screen.getByRole('button', { name: 'NVIDIA 실험' }))
+    await waitFor(() => expect(screen.getByText(/provider failed/)).toBeTruthy())
+
+    rerender(
+      <SettingsView
+        settings={{ ...DEFAULT_SETTINGS, comfyBaseUrl: 'http://127.0.0.1:8388' }}
+        backend={READY_BACKEND}
+        health={null}
+        onSave={onSave}
+        active
+      />
+    )
+    await user.click(screen.getByRole('button', { name: 'ComfyUI' }))
+    expect((screen.getByDisplayValue('http://127.0.0.1:8388') as HTMLInputElement).value)
+      .toBe('http://127.0.0.1:8388')
   })
 
   it('does not show a successful save when persistence fails', async () => {

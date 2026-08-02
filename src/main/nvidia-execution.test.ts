@@ -24,9 +24,23 @@ function harness(options: {
   matchesCurrentBinding?: boolean
   sidecarHasCredential?: boolean
   sidecarEndpoint?: string
+  sidecarInitiallyReady?: boolean
+  sidecarStatusImmutable?: boolean
 } = {}) {
   const settingReads = [...(options.settings ?? [settings()])]
   const calls: Array<{ name: string; args: unknown[] }> = []
+  const first = options.settings?.[0] ?? settings()
+  let sidecarBinding: Record<string, unknown> | null = options.sidecarInitiallyReady
+    ? {
+        deploymentMode: first.nvidiaDeploymentMode,
+        endpoint: options.sidecarEndpoint ?? (
+          first.nvidiaDeploymentMode === 'nim' ? first.nvidiaNimEndpoint : NVIDIA_BUILD_BASE_URL
+        )
+      }
+    : null
+  let sidecarHasCredential = options.sidecarInitiallyReady
+    ? options.sidecarHasCredential ?? first.nvidiaDeploymentMode === 'build'
+    : false
   const deps: NvidiaExecutionPreparationDeps = {
     loadSettings: () => settingReads.length > 1 ? settingReads.shift()! : settingReads[0]!,
     credentialStatus: async (...args) => {
@@ -43,22 +57,28 @@ function harness(options: {
     },
     setSidecarCredential: async (...args) => {
       calls.push({ name: 'setSidecarCredential', args })
+      if (!options.sidecarStatusImmutable) {
+        sidecarBinding = { deploymentMode: args[0], endpoint: args[1] }
+        sidecarHasCredential = true
+      }
     },
     bindSidecarNim: async (...args) => {
       calls.push({ name: 'bindSidecarNim', args })
+      if (!options.sidecarStatusImmutable) {
+        sidecarBinding = { deploymentMode: 'nim', endpoint: args[0] }
+        sidecarHasCredential = false
+      }
     },
     clearSidecarCredential: async (...args) => {
       calls.push({ name: 'clearSidecarCredential', args })
+      sidecarBinding = null
+      sidecarHasCredential = false
     },
     sidecarStatus: async () => {
       calls.push({ name: 'sidecarStatus', args: [] })
-      const first = options.settings?.[0] ?? settings()
-      const endpoint = options.sidecarEndpoint ?? (
-        first.nvidiaDeploymentMode === 'nim' ? first.nvidiaNimEndpoint : NVIDIA_BUILD_BASE_URL
-      )
       return {
-        binding: { deploymentMode: first.nvidiaDeploymentMode, endpoint },
-        hasCredential: options.sidecarHasCredential ?? first.nvidiaDeploymentMode === 'build'
+        binding: sidecarBinding,
+        hasCredential: sidecarHasCredential
       }
     }
   }
@@ -70,7 +90,7 @@ test('Build preparation transfers the key only to the exact sidecar binding', as
   const result = await prepareNvidiaExecution({ deploymentMode: 'build' }, deps)
   assert.deepEqual(result, { ready: true, credential: 'stored' })
   assert.deepEqual(calls.map((call) => call.name), [
-    'credentialStatus', 'readCredential', 'setSidecarCredential', 'sidecarStatus'
+    'credentialStatus', 'sidecarStatus', 'readCredential', 'setSidecarCredential', 'sidecarStatus'
   ])
   const transfer = calls.find((call) => call.name === 'setSidecarCredential')
   assert.deepEqual(transfer?.args, [
@@ -150,11 +170,36 @@ test('a mismatched or secret-bearing sidecar status is revoked', async () => {
     settings: [nim],
     hasStoredCredential: false,
     matchesCurrentBinding: false,
-    sidecarHasCredential: true
+    sidecarHasCredential: true,
+    sidecarInitiallyReady: true,
+    sidecarStatusImmutable: true
   })
   await assert.rejects(
     prepareNvidiaExecution({ deploymentMode: 'nim', endpoint: nim.nvidiaNimEndpoint }, deps),
     /바인딩을 확인하지 못했습니다/
   )
   assert.equal(calls.at(-1)?.name, 'clearSidecarCredential')
+})
+
+test('an already exact sidecar binding is reused without resetting concurrent grants', async () => {
+  const { deps, calls } = harness({ sidecarInitiallyReady: true })
+  const [first, second] = await Promise.all([
+    prepareNvidiaExecution({ deploymentMode: 'build' }, deps),
+    prepareNvidiaExecution({ deploymentMode: 'build' }, deps)
+  ])
+  assert.equal(first.ready, true)
+  assert.equal(second.ready, true)
+  assert.equal(calls.some((call) => call.name === 'readCredential'), false)
+  assert.equal(calls.some((call) => call.name === 'setSidecarCredential'), false)
+})
+
+test('concurrent preparation from an empty sidecar transfers the key exactly once', async () => {
+  const { deps, calls } = harness()
+  const results = await Promise.all([
+    prepareNvidiaExecution({ deploymentMode: 'build' }, deps),
+    prepareNvidiaExecution({ deploymentMode: 'build' }, deps)
+  ])
+  assert.equal(results.every((result) => result.ready), true)
+  assert.equal(calls.filter((call) => call.name === 'setSidecarCredential').length, 1)
+  assert.equal(calls.filter((call) => call.name === 'readCredential').length, 1)
 })

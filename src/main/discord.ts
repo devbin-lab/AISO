@@ -3,6 +3,7 @@ import { join } from 'path'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { loadSettings } from './settings'
 import { backendInfo, backendToken } from './backend'
+import { canonicalizeNvidiaBinding } from '../shared/nvidia'
 
 /**
  * 디스코드 봇(MVP-1: 기본 채팅) — Electron 메인 측 배선.
@@ -70,30 +71,82 @@ export interface DiscordApplyResult {
   detail?: string
 }
 
+export interface NvidiaDiscordRuntime {
+  provider: 'nvidia'
+  deploymentMode: 'build' | 'nim'
+  endpoint: string
+  model: string
+  grantId?: string
+}
+
+const DISCORD_CONFIG_TIMEOUT_MS = 5_000
+
+/** Force the sidecar bot off without requiring any NVIDIA runtime or bearer. */
+export async function disableDiscordConfig(): Promise<DiscordApplyResult> {
+  const info = backendInfo()
+  if (info.state !== 'ready' || !info.port) {
+    return { ok: false, detail: 'Discord 봇 중지 상태를 확인하지 못했습니다.' }
+  }
+  const s = loadSettings()
+  try {
+    const response = await postDiscordConfig(info.port, {
+      enabled: false,
+      token: '',
+      data_dir: join(app.getPath('userData'), 'discord'),
+      provider: 'ollama',
+      deployment_mode: null,
+      endpoint: s.ollamaHost,
+      model: s.model,
+      context_length: s.contextLength,
+      keep_alive: s.keepAlive,
+      ollama_host: s.ollamaHost
+    })
+    return response.ok
+      ? { ok: true }
+      : { ok: false, detail: '사이드카에서 Discord 봇 중지를 확인하지 못했습니다.' }
+  } catch {
+    return { ok: false, detail: 'Discord 봇 중지 요청이 완료되지 않았습니다.' }
+  }
+}
+
 /** 현재 설정 + 저장된 토큰을 사이드카에 적용(봇 재시작/중지). 앱 준비 후·설정 변경 시 호출. */
-export async function applyDiscordConfig(): Promise<DiscordApplyResult> {
+export async function applyDiscordConfig(
+  nvidiaRuntime?: NvidiaDiscordRuntime
+): Promise<DiscordApplyResult> {
   const info = backendInfo()
   if (info.state !== 'ready' || !info.port) return { ok: false, detail: '백엔드가 아직 준비되지 않았습니다.' }
   const s = loadSettings()
-  if (s.activeLlmProvider === 'nvidia' && s.discordEnabled) {
-    try {
-      await fetch(`http://127.0.0.1:${info.port}/discord/config`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Aiso-Token': backendToken() },
-        body: JSON.stringify({
-          enabled: false,
-          token: '',
-          data_dir: join(app.getPath('userData'), 'discord'),
-          model: s.model,
-          context_length: s.contextLength,
-          keep_alive: s.keepAlive,
-          ollama_host: s.ollamaHost
-        })
-      })
-    } catch {
-      /* 차단 결과는 아래의 고정 안내로 반환한다. */
+  let providerConfig: Record<string, unknown>
+  if (s.discordLlmProvider === 'nvidia') {
+    const binding = canonicalizeNvidiaBinding({
+      deploymentMode: s.nvidiaDeploymentMode,
+      endpoint: s.nvidiaDeploymentMode === 'nim' ? s.nvidiaNimEndpoint : undefined
+    })
+    const exact = nvidiaRuntime &&
+      nvidiaRuntime.provider === 'nvidia' &&
+      nvidiaRuntime.deploymentMode === binding.deploymentMode &&
+      nvidiaRuntime.endpoint === binding.endpoint &&
+      nvidiaRuntime.model === s.nvidiaModel.trim()
+    if (!exact) {
+      const disabled = await disableDiscordConfig()
+      return disabled.ok
+        ? { ok: false, detail: 'Discord NVIDIA 실행 신뢰를 확인하지 못해 봇을 중지했습니다.' }
+        : disabled
     }
-    return { ok: false, detail: 'NVIDIA Discord 연결은 Gate 5 이후에 지원합니다. Ollama로 전환해 주세요.' }
+    providerConfig = {
+      provider: 'nvidia',
+      deployment_mode: binding.deploymentMode,
+      endpoint: binding.endpoint,
+      model: nvidiaRuntime.model,
+      nvidia_runtime_grant: nvidiaRuntime.grantId ?? ''
+    }
+  } else {
+    providerConfig = {
+      provider: 'ollama',
+      deployment_mode: null,
+      endpoint: s.ollamaHost,
+      model: s.model
+    }
   }
   const token = loadDiscordToken()
   // 소유자·채널·허용목록은 봇이 런타임에 자동 판별/관리한다. 동적 상태는 이 폴더에 영속.
@@ -104,24 +157,30 @@ export async function applyDiscordConfig(): Promise<DiscordApplyResult> {
     /* 권한 등 실패 무시 */
   }
   try {
-    const r = await fetch(`http://127.0.0.1:${info.port}/discord/config`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Aiso-Token': backendToken() },
-      body: JSON.stringify({
-        enabled: s.discordEnabled,
-        token,
-        data_dir: dataDir,
-        model: s.model,
-        context_length: s.contextLength,
-        keep_alive: s.keepAlive,
-        ollama_host: s.ollamaHost
-      })
+    const r = await postDiscordConfig(info.port, {
+      enabled: s.discordEnabled,
+      token,
+      data_dir: dataDir,
+      ...providerConfig,
+      context_length: s.contextLength,
+      keep_alive: s.keepAlive,
+      ollama_host: s.ollamaHost
     })
     if (!r.ok) return { ok: false, detail: `사이드카 오류 HTTP ${r.status}` }
     return { ok: true }
   } catch (e) {
     return { ok: false, detail: `연결 실패: ${String(e)}` }
   }
+}
+
+async function postDiscordConfig(port: number, body: Record<string, unknown>): Promise<Response> {
+  return fetch(`http://127.0.0.1:${port}/discord/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Aiso-Token': backendToken() },
+    body: JSON.stringify(body),
+    redirect: 'error',
+    signal: AbortSignal.timeout(DISCORD_CONFIG_TIMEOUT_MS)
+  })
 }
 
 export async function discordStatus(): Promise<unknown> {

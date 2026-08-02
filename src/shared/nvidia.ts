@@ -50,9 +50,67 @@ export interface NvidiaAgentPrepareInput {
   assistantTurnId: string
 }
 
+export interface NvidiaAgentDataScopeRequest {
+  workspace: boolean
+  rag: boolean
+  image: boolean
+  /** Main validates this against its private Comfy registry. */
+  selectedComfyModelId?: string
+}
+
+export interface NvidiaAgentManifestDescribeInput {
+  sessionId: string
+  scope: NvidiaAgentDataScopeRequest
+}
+
+export interface NvidiaAgentDataManifest {
+  schemaVersion: 1
+  manifestId: string
+  sessionId: string
+  model: string
+  deploymentMode: NvidiaDeploymentMode
+  expiresInSeconds: number
+  sends: {
+    conversation: true
+    workspace: boolean
+    rag: boolean
+    imagePrompt: boolean
+    toolResults: string[]
+    toolResultDetails: string[]
+  }
+  scopeDetails: {
+    workspacePath: string | null
+    rag: { enabled: boolean; localOllama: true; topK: number }
+    image: { enabled: boolean; selectionMode: 'auto' | 'manual' }
+  }
+  localOnly: string[]
+  allowedTools: string[]
+}
+
+export interface NvidiaAgentManifestDecisionInput {
+  sessionId: string
+  manifestId: string
+  approved: boolean
+}
+
+export interface NvidiaAgentManifestDecisionResult {
+  approved: boolean
+}
+
+export interface NvidiaAgentSessionFinishInput {
+  sessionId: string
+}
+
 export interface NvidiaAgentPrepareResult {
   grantId: string
   assistantTurnId: string
+  expiresInSeconds: number
+}
+
+export interface NvidiaResearchPrepareInput extends NvidiaCapabilityTargetInput {}
+
+export interface NvidiaResearchPrepareResult {
+  grantId: string
   expiresInSeconds: number
 }
 

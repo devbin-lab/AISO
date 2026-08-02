@@ -1,6 +1,7 @@
 export type ReasoningEffort = 'low' | 'medium' | 'high'
 export type ThemeMode = 'dark' | 'light' | 'system'
 export type ActiveLlmProvider = 'ollama' | 'nvidia'
+export type DiscordLlmProvider = 'ollama' | 'nvidia'
 export type { NvidiaDeploymentMode } from './nvidia.ts'
 import {
   NVIDIA_BUILD_BASE_URL,
@@ -70,6 +71,8 @@ export interface AppSettings {
   /** 디스코드 봇(MVP: 기본 채팅) — 켜고 토큰만 넣으면 소유자·채널·허용목록은 봇이 자동 처리한다.
    *  봇 토큰은 여기 저장하지 않고 별도로 암호화(safeStorage) 보관한다. */
   discordEnabled: boolean
+  /** Discord is an independent opt-in. Existing and migrated installs stay on Ollama. */
+  discordLlmProvider: DiscordLlmProvider
   /** 백그라운드 상주 — 켜지면 창을 닫아도 앱이 트레이에 남아 디스코드 봇·예약이 계속 작동한다.
    *  꺼지면 창을 닫을 때 앱이 종료되어 봇도 멈춘다(트레이 '완전 종료'로 언제든 완전 종료 가능). */
   trayResident: boolean
@@ -178,6 +181,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   devMode: false,
   forceOnboarding: false,
   discordEnabled: false,
+  discordLlmProvider: 'ollama',
   trayResident: false,
   autoLaunch: false,
   comfyBaseUrl: 'http://127.0.0.1:8188',

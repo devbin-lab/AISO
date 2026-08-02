@@ -39,6 +39,7 @@ interface Props {
   backend: BackendInfo
   health: HealthInfo | null
   onSave: (patch: Partial<AppSettings>) => Promise<boolean>
+  onExternalSettingsChange?: (settings: AppSettings) => void
   /** 지금 이 화면이 실제로 보이는 탭인지 — 개발자 모드 단축키 감지 범위를 설정 탭에 한정한다.
    *  (뷰는 항상 마운트 상태로 유지되므로 이 플래그 없이는 다른 탭에서도 단축키가 먹힌다.) */
   active: boolean
@@ -107,11 +108,19 @@ type SectionId =
   | 'updates'
   | 'developer'
 
-function SettingsView({ settings, backend, health, onSave, active }: Props): React.JSX.Element {
+function SettingsView({
+  settings,
+  backend,
+  health,
+  onSave,
+  onExternalSettingsChange,
+  active
+}: Props): React.JSX.Element {
   const [form, setForm] = useState<AppSettings>(settings)
   const [saved, setSaved] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [dirtyFields, setDirtyFields] = useState<Set<keyof AppSettings>>(() => new Set())
+  const dirtyFieldVersions = useRef<Map<keyof AppSettings, number>>(new Map())
   const [manualModel, setManualModel] = useState(false)
   const [activeSection, setActiveSection] = useState<SectionId>('llm')
   const [nvidiaApiKey, setNvidiaApiKey] = useState('')
@@ -164,6 +173,7 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
 
   const set = <K extends keyof AppSettings,>(k: K, v: AppSettings[K]): void => {
     setForm((f) => ({ ...f, [k]: v }))
+    dirtyFieldVersions.current.set(k, (dirtyFieldVersions.current.get(k) ?? 0) + 1)
     setDirtyFields((fields) => new Set(fields).add(k))
     setSaved(false)
     setSaveError('')
@@ -486,6 +496,51 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
   const removeSchedule = async (id: string): Promise<void> => {
     await window.api.discord.scheduleRemove(id)
     refreshDiscord()
+  }
+  const setDiscordLlmProvider = async (
+    provider: 'ollama' | 'nvidia',
+    forceConfirmation = false
+  ): Promise<void> => {
+    if ((!forceConfirmation && provider === form.discordLlmProvider) || discordApplying) return
+    setDiscordApplying(true)
+    try {
+      // 공급자 동의 전에 현재 편집을 정상 저장한다. 실패하면 native 동의창과
+      // NVIDIA 준비/네트워크 경계에 진입하지 않으며, 성공한 편집도 잃지 않는다.
+      if (dirty) {
+        const savedDirtyVersions = new Map(
+          [...dirtyFields].map((field) => [field, dirtyFieldVersions.current.get(field) ?? 0])
+        )
+        if (!await onSave(form)) {
+          setDiscordStat({ running: false, last_error: '설정을 저장하지 못해 공급자를 바꾸지 않았습니다.' })
+          return
+        }
+        // 저장을 기다리는 동안 다시 편집된 필드는 새 초안이므로 dirty 상태를 유지한다.
+        // 공급자 IPC가 이후 실패해도 이미 저장된 필드는 더 이상 초안으로 취급하지 않는다.
+        setDirtyFields((fields) => {
+          const updated = new Set(fields)
+          savedDirtyVersions.forEach((version, field) => {
+            if (dirtyFieldVersions.current.get(field) === version) updated.delete(field)
+          })
+          return updated
+        })
+      }
+      const next = await window.api.discord.setLlmProvider(provider)
+      onExternalSettingsChange?.(next)
+      setForm((current) => ({ ...current, discordLlmProvider: next.discordLlmProvider }))
+      setDirtyFields((fields) => {
+        const updated = new Set(fields)
+        updated.delete('discordLlmProvider')
+        return updated
+      })
+      refreshDiscord()
+    } catch (error) {
+      setDiscordStat({
+        running: false,
+        last_error: error instanceof Error ? error.message : String(error)
+      })
+    } finally {
+      setDiscordApplying(false)
+    }
   }
   useEffect(() => {
     if (active) refreshDiscord()
@@ -870,9 +925,9 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
                 </div>
                 <div className="row">
                   <div>
-                    <div className="row__label">Gate 4 사용 범위</div>
+                    <div className="row__label">NVIDIA 기능 사용 범위</div>
                     <div className="row__hint">
-                      일반 채팅은 도구 상태가 확인되지 않아도 사용할 수 있습니다. Agent·웹 조사·Discord 도구는 Gate 5가 완료될 때까지 실행하지 않습니다.
+                      일반 채팅은 현재 모델의 chat·stream 지원 확인 범위에서 사용합니다. Agent·웹 조사·Discord 도구는 현재 대상의 최신 tools=supported 확인과 기능별 전송 승인 또는 동의가 필요합니다.
                       {' '}NVIDIA Build 요청은 NVIDIA로, 사용자 NIM 요청은 해당 서버 운영자에게 전송됩니다.
                       {form.nvidiaDeploymentMode === 'nim' && ' 사용자 NIM 호환은 실제 환경 검증 전까지 실험적입니다.'}
                     </div>
@@ -1253,6 +1308,31 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
         <section>
           <div className="group__title">디스코드 봇 (기본 채팅)</div>
           <div className="group">
+            <div className="row">
+              <div>
+                <div className="row__label">대화 모델 공급자</div>
+                <div className="row__hint">
+                  Discord는 데스크톱 모델과 별도로 선택합니다. NVIDIA는 실험 기능이며 전송 범위 확인 후에만 켜집니다.
+                </div>
+              </div>
+              <Segmented
+                value={form.discordLlmProvider}
+                options={[
+                  { v: 'ollama' as const, label: 'Ollama' },
+                  { v: 'nvidia' as const, label: 'NVIDIA 실험' }
+                ]}
+                onChange={(value) => void setDiscordLlmProvider(value)}
+              />
+              {form.discordLlmProvider === 'nvidia' && (
+                <button
+                  className="btn btn--ghost2"
+                  disabled={discordApplying}
+                  onClick={() => void setDiscordLlmProvider('nvidia', true)}
+                >
+                  다시 승인
+                </button>
+              )}
+            </div>
             <div className="row">
               <div>
                 <div className="row__label">디스코드 봇</div>

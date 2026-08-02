@@ -8,7 +8,14 @@ import type {
   NvidiaCapabilityTargetInput,
   NvidiaModelListResult,
   NvidiaAgentPrepareInput,
-  NvidiaAgentPrepareResult
+  NvidiaAgentPrepareResult,
+  NvidiaAgentManifestDescribeInput,
+  NvidiaAgentDataManifest,
+  NvidiaAgentManifestDecisionInput,
+  NvidiaAgentManifestDecisionResult,
+  NvidiaAgentSessionFinishInput,
+  NvidiaResearchPrepareInput,
+  NvidiaResearchPrepareResult
 } from '../shared/nvidia'
 import type { BackendInfo } from '../shared/backend'
 import type { UpdateStatus } from '../shared/update'
@@ -64,6 +71,10 @@ const api = {
       prepare: (binding: NvidiaCredentialBindingInput): Promise<NvidiaExecutionPrepareResult> =>
         ipcRenderer.invoke('nvidia:execution:prepare', binding)
     },
+    research: {
+      prepare: (target: NvidiaResearchPrepareInput): Promise<NvidiaResearchPrepareResult> =>
+        ipcRenderer.invoke('nvidia:research:prepare', target)
+    },
     models: {
       refresh: (binding: NvidiaCredentialBindingInput): Promise<NvidiaModelListResult> =>
         ipcRenderer.invoke('nvidia:models:refresh', binding)
@@ -77,8 +88,14 @@ const api = {
         ipcRenderer.invoke('nvidia:capabilities:clear', target)
     },
     agent: {
+      describeManifest: (input: NvidiaAgentManifestDescribeInput): Promise<NvidiaAgentDataManifest> =>
+        ipcRenderer.invoke('nvidia:agent:manifest:describe', input),
+      decideManifest: (input: NvidiaAgentManifestDecisionInput): Promise<NvidiaAgentManifestDecisionResult> =>
+        ipcRenderer.invoke('nvidia:agent:manifest:decide', input),
       prepare: (input: NvidiaAgentPrepareInput): Promise<NvidiaAgentPrepareResult> =>
-        ipcRenderer.invoke('nvidia:agent:prepare', input)
+        ipcRenderer.invoke('nvidia:agent:prepare', input),
+      finish: (input: NvidiaAgentSessionFinishInput): Promise<void> =>
+        ipcRenderer.invoke('nvidia:agent:finish', input)
     }
   },
   backend: {
@@ -146,6 +163,8 @@ const api = {
   discord: {
     hasToken: (): Promise<boolean> => ipcRenderer.invoke('discord:has-token'),
     saveToken: (token: string): Promise<void> => ipcRenderer.invoke('discord:save-token', token),
+    setLlmProvider: (provider: 'ollama' | 'nvidia'): Promise<AppSettings> =>
+      ipcRenderer.invoke('discord:set-llm-provider', provider),
     apply: (): Promise<{ ok: boolean; detail?: string }> => ipcRenderer.invoke('discord:apply'),
     status: (): Promise<DiscordStatus> => ipcRenderer.invoke('discord:status'),
     schedules: (): Promise<{ jobs: DiscordSchedule[] }> => ipcRenderer.invoke('discord:schedules'),

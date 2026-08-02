@@ -1295,6 +1295,32 @@
   background: rgba(210, 153, 34, 0.06);
 }
 
+.nvidia-manifest {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid rgba(118, 185, 0, 0.38);
+  border-radius: 10px;
+  background: rgba(118, 185, 0, 0.06);
+  font-size: 12px;
+}
+.nvidia-manifest__title,
+.nvidia-manifest__actions,
+.nvidia-manifest__summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.nvidia-manifest__title { justify-content: space-between; }
+.nvidia-manifest p { margin: 0; color: var(--text-muted); }
+.nvidia-manifest label { display: flex; gap: 7px; align-items: center; }
+.nvidia-manifest__summary {
+  flex-direction: column;
+  align-items: flex-start;
+  color: var(--text-muted);
+}
+
 /* ---------- 실행 중 활동 표시기 (멈춘 것처럼 보이지 않게) ---------- */
 /* 실행 중 표시 — 박스 없이 답변 하단 요약(run-meta)과 같은 작은 회색 한 줄 */
 .activity {

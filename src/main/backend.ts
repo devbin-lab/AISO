@@ -7,7 +7,14 @@ import { existsSync } from 'fs'
 import { ensureSkillsDir } from './skills'
 import type { BackendInfo } from '../shared/backend'
 import type { LlmModelCapabilities, LlmCapabilityState } from '../shared/llm'
-import type { NvidiaAgentPrepareInput, NvidiaAgentPrepareResult } from '../shared/nvidia'
+import type {
+  NvidiaAgentPrepareInput,
+  NvidiaAgentPrepareResult,
+  NvidiaCapabilityTargetInput,
+  NvidiaResearchPrepareInput,
+  NvidiaResearchPrepareResult
+} from '../shared/nvidia'
+import type { NvidiaAgentExecutionScope } from './nvidia-agent-data-approval'
 
 /**
  * FastAPI 사이드카 수명주기 관리.
@@ -126,6 +133,7 @@ export async function issueBackendNvidiaAgentGrant(
     endpoint: string
     model: string
     ttlSeconds: number
+    executionScope: NvidiaAgentExecutionScope
   }
 ): Promise<NvidiaAgentPrepareResult> {
   const result = await nvidiaAgentChannelRequest('grant', {
@@ -134,7 +142,8 @@ export async function issueBackendNvidiaAgentGrant(
     deploymentMode: input.deploymentMode,
     endpoint: input.endpoint,
     model: input.model,
-    ttlSeconds: input.ttlSeconds
+    ttlSeconds: input.ttlSeconds,
+    executionScope: input.executionScope
   })
   if (
     typeof result.grantId !== 'string' || result.grantId.length < 32 ||
@@ -152,6 +161,82 @@ export async function issueBackendNvidiaAgentGrant(
 export async function clearBackendNvidiaAgentGrants(): Promise<void> {
   if (!credentialChannelToken || info.state !== 'ready') return
   await nvidiaAgentChannelRequest('clear')
+}
+
+async function nvidiaResearchChannelRequest(
+  operation: 'grant' | 'clear',
+  body?: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  if (info.state !== 'ready' || info.port === null) throw new Error('사이드카가 준비되지 않았습니다.')
+  const nonce = randomBytes(24).toString('hex')
+  const response = await fetch(`http://127.0.0.1:${info.port}/internal/nvidia-research/${operation}`, {
+    method: 'POST',
+    redirect: 'error',
+    signal: AbortSignal.timeout(3_000),
+    headers: credentialChannelHeaders(nonce),
+    body: JSON.stringify(body ?? {})
+  })
+  if (!response.ok) throw new Error('NVIDIA 조사 채팅 실행 허가를 안전하게 준비하지 못했습니다.')
+  return await response.json() as Record<string, unknown>
+}
+
+export async function issueBackendNvidiaResearchGrant(
+  input: NvidiaResearchPrepareInput & { ttlSeconds: number }
+): Promise<NvidiaResearchPrepareResult> {
+  const result = await nvidiaResearchChannelRequest('grant', {
+    deploymentMode: input.deploymentMode,
+    endpoint: input.endpoint,
+    model: input.model,
+    ttlSeconds: input.ttlSeconds
+  })
+  if (
+    typeof result.grantId !== 'string' || result.grantId.length < 32 ||
+    typeof result.expiresInSeconds !== 'number' || result.expiresInSeconds <= 0
+  ) throw new Error('NVIDIA 조사 채팅 실행 허가 응답 형식이 올바르지 않습니다.')
+  return { grantId: result.grantId, expiresInSeconds: result.expiresInSeconds }
+}
+
+export async function clearBackendNvidiaResearchGrants(): Promise<void> {
+  if (!credentialChannelToken || info.state !== 'ready') return
+  await nvidiaResearchChannelRequest('clear')
+}
+
+async function nvidiaDiscordChannelRequest(
+  operation: 'grant' | 'clear',
+  body?: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  if (info.state !== 'ready' || info.port === null) throw new Error('사이드카가 준비되지 않았습니다.')
+  const nonce = randomBytes(24).toString('hex')
+  const response = await fetch(`http://127.0.0.1:${info.port}/internal/nvidia-discord/${operation}`, {
+    method: 'POST',
+    redirect: 'error',
+    signal: AbortSignal.timeout(3_000),
+    headers: credentialChannelHeaders(nonce),
+    body: JSON.stringify(body ?? {})
+  })
+  if (!response.ok) throw new Error('Discord NVIDIA 실행 허가를 안전하게 준비하지 못했습니다.')
+  return await response.json() as Record<string, unknown>
+}
+
+export async function issueBackendNvidiaDiscordGrant(
+  input: NvidiaCapabilityTargetInput & { ttlSeconds: number }
+): Promise<{ grantId: string; expiresInSeconds: number }> {
+  const result = await nvidiaDiscordChannelRequest('grant', {
+    deploymentMode: input.deploymentMode,
+    endpoint: input.endpoint,
+    model: input.model,
+    ttlSeconds: input.ttlSeconds
+  })
+  if (
+    typeof result.grantId !== 'string' || result.grantId.length < 32 ||
+    typeof result.expiresInSeconds !== 'number' || result.expiresInSeconds <= 0
+  ) throw new Error('Discord NVIDIA 실행 허가 응답 형식이 올바르지 않습니다.')
+  return { grantId: result.grantId, expiresInSeconds: result.expiresInSeconds }
+}
+
+export async function clearBackendNvidiaDiscordGrants(): Promise<void> {
+  if (!credentialChannelToken || info.state !== 'ready') return
+  await nvidiaDiscordChannelRequest('clear')
 }
 
 async function nvidiaRuntimeRequest(
