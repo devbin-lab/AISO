@@ -1,5 +1,12 @@
 export type ReasoningEffort = 'low' | 'medium' | 'high'
 export type ThemeMode = 'dark' | 'light' | 'system'
+export type ActiveLlmProvider = 'ollama' | 'nvidia'
+export type { NvidiaDeploymentMode } from './nvidia.ts'
+import {
+  NVIDIA_BUILD_BASE_URL,
+  canonicalizeNvidiaNimEndpoint,
+  type NvidiaDeploymentMode
+} from './nvidia.ts'
 /** ComfyUI 이미지 생성에서 모델을 고르는 주체. */
 export type ComfyModelSelectionMode = 'auto' | 'manual'
 /** 생성 온도 모드 (드롭다운으로 선택):
@@ -8,11 +15,27 @@ export type ComfyModelSelectionMode = 'auto' | 'manual'
  *  - custom: 사용자가 슬라이더로 직접 값을 고정(유일하게 조정 가능) */
 export type TempPreset = 'auto' | 'organize' | 'balanced' | 'custom'
 
+export interface SettingsRecoveryStatus {
+  kind: 'none' | 'migrated' | 'quarantined' | 'blocked'
+  message?: string
+  backupPath?: string
+}
+
 export interface AppSettings {
+  /** Persisted settings contract. v0.4.x uses schema 4. */
+  schemaVersion: 4
+  /** Explicit LLM provider. Migration always starts existing users on Ollama. */
+  activeLlmProvider: ActiveLlmProvider
   /** Ollama 모델 이름 */
   model: string
   /** Ollama 호스트 (FastAPI 사이드카가 이 주소로 통신) */
   ollamaHost: string
+  /** NVIDIA deployment target. Build uses a fixed base URL; NIM is experimental. */
+  nvidiaDeploymentMode: NvidiaDeploymentMode
+  /** NVIDIA model identifier. Model discovery is added in a later gate. */
+  nvidiaModel: string
+  /** Canonical user-hosted NIM base URL. Empty until the user configures NIM. */
+  nvidiaNimEndpoint: string
   /** 추론(think) 강도 — think 지원 모델(gemma4·gpt-oss 등)에 적용 */
   reasoningEffort: ReasoningEffort
   /** 현재 생성 온도 모드 (auto·organize·balanced·custom) */
@@ -133,8 +156,13 @@ export const RAG_MAX_FILES_OPTIONS: { value: number; label: string }[] = [
 ]
 
 export const DEFAULT_SETTINGS: AppSettings = {
+  schemaVersion: 4,
+  activeLlmProvider: 'ollama',
   model: 'gemma4:12b',
   ollamaHost: 'http://localhost:11434',
+  nvidiaDeploymentMode: 'build',
+  nvidiaModel: '',
+  nvidiaNimEndpoint: '',
   reasoningEffort: 'medium',
   tempPreset: 'auto',
   tempCustom: 0.7,
@@ -155,4 +183,34 @@ export const DEFAULT_SETTINGS: AppSettings = {
   comfyBaseUrl: 'http://127.0.0.1:8188',
   comfyInstallPath: '',
   comfyModelSelectionMode: 'auto'
+}
+
+export interface LlmExecutionSettingsSnapshot {
+  readonly provider: ActiveLlmProvider
+  readonly deploymentMode: NvidiaDeploymentMode | null
+  readonly endpoint: string
+  readonly model: string
+}
+
+/**
+ * Capture provider/model/endpoint once when an execution starts. Consumers keep this
+ * immutable value so later Settings changes only affect the next execution.
+ */
+export function snapshotLlmSettings(settings: AppSettings): LlmExecutionSettingsSnapshot {
+  if (settings.activeLlmProvider === 'ollama') {
+    return Object.freeze({
+      provider: 'ollama',
+      deploymentMode: null,
+      endpoint: settings.ollamaHost,
+      model: settings.model
+    })
+  }
+  return Object.freeze({
+    provider: 'nvidia',
+    deploymentMode: settings.nvidiaDeploymentMode,
+    endpoint: settings.nvidiaDeploymentMode === 'build'
+      ? NVIDIA_BUILD_BASE_URL
+      : canonicalizeNvidiaNimEndpoint(settings.nvidiaNimEndpoint),
+    model: settings.nvidiaModel
+  })
 }

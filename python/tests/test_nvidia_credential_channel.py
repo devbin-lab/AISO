@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+import itertools
+
+import pytest
+
+import main
+
+try:
+    from fastapi.testclient import TestClient
+except Exception:  # pragma: no cover
+    TestClient = None
+
+pytestmark = pytest.mark.skipif(TestClient is None, reason="TestClient(httpx) is unavailable")
+
+CHANNEL_TOKEN = "credential-channel-test-token"
+ORDINARY_TOKEN = "ordinary-renderer-token"
+_nonce_counter = itertools.count(1)
+
+
+def headers(*, ordinary: bool = False, channel: bool = True, nonce: str | None = None):
+    result = {"X-Aiso-Credential-Nonce": nonce or f"nonce-{next(_nonce_counter):032d}"}
+    if ordinary:
+        result["X-Aiso-Token"] = ORDINARY_TOKEN
+    if channel:
+        result["X-Aiso-Credential-Token"] = CHANNEL_TOKEN
+    return result
+
+
+@pytest.fixture
+def client(monkeypatch):
+    auth_middleware = next(
+        middleware
+        for middleware in main.app.user_middleware
+        if middleware.cls is main.TokenAuthMiddleware
+    )
+    monkeypatch.setattr(main, "CREDENTIAL_CHANNEL_TOKEN", CHANNEL_TOKEN)
+    monkeypatch.setattr(main, "AUTH_TOKEN", ORDINARY_TOKEN)
+    monkeypatch.setitem(auth_middleware.kwargs, "token", ORDINARY_TOKEN)
+    main._credential_memory.clear_secret()
+    main._credential_memory._used_nonces.clear()
+    main._credential_memory._nonce_order.clear()
+    main.app.middleware_stack = None
+    try:
+        yield TestClient(main.app)
+    finally:
+        main._credential_memory.clear_secret()
+        main.app.middleware_stack = None
+
+
+def test_renderer_token_cannot_access_credential_status(client):
+    response = client.post(
+        "/internal/credentials/status",
+        headers=headers(ordinary=True, channel=False),
+        json={},
+    )
+    assert response.status_code == 401
+
+
+def test_missing_or_wrong_channel_token_is_rejected(client):
+    missing = client.post("/internal/credentials/status", headers=headers(channel=False), json={})
+    wrong_headers = headers()
+    wrong_headers["X-Aiso-Credential-Token"] = "wrong"
+    wrong = client.post("/internal/credentials/status", headers=wrong_headers, json={})
+    assert missing.status_code == 401
+    assert wrong.status_code == 401
+
+
+def test_set_status_clear_is_write_only_and_zeroizes_memory(client):
+    canary = "CANARY-SIDECAR-NVIDIA-KEY-91573"
+    binding = {
+        "deploymentMode": "build",
+        "endpoint": main.NVIDIA_BUILD_BASE_URL,
+        "apiKey": canary,
+    }
+    response = client.post("/internal/credentials/set", headers=headers(), json=binding)
+    assert response.status_code == 200
+    assert canary not in response.text
+
+    status = client.post("/internal/credentials/status", headers=headers(), json={})
+    assert status.status_code == 200
+    assert status.json() == {
+        "hasCredential": True,
+        "binding": {
+            "deploymentMode": "build",
+            "endpoint": main.NVIDIA_BUILD_BASE_URL,
+        },
+    }
+    assert canary not in status.text
+
+    secret_reference = main._credential_memory._secret
+    assert isinstance(secret_reference, bytearray)
+    cleared = client.post("/internal/credentials/clear", headers=headers(), json={})
+    assert cleared.status_code == 200
+    assert main._credential_memory._secret is None
+    assert secret_reference and all(byte == 0 for byte in secret_reference)
+
+
+def test_nonce_replay_is_rejected(client):
+    nonce = "replay-nonce-00000000000000000000000000000000"
+    first = client.post("/internal/credentials/status", headers=headers(nonce=nonce), json={})
+    replay = client.post("/internal/credentials/status", headers=headers(nonce=nonce), json={})
+    assert first.status_code == 200
+    assert replay.status_code == 409
+
+
+def test_build_binding_cannot_be_redirected(client):
+    canary = "CANARY-INVALID-BINDING-29384"
+    response = client.post(
+        "/internal/credentials/set",
+        headers=headers(),
+        json={"deploymentMode": "build", "endpoint": "https://evil.example/v1", "apiKey": canary},
+    )
+    assert response.status_code == 400
+    assert canary not in response.text
+
+
+def test_no_credential_retrieval_endpoint_exists(client):
+    response = client.get("/internal/credentials/get", headers=headers())
+    assert response.status_code == 404
+
+
+def test_lookalike_127_hostname_is_not_treated_as_loopback(client):
+    response = client.post(
+        "/internal/credentials/set",
+        headers=headers(),
+        json={"deploymentMode": "nim", "endpoint": "http://127.evil.example/v1", "apiKey": "key"},
+    )
+    assert response.status_code == 400

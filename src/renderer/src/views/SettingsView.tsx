@@ -8,6 +8,12 @@ import {
   TEMP_MODE_OPTIONS,
   RAG_MAX_FILES_OPTIONS
 } from '../../../shared/settings'
+import {
+  NVIDIA_BUILD_BASE_URL,
+  canonicalizeNvidiaNimEndpoint,
+  type NvidiaCredentialBindingInput,
+  type NvidiaCredentialStatus
+} from '../../../shared/nvidia'
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import type { UpdateStatus } from '../../../shared/update'
 import type { SkillMeta } from '../../../shared/skill'
@@ -99,6 +105,11 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
   const [dirtyFields, setDirtyFields] = useState<Set<keyof AppSettings>>(() => new Set())
   const [manualModel, setManualModel] = useState(false)
   const [activeSection, setActiveSection] = useState<SectionId>('llm')
+  const [nvidiaApiKey, setNvidiaApiKey] = useState('')
+  const [credentialStatus, setCredentialStatus] = useState<NvidiaCredentialStatus | null>(null)
+  const [credentialBusy, setCredentialBusy] = useState(false)
+  const [credentialMessage, setCredentialMessage] = useState('')
+  const [settingsRecoveryMessage, setSettingsRecoveryMessage] = useState('')
 
   const modelOptions = health?.models ?? []
   const useDropdown = modelOptions.length > 0 && !manualModel
@@ -128,6 +139,70 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
     setDirtyFields((fields) => new Set(fields).add(k))
     setSaved(false)
     setSaveError('')
+  }
+
+  const currentCredentialBinding = (): NvidiaCredentialBindingInput => ({
+    deploymentMode: form.nvidiaDeploymentMode,
+    endpoint: form.nvidiaDeploymentMode === 'nim' ? form.nvidiaNimEndpoint : undefined
+  })
+
+  const refreshCredentialStatus = async (): Promise<void> => {
+    try {
+      if (form.nvidiaDeploymentMode === 'nim') {
+        canonicalizeNvidiaNimEndpoint(form.nvidiaNimEndpoint)
+      }
+      const status = await window.api.nvidia.credential.status(currentCredentialBinding())
+      setCredentialStatus(status)
+      if (status.detail) setCredentialMessage(status.detail)
+    } catch (error) {
+      setCredentialStatus(null)
+      setCredentialMessage(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  useEffect(() => {
+    if (!active) return
+    void window.api.settings.recoveryStatus().then((status) => {
+      setSettingsRecoveryMessage(status.kind === 'none' ? '' : status.message ?? '')
+    }).catch(() => {})
+    if (form.activeLlmProvider === 'nvidia') void refreshCredentialStatus()
+    // Status contains metadata only; this never decrypts or transfers the API key.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, form.activeLlmProvider, form.nvidiaDeploymentMode, form.nvidiaNimEndpoint])
+
+  const saveCredential = async (): Promise<void> => {
+    setCredentialBusy(true)
+    setCredentialMessage('')
+    try {
+      const binding = currentCredentialBinding()
+      if (credentialStatus?.hasStoredCredential) {
+        await window.api.nvidia.credential.replace(binding, nvidiaApiKey)
+      } else {
+        await window.api.nvidia.credential.save(binding, nvidiaApiKey)
+      }
+      setNvidiaApiKey('')
+      setCredentialMessage('API 키를 운영체제 보안 저장소에 암호화해 저장했습니다.')
+      await refreshCredentialStatus()
+    } catch (error) {
+      setCredentialMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setCredentialBusy(false)
+    }
+  }
+
+  const removeCredential = async (): Promise<void> => {
+    setCredentialBusy(true)
+    setCredentialMessage('')
+    try {
+      await window.api.nvidia.credential.delete()
+      setNvidiaApiKey('')
+      setCredentialMessage('저장된 NVIDIA API 키를 삭제했습니다.')
+      await refreshCredentialStatus()
+    } catch (error) {
+      setCredentialMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setCredentialBusy(false)
+    }
   }
 
   const submit = async (): Promise<void> => {
@@ -427,6 +502,30 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
         <section>
           <div className="group__title">엔진</div>
           <div className="group">
+            {settingsRecoveryMessage && (
+              <div className="row">
+                <div>
+                  <div className="row__label">설정 복구 알림</div>
+                  <div className="row__hint">{settingsRecoveryMessage}</div>
+                </div>
+              </div>
+            )}
+            <div className="row">
+              <div>
+                <div className="row__label">LLM 공급자</div>
+                <div className="row__hint">기존 로컬 실행은 Ollama를 사용합니다. NVIDIA 연결은 v4 개발 기능입니다.</div>
+              </div>
+              <Segmented
+                value={form.activeLlmProvider}
+                options={[
+                  { v: 'ollama' as const, label: 'Ollama' },
+                  { v: 'nvidia' as const, label: 'NVIDIA' }
+                ]}
+                onChange={(v) => set('activeLlmProvider', v)}
+              />
+            </div>
+            {form.activeLlmProvider === 'ollama' ? (
+              <>
             <div className="row">
               <div>
                 <div className="row__label">모델</div>
@@ -474,6 +573,105 @@ function SettingsView({ settings, backend, health, onSave, active }: Props): Rea
                 placeholder="http://localhost:11434"
               />
             </div>
+              </>
+            ) : (
+              <>
+                <div className="row">
+                  <div>
+                    <div className="row__label">NVIDIA 배포 방식</div>
+                    <div className="row__hint">NVIDIA Build 또는 실험적인 사용자 NIM을 선택합니다.</div>
+                  </div>
+                  <Segmented
+                    value={form.nvidiaDeploymentMode}
+                    options={[
+                      { v: 'build' as const, label: 'NVIDIA Build' },
+                      { v: 'nim' as const, label: '사용자 NIM' }
+                    ]}
+                    onChange={(v) => set('nvidiaDeploymentMode', v)}
+                  />
+                </div>
+                <div className="row">
+                  <div>
+                    <div className="row__label">NVIDIA 모델</div>
+                    <div className="row__hint">모델 자동 조회는 다음 개발 단계에서 연결됩니다.</div>
+                  </div>
+                  <input
+                    className="input"
+                    value={form.nvidiaModel}
+                    onChange={(e) => set('nvidiaModel', e.target.value)}
+                    placeholder="예: nvidia/llama-3.1-nemotron-ultra-253b-v1"
+                  />
+                </div>
+                <div className="row">
+                  <div>
+                    <div className="row__label">엔드포인트</div>
+                    <div className="row__hint">
+                      {form.nvidiaDeploymentMode === 'build'
+                        ? 'NVIDIA Build 주소는 보안을 위해 고정되며 리디렉션을 허용하지 않습니다.'
+                        : '로컬 HTTP 또는 외부 HTTPS만 허용합니다. 사용자 정보·query·fragment는 거부됩니다.'}
+                    </div>
+                  </div>
+                  <input
+                    className="input"
+                    readOnly={form.nvidiaDeploymentMode === 'build'}
+                    value={form.nvidiaDeploymentMode === 'build' ? NVIDIA_BUILD_BASE_URL : form.nvidiaNimEndpoint}
+                    onChange={(e) => set('nvidiaNimEndpoint', e.target.value)}
+                    placeholder="https://nim.example.com/v1"
+                  />
+                </div>
+                <div className="row">
+                  <div>
+                    <div className="row__label">NVIDIA API 키</div>
+                    <div className="row__hint">
+                      {credentialStatus?.hasStoredCredential
+                        ? credentialStatus.matchesCurrentBinding
+                          ? '현재 배포 대상에 맞는 키가 암호화되어 있습니다.'
+                          : '저장된 키가 다른 배포 대상에 묶여 있습니다. 새 키로 교체하세요.'
+                        : '키는 일반 설정에 저장되지 않으며 Renderer로 다시 반환되지 않습니다.'}
+                    </div>
+                  </div>
+                  <div className="row__control">
+                    <input
+                      className="input"
+                      type="password"
+                      autoComplete="off"
+                      value={nvidiaApiKey}
+                      onChange={(e) => setNvidiaApiKey(e.target.value)}
+                      placeholder={credentialStatus?.hasStoredCredential ? '새 키로 교체' : 'API 키 입력'}
+                    />
+                    <div>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={credentialBusy || !nvidiaApiKey.trim() || credentialStatus?.encryptionAvailable === false}
+                        onClick={() => void saveCredential()}
+                      >
+                        {credentialStatus?.hasStoredCredential ? '키 교체' : '키 저장'}
+                      </button>{' '}
+                      <button
+                        type="button"
+                        className="btn btn--stop"
+                        disabled={credentialBusy || !credentialStatus?.hasStoredCredential}
+                        onClick={() => void removeCredential()}
+                      >
+                        키 삭제
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                {credentialMessage && <div className="row__hint" role="status">{credentialMessage}</div>}
+                <div className="row">
+                  <div>
+                    <div className="row__label">v4 Gate 2 제한</div>
+                    <div className="row__hint">
+                      현재 단계는 설정·키 보관만 준비하며 NVIDIA 요청과 모델 목록 조회는 실행하지 않습니다.
+                      이후 NVIDIA Build 실행 시 승인한 프롬프트·문맥이 NVIDIA 클라우드로 전송되고,
+                      사용자 NIM은 해당 서버 운영자에게 전송될 수 있습니다.
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </section>
         )}

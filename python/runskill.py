@@ -31,6 +31,7 @@ from datetime import datetime
 from pathlib import Path
 
 from tools import ToolError
+from process_env import sanitized_child_environment
 
 SKILL_RUN_TIMEOUT = 60          # 스킬 실행 상한(초) — 브리핑·수집 등 네트워크 여유
 MAX_CODE_BYTES = 200_000        # 스킬 코드 크기 상한
@@ -214,11 +215,7 @@ def _fmt(name: str, rc: int, out: str, err: str) -> str:
 
 
 def _skill_env() -> dict:
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
-    # 사이드카 인증 토큰은 스킬(모델이 작성한 코드)에 넘기지 않는다 — 스킬이 이 토큰으로
-    # 로컬 제어 API를 호출하지 못하게 최소권한을 유지한다.
-    env.pop("AISO_AUTH_TOKEN", None)
-    return env
+    return sanitized_child_environment(PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
 
 
 def _run_skill_sync(folder: Path, name: str, argjson: str) -> str:
@@ -249,6 +246,7 @@ def _run_skill_sync(folder: Path, name: str, argjson: str) -> str:
             ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
             capture_output=True,
             creationflags=_CREATE_NO_WINDOW,
+            env=sanitized_child_environment(),
         )
         try:
             proc.communicate(timeout=5)

@@ -1,4 +1,8 @@
-import type { AppSettings } from '../shared/settings'
+import type { AppSettings, SettingsRecoveryStatus } from '../shared/settings'
+import type {
+  NvidiaCredentialBindingInput,
+  NvidiaCredentialStatus
+} from '../shared/nvidia'
 import type { PingResult } from '../shared/ipc'
 import type { BackendInfo } from '../shared/backend'
 import type { UpdateStatus } from '../shared/update'
@@ -27,6 +31,15 @@ export interface AisoAPI {
   settings: {
     get: () => Promise<AppSettings>
     set: (patch: Partial<AppSettings>) => Promise<AppSettings>
+    recoveryStatus: () => Promise<SettingsRecoveryStatus>
+  }
+  nvidia: {
+    credential: {
+      status: (binding?: NvidiaCredentialBindingInput) => Promise<NvidiaCredentialStatus>
+      save: (binding: NvidiaCredentialBindingInput, apiKey: string) => Promise<void>
+      replace: (binding: NvidiaCredentialBindingInput, apiKey: string) => Promise<void>
+      delete: () => Promise<void>
+    }
   }
   backend: {
     info: () => Promise<BackendInfo>

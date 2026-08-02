@@ -11,6 +11,21 @@ function installApiStub(): void {
   Object.defineProperty(window, 'api', {
     configurable: true,
     value: {
+      settings: {
+        recoveryStatus: vi.fn().mockResolvedValue({ kind: 'none' })
+      },
+      nvidia: {
+        credential: {
+          status: vi.fn().mockResolvedValue({
+            encryptionAvailable: true,
+            hasStoredCredential: false,
+            matchesCurrentBinding: false
+          }),
+          save: vi.fn().mockResolvedValue(undefined),
+          replace: vi.fn().mockResolvedValue(undefined),
+          delete: vi.fn().mockResolvedValue(undefined)
+        }
+      },
       backend: {
         token: vi.fn(() => 'test-token')
       },
@@ -55,6 +70,34 @@ describe('SettingsView', () => {
     expect(screen.getByText('생성 온도')).not.toBeNull()
     expect(screen.getByText('RAG 사용')).not.toBeNull()
     expect(screen.getByText('AI 즉시 정지 (GPU 비우기)')).not.toBeNull()
+  })
+
+  it('keeps NVIDIA key lifecycle separate from persisted settings', async () => {
+    const user = userEvent.setup()
+    const onSave = vi.fn().mockResolvedValue(true)
+    render(<SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={onSave} active />)
+
+    await user.click(screen.getByRole('button', { name: 'NVIDIA' }))
+    expect(screen.getByDisplayValue('https://integrate.api.nvidia.com/v1')).toHaveProperty('readOnly', true)
+    expect(screen.getByText('v4 Gate 2 제한')).not.toBeNull()
+
+    const keyInput = screen.getByPlaceholderText('API 키 입력')
+    await user.type(keyInput, 'renderer-canary-key')
+    await user.click(screen.getByRole('button', { name: '키 저장' }))
+    await waitFor(() => {
+      expect(window.api.nvidia.credential.save).toHaveBeenCalledWith(
+        { deploymentMode: 'build', endpoint: undefined },
+        'renderer-canary-key'
+      )
+    })
+    expect((keyInput as HTMLInputElement).value).toBe('')
+
+    await user.click(screen.getByRole('button', { name: '저장' }))
+    await waitFor(() => expect(onSave).toHaveBeenCalled())
+    const persistedPatch = onSave.mock.calls.at(-1)?.[0] as Record<string, unknown>
+    expect(persistedPatch.activeLlmProvider).toBe('nvidia')
+    expect('nvidiaApiKey' in persistedPatch).toBe(false)
+    expect(JSON.stringify(persistedPatch)).not.toContain('renderer-canary-key')
   })
 
   it('loads the registry-backed tool catalog in its own settings tab', async () => {

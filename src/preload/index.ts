@@ -1,5 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { AppSettings } from '../shared/settings'
+import type {
+  NvidiaCredentialBindingInput,
+  NvidiaCredentialStatus
+} from '../shared/nvidia'
 import type { BackendInfo } from '../shared/backend'
 import type { UpdateStatus } from '../shared/update'
 import type { UsageSummary } from '../shared/usage'
@@ -37,7 +41,19 @@ const api = {
   ping: () => ipcRenderer.invoke('ping'),
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),
-    set: (patch: Partial<AppSettings>) => ipcRenderer.invoke('settings:set', patch)
+    set: (patch: Partial<AppSettings>) => ipcRenderer.invoke('settings:set', patch),
+    recoveryStatus: () => ipcRenderer.invoke('settings:recovery-status')
+  },
+  nvidia: {
+    credential: {
+      status: (binding?: NvidiaCredentialBindingInput): Promise<NvidiaCredentialStatus> =>
+        ipcRenderer.invoke('nvidia:credential:status', binding),
+      save: (binding: NvidiaCredentialBindingInput, apiKey: string): Promise<void> =>
+        ipcRenderer.invoke('nvidia:credential:save', binding, apiKey),
+      replace: (binding: NvidiaCredentialBindingInput, apiKey: string): Promise<void> =>
+        ipcRenderer.invoke('nvidia:credential:replace', binding, apiKey),
+      delete: (): Promise<void> => ipcRenderer.invoke('nvidia:credential:delete')
+    }
   },
   backend: {
     info: () => ipcRenderer.invoke('backend:info'),

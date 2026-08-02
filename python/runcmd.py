@@ -17,6 +17,7 @@ import subprocess
 from pathlib import Path
 
 from runcode import _bundled_bin, _find_python, run_process_capped
+from process_env import sanitized_child_environment
 from tools import ToolError, _rel  # noqa: F401 — _rel은 향후 표시용
 
 CMD_TIMEOUT_DEFAULT = 60
@@ -67,7 +68,7 @@ def _cap(s: str) -> str:
 
 
 def _cmd_env(root: Path) -> dict:
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    env = sanitized_child_environment(PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     extra = []
     b = _bundled_bin()
     if b:

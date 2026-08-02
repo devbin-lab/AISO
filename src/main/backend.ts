@@ -16,6 +16,7 @@ import type { BackendInfo } from '../shared/backend'
 // preload를 통해서만 렌더러에 노출한다. 렌더러 fetch가 X-Aiso-Token 헤더로 실어야
 // 백엔드 인증을 통과하므로, 포트를 스캔한 악성 웹페이지의 cross-origin 호출을 막는다.
 const AUTH_TOKEN = randomBytes(32).toString('hex')
+let credentialChannelToken = ''
 
 /** 렌더러(preload)에 노출할 사이드카 인증 토큰. */
 export function backendToken(): string {
@@ -47,6 +48,50 @@ export function onBackendChange(f: (i: BackendInfo) => void): () => void {
 
 export function backendInfo(): BackendInfo {
   return info
+}
+
+function credentialChannelHeaders(nonce: string): Record<string, string> {
+  if (!credentialChannelToken) throw new Error('NVIDIA 자격 증명 채널이 준비되지 않았습니다.')
+  return {
+    'Content-Type': 'application/json',
+    'X-Aiso-Credential-Token': credentialChannelToken,
+    'X-Aiso-Credential-Nonce': nonce
+  }
+}
+
+async function credentialChannelRequest(
+  operation: 'set' | 'clear' | 'status',
+  body?: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  if (info.state !== 'ready' || info.port === null) throw new Error('사이드카가 준비되지 않았습니다.')
+  const nonce = randomBytes(24).toString('hex')
+  const response = await fetch(`http://127.0.0.1:${info.port}/internal/credentials/${operation}`, {
+    method: 'POST',
+    redirect: 'error',
+    signal: AbortSignal.timeout(3_000),
+    headers: credentialChannelHeaders(nonce),
+    body: JSON.stringify(body ?? {})
+  })
+  if (!response.ok) throw new Error('사이드카 자격 증명 메모리 작업에 실패했습니다.')
+  return await response.json() as Record<string, unknown>
+}
+
+/** Main-only dormant Gate 3 primitive. The API key is never exposed to Renderer. */
+export async function setBackendNvidiaCredential(
+  deploymentMode: 'build' | 'nim',
+  endpoint: string,
+  apiKey: string
+): Promise<void> {
+  await credentialChannelRequest('set', { deploymentMode, endpoint, apiKey })
+}
+
+export async function clearBackendNvidiaCredential(): Promise<void> {
+  if (!credentialChannelToken || info.state !== 'ready') return
+  await credentialChannelRequest('clear')
+}
+
+export async function backendNvidiaCredentialStatus(): Promise<Record<string, unknown>> {
+  return credentialChannelRequest('status')
 }
 
 function freePort(): Promise<number> {
@@ -152,6 +197,7 @@ export async function startBackend(ollamaHost: string): Promise<void> {
   const skillsDirPath = ensureSkillsDir()
 
   let stderrTail = ''
+  credentialChannelToken = randomBytes(32).toString('hex')
   proc = spawn(py, args, {
     cwd: dir,
     env: {
@@ -159,7 +205,8 @@ export async function startBackend(ollamaHost: string): Promise<void> {
       AISO_OLLAMA_HOST: ollamaHost,
       AISO_TOOLS_DIR: toolsDir,
       AISO_SKILLS_DIR: skillsDirPath,
-      AISO_AUTH_TOKEN: AUTH_TOKEN
+      AISO_AUTH_TOKEN: AUTH_TOKEN,
+      AISO_CREDENTIAL_CHANNEL_TOKEN: credentialChannelToken
     },
     windowsHide: true
   })
@@ -214,6 +261,7 @@ export async function startBackend(ollamaHost: string): Promise<void> {
 }
 
 export function stopBackend(): void {
+  credentialChannelToken = ''
   if (restartTimer) {
     clearTimeout(restartTimer)
     restartTimer = null

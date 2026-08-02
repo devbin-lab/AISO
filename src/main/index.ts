@@ -4,8 +4,15 @@ import { mkdirSync } from 'fs'
 import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import trayIconAsset from '../../build/icon.png?asset'
-import { loadSettings, saveSettings, resetSettings } from './settings'
-import { startBackend, stopBackend, backendInfo, backendToken, onBackendChange } from './backend'
+import { loadSettings, saveSettings, resetSettings, getSettingsRecoveryStatus } from './settings'
+import {
+  startBackend,
+  stopBackend,
+  backendInfo,
+  backendToken,
+  onBackendChange,
+  clearBackendNvidiaCredential
+} from './backend'
 import { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
 import { recordUsage, usageSummary, clearUsage } from './usage'
 import { listSkills, deleteSkill } from './skills'
@@ -19,6 +26,11 @@ import {
   clearDiscordData
 } from './discord'
 import { freezeAppDataWrites } from './appdata-guard'
+import {
+  deleteNvidiaCredential,
+  nvidiaCredentialStatus,
+  saveNvidiaCredential
+} from './nvidia-credentials'
 import {
   destroyComfySurface,
   reloadComfySurface,
@@ -47,6 +59,7 @@ import {
   clearAllConversations
 } from './conversations'
 import type { AppSettings } from '../shared/settings'
+import type { NvidiaCredentialBindingInput } from '../shared/nvidia'
 import type { ComfySurfaceRequest } from '../shared/comfy'
 import type { ConversationKind, ConversationSave } from '../shared/conversation'
 
@@ -280,6 +293,7 @@ app.whenReady().then(() => {
     console.log('[ipc] settings:get')
     return loadSettings()
   })
+  ipcMain.handle('settings:recovery-status', () => getSettingsRecoveryStatus())
   ipcMain.handle('settings:set', (_e, patch: Partial<AppSettings>) => {
     console.log('[ipc] settings:set', Object.keys(patch ?? {}))
     const previous = loadSettings()
@@ -297,6 +311,9 @@ app.whenReady().then(() => {
     // 디스코드 봇 On/Off를 공용 '저장'으로 바꿔도 런타임 봇이 즉시 시작/중지되도록 재적용
     // (예전엔 '연결/적용' 버튼으로만 반영돼, 토글 후 저장하면 플래그만 바뀌고 봇 상태는 그대로였다).
     if ('discordEnabled' in patch) void applyDiscordConfig()
+    if (previous.activeLlmProvider !== 'ollama' && next.activeLlmProvider === 'ollama') {
+      void clearBackendNvidiaCredential().catch(() => {})
+    }
     return next
   })
 
@@ -384,6 +401,35 @@ app.whenReady().then(() => {
   ipcMain.on('backend:token', (e) => {
     e.returnValue = backendToken()
   })
+  const requireMainRenderer = (sender: Electron.WebContents): void => {
+    const win = BrowserWindow.fromWebContents(sender)
+    if (!win || win !== mainWindow) throw new Error('요청한 Aiso 창을 확인할 수 없습니다.')
+  }
+  ipcMain.handle('nvidia:credential:status', (e, binding?: NvidiaCredentialBindingInput) => {
+    requireMainRenderer(e.sender)
+    return nvidiaCredentialStatus(binding)
+  })
+  ipcMain.handle(
+    'nvidia:credential:save',
+    async (e, binding: NvidiaCredentialBindingInput, apiKey: unknown) => {
+      requireMainRenderer(e.sender)
+      await saveNvidiaCredential(binding, apiKey)
+      await clearBackendNvidiaCredential().catch(() => {})
+    }
+  )
+  ipcMain.handle(
+    'nvidia:credential:replace',
+    async (e, binding: NvidiaCredentialBindingInput, apiKey: unknown) => {
+      requireMainRenderer(e.sender)
+      await saveNvidiaCredential(binding, apiKey)
+      await clearBackendNvidiaCredential().catch(() => {})
+    }
+  )
+  ipcMain.handle('nvidia:credential:delete', async (e) => {
+    requireMainRenderer(e.sender)
+    await clearBackendNvidiaCredential().catch(() => {})
+    deleteNvidiaCredential()
+  })
   onBackendChange((i) => {
     BrowserWindow.getAllWindows().forEach((w) => w.webContents.send('backend:status', i))
     // 백엔드가 준비되면 항상 디스코드 설정을 적용한다. enabled=false여도 apply는 예약 저장소를
@@ -418,9 +464,11 @@ app.whenReady().then(() => {
   ipcMain.handle('conv:delete', (_e, id: string) => deleteConversation(id))
 
   // ---- IPC: 공장초기화 (개발자 모드) — userData의 앱 데이터 삭제(설정·대화·사용량) ----
-  ipcMain.handle('app:factory-reset', () => {
+  ipcMain.handle('app:factory-reset', async () => {
     // 삭제 전에 쓰기를 잠근다 — 진행 중이던 스트림의 지연 저장이 지운 파일을 되살리지 않게(리로드 시간 확보)
     freezeAppDataWrites()
+    await clearBackendNvidiaCredential().catch(() => {})
+    deleteNvidiaCredential()
     resetSettings()
     clearAllConversations()
     clearUsage()

@@ -5,14 +5,17 @@ Electron 메인 프로세스가 앱 시작 시 이 서버를 스폰한다:
 """
 
 import hmac
+import ipaddress
 import json
 import os
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -54,10 +57,81 @@ MAX_DISCORD_PARSE_RETRIES = 2  # 디스코드 툴 루프의 툴콜 파싱오류 
 # 악성 웹페이지가 포트를 스캔해 cross-origin으로 /agent(파일 툴!)·/chat을 호출할 수 있다.
 # 렌더러만 아는 이 토큰을 X-Aiso-Token 헤더로 검사해 근본적으로 잠근다.
 AUTH_TOKEN = os.environ.get("AISO_AUTH_TOKEN", "")
+CREDENTIAL_CHANNEL_TOKEN = os.environ.get("AISO_CREDENTIAL_CHANNEL_TOKEN", "")
+NVIDIA_BUILD_BASE_URL = "https://integrate.api.nvidia.com/v1"
+
+
+class _CredentialMemory:
+    """Write-only process memory for a future NVIDIA runtime handoff."""
+
+    def __init__(self) -> None:
+        self._secret: bytearray | None = None
+        self._binding: dict[str, str] | None = None
+        self._used_nonces: set[str] = set()
+        self._nonce_order: deque[str] = deque()
+
+    def consume_nonce(self, nonce: str) -> None:
+        if not nonce or len(nonce) < 32 or len(nonce) > 256 or nonce in self._used_nonces:
+            raise HTTPException(status_code=409, detail="invalid or replayed credential nonce")
+        self._used_nonces.add(nonce)
+        self._nonce_order.append(nonce)
+        while len(self._nonce_order) > 2048:
+            self._used_nonces.discard(self._nonce_order.popleft())
+
+    def set(self, binding: dict[str, str], api_key: str) -> None:
+        self.clear_secret()
+        self._secret = bytearray(api_key.encode("utf-8"))
+        self._binding = dict(binding)
+
+    def clear_secret(self) -> None:
+        if self._secret is not None:
+            for index in range(len(self._secret)):
+                self._secret[index] = 0
+        self._secret = None
+        self._binding = None
+
+    def status(self) -> dict[str, Any]:
+        return {"hasCredential": self._secret is not None, "binding": self._binding}
+
+
+_credential_memory = _CredentialMemory()
+
+
+def _credential_nonce(request: Request) -> str:
+    nonce = request.headers.get("X-Aiso-Credential-Nonce", "")
+    _credential_memory.consume_nonce(nonce)
+    return nonce
+
+
+def _credential_binding(deployment_mode: str, endpoint: str) -> dict[str, str]:
+    if deployment_mode == "build":
+        if endpoint != NVIDIA_BUILD_BASE_URL:
+            raise HTTPException(status_code=400, detail="invalid NVIDIA Build binding")
+        return {"deploymentMode": "build", "endpoint": NVIDIA_BUILD_BASE_URL}
+    if deployment_mode != "nim":
+        raise HTTPException(status_code=400, detail="unsupported NVIDIA deployment mode")
+    try:
+        parsed = urlsplit(endpoint)
+        _ = parsed.port
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid NIM endpoint") from exc
+    host = (parsed.hostname or "").lower()
+    loopback = host == "localhost" or host.endswith(".localhost")
+    try:
+        loopback = loopback or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        pass
+    if (
+        parsed.scheme not in ("http", "https") or not host or parsed.username or parsed.password
+        or parsed.query or parsed.fragment or (parsed.scheme == "http" and not loopback)
+    ):
+        raise HTTPException(status_code=400, detail="invalid NIM endpoint")
+    return {"deploymentMode": "nim", "endpoint": endpoint}
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     yield
+    _credential_memory.clear_secret()
     if discordbot is not None:
         await discordbot.stop()  # 앱 종료 시 디스코드 봇 게이트웨이 정리
 
@@ -83,15 +157,26 @@ class TokenAuthMiddleware:
         self.token = token
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or not self.token:
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
         method = scope.get("method", "")
         path = scope.get("path", "")
+        headers = dict(scope.get("headers") or [])
+        if path.startswith("/internal/credentials/"):
+            supplied = headers.get(b"x-aiso-credential-token", b"").decode("latin-1")
+            if not CREDENTIAL_CHANNEL_TOKEN or not hmac.compare_digest(supplied, CREDENTIAL_CHANNEL_TOKEN):
+                resp = JSONResponse({"detail": "unauthorized"}, status_code=401)
+                await resp(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+            return
+        if not self.token:
+            await self.app(scope, receive, send)
+            return
         if method == "OPTIONS" or path.startswith(_AUTH_EXEMPT_PREFIXES):
             await self.app(scope, receive, send)
             return
-        headers = dict(scope.get("headers") or [])
         supplied = headers.get(b"x-aiso-token", b"").decode("latin-1")
         if not hmac.compare_digest(supplied, self.token):
             resp = JSONResponse({"detail": "unauthorized"}, status_code=401)
@@ -115,6 +200,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class CredentialSetRequest(BaseModel):
+    deploymentMode: Literal["build", "nim"]
+    endpoint: str = Field(min_length=1, max_length=2048)
+    apiKey: str = Field(min_length=1, max_length=16384)
+
+
+@app.post("/internal/credentials/set")
+async def credential_set(request: Request, body: CredentialSetRequest):
+    _credential_nonce(request)
+    binding = _credential_binding(body.deploymentMode, body.endpoint)
+    _credential_memory.set(binding, body.apiKey)
+    return {"ok": True}
+
+
+@app.post("/internal/credentials/clear")
+async def credential_clear(request: Request):
+    _credential_nonce(request)
+    _credential_memory.clear_secret()
+    return {"ok": True}
+
+
+@app.post("/internal/credentials/status")
+async def credential_status(request: Request):
+    _credential_nonce(request)
+    return _credential_memory.status()
 
 
 class ChatMessage(BaseModel):

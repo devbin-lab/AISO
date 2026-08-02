@@ -20,6 +20,7 @@ import uuid
 from pathlib import Path
 
 from tools import ToolError, _resolve
+from process_env import sanitized_child_environment
 
 RUN_TIMEOUT = 25   # 실행 상한(초)
 BUILD_TIMEOUT = 90  # 빌드+실행 상한(초, dotnet 첫 실행 대비)
@@ -105,6 +106,7 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
                 stderr=subprocess.DEVNULL,
                 creationflags=_CREATE_NO_WINDOW,
                 timeout=10,
+                env=sanitized_child_environment(),
             )
             return
         except Exception:  # noqa: BLE001
@@ -261,12 +263,11 @@ def _fmt(rel: str, label: str, rc: int, out: str, err: str) -> str:
 def _run_sync(target: Path, rel: str) -> str:
     ext = target.suffix.lower()
     cwd = str(target.parent)
-    env = {
-        **os.environ,
-        "PYTHONIOENCODING": "utf-8",
-        "DOTNET_NOLOGO": "1",
-        "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
-    }
+    env = sanitized_child_environment(
+        PYTHONIOENCODING="utf-8",
+        DOTNET_NOLOGO="1",
+        DOTNET_CLI_TELEMETRY_OPTOUT="1",
+    )
 
     def runp(cmd: list[str], timeout: int, env_override: dict | None = None) -> CapturedProcess:
         return run_process_capped(
