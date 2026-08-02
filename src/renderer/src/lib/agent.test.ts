@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_SETTINGS } from '../../../shared/settings'
 import type { ComfyModelProfile } from '../../../shared/comfy-model'
 import { fetchAgentToolCatalog, streamAgent } from './agent'
+import { ragIndex } from './rag'
 
 const profile = { id: 'profile-manual-1', agentEnabled: true } as ComfyModelProfile
 
@@ -83,5 +84,37 @@ describe('streamAgent ComfyUI model-selection payload', () => {
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
     expect(body.comfy_selection_mode).toBe('auto')
     expect(body).not.toHaveProperty('selected_comfy_model_id')
+  })
+
+  it('blocks NVIDIA Agent before any backend or external egress', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(streamAgent(
+      8123,
+      { ...DEFAULT_SETTINGS, activeLlmProvider: 'nvidia' },
+      '',
+      [{ role: 'user', content: 'run a tool' }],
+      'session-nvidia',
+      'read',
+      [],
+      vi.fn()
+    )).rejects.toThrow()
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('blocks NVIDIA RAG indexing before Ollama or backend egress', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(ragIndex(
+      8123,
+      { ...DEFAULT_SETTINGS, activeLlmProvider: 'nvidia' },
+      'C:/workspace',
+      vi.fn()
+    )).rejects.toThrow()
+
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

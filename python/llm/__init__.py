@@ -15,6 +15,12 @@ from .contracts import (
     ModelCapabilities,
 )
 from .factory import create_provider, create_runtime
+from .providers.nvidia import (
+    NVIDIA_BUILD_BASE_URL,
+    NvidiaAdapter,
+    NvidiaSseParser,
+    canonicalize_nvidia_endpoint,
+)
 
 __all__ = [
     "LlmEvent",
@@ -27,4 +33,8 @@ __all__ = [
     "ModelCapabilities",
     "create_provider",
     "create_runtime",
+    "NVIDIA_BUILD_BASE_URL",
+    "NvidiaAdapter",
+    "NvidiaSseParser",
+    "canonicalize_nvidia_endpoint",
 ]

@@ -35,6 +35,7 @@ interface ChatMsg {
   content: string
   thinking?: string
   error?: string
+  incomplete?: boolean
   streaming?: boolean
   tools?: ToolAct[] // 웹 검색 모드의 도구 활동(검색·문서 가져오기)
   tokens?: number // 이 답변에 쓴 토큰(프롬프트+생성)
@@ -134,7 +135,11 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
   const backendReady = backend.state === 'ready' && backend.port != null
   const ollamaOk = health?.ollama === true
   const modelReady = !health || modelInstalled(health.models, settings.model)
-  const canSend = backendReady && ollamaOk && !streaming && input.trim().length > 0
+  const nvidiaSelected = settings.activeLlmProvider === 'nvidia'
+  const providerReady = nvidiaSelected
+    ? settings.nvidiaModel.trim().length > 0 && !settings.chatWebSearch
+    : ollamaOk && modelReady
+  const canSend = backendReady && providerReady && !streaming && input.trim().length > 0
 
   const updateLast = (fn: (m: ChatMsg) => ChatMsg): void => {
     setMessages((prev) => {
@@ -161,7 +166,7 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
     const history: ChatPayloadMessage[] = [
       // 오류 메시지, 그리고 내용이 빈 어시스턴트 턴(조기 중지·리셋 후 중단 등)은 요청 히스토리에서 제외
       ...messages
-        .filter((m) => !m.error && (m.role === 'user' || m.content.trim() !== ''))
+        .filter((m) => !m.error && !m.incomplete && (m.role === 'user' || m.content.trim() !== ''))
         .map((m) => ({ role: m.role, content: m.content })),
       { role: 'user' as const, content: text }
     ]
@@ -225,7 +230,14 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
           runTokens = c.total ?? runTokens
           updateLast((m) => ({ ...m, tokens: runTokens }))
         } else if (c.type === 'error') {
-          updateLast((m) => ({ ...m, error: c.error ?? '알 수 없는 오류', streaming: false }))
+          updateLast((m) => ({ ...m, error: c.error ?? '알 수 없는 오류', incomplete: true, streaming: false }))
+        } else if (c.type === 'incomplete' || c.type === 'cancelled') {
+          updateLast((m) => ({
+            ...m,
+            error: c.error ?? '응답이 불완전하게 종료되어 다음 요청에 포함하지 않습니다.',
+            incomplete: true,
+            streaming: false
+          }))
         } else if (c.type === 'done') {
           // 순수 채팅은 done에 eval_count, 웹 검색은 usage로 누적 → 둘 중 큰 값을 쓴다
           const used = Math.max(c.eval_count ?? 0, runTokens)
@@ -242,11 +254,18 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
       updateLast((m) => (m.streaming ? { ...m, streaming: false } : m))
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
-        updateLast((m) => ({ ...m, streaming: false, tools: finalizeTools(m.tools, 'stopped') }))
+        updateLast((m) => ({
+          ...m,
+          error: '응답을 중지했습니다. 부분 응답은 다음 요청에 포함하지 않습니다.',
+          incomplete: true,
+          streaming: false,
+          tools: finalizeTools(m.tools, 'stopped')
+        }))
       } else {
         updateLast((m) => ({
           ...m,
           error: (err as Error).message,
+          incomplete: true,
           streaming: false,
           tools: finalizeTools(m.tools, 'error')
         }))
@@ -275,7 +294,11 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
   }
 
   const modelOptions: DropdownOption[] =
-    health?.models && health.models.length
+    nvidiaSelected
+      ? settings.nvidiaModel
+        ? [{ value: settings.nvidiaModel, label: settings.nvidiaModel }]
+        : []
+      : health?.models && health.models.length
       ? health.models.map((m) => ({ value: m, label: m }))
       : settings.model
         ? [{ value: settings.model, label: settings.model }]
@@ -287,9 +310,13 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
     notice = { text: `백엔드 엔진 오류 — Python 환경(python/.venv)을 확인하세요${backend.detail ? ` · ${backend.detail}` : ''}`, kind: 'err' }
   } else if (backend.state === 'starting') {
     notice = { text: '백엔드 엔진 시작 중…', kind: 'warn' }
-  } else if (backendReady && health && !health.ollama) {
+  } else if (nvidiaSelected && !settings.nvidiaModel.trim()) {
+    notice = { text: '설정에서 NVIDIA 모델명을 입력하세요.', kind: 'err' }
+  } else if (nvidiaSelected && settings.chatWebSearch) {
+    notice = { text: 'NVIDIA 웹 조사 채팅은 아직 지원하지 않습니다. 설정에서 웹 검색을 끄면 일반 채팅을 사용할 수 있습니다.', kind: 'warn' }
+  } else if (!nvidiaSelected && backendReady && health && !health.ollama) {
     notice = { text: 'Ollama에 연결할 수 없습니다 — Ollama 앱을 실행하세요', kind: 'err' }
-  } else if (backendReady && ollamaOk && !modelReady) {
+  } else if (!nvidiaSelected && backendReady && ollamaOk && !modelReady) {
     notice = { text: `모델 '${settings.model}'이 설치되어 있지 않습니다 — 터미널에서: ollama pull ${settings.model}`, kind: 'warn' }
   }
 
@@ -309,7 +336,7 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
       <div className="view view--chat">
         <header className="view__head">
           <h1>채팅</h1>
-          <p className="view__desc">로컬 모델과의 대화</p>
+          <p className="view__desc">{nvidiaSelected ? 'NVIDIA 일반 채팅' : '로컬 모델과의 대화'}</p>
         </header>
 
       <div className="chat-scroll" ref={scrollRef}>
@@ -320,7 +347,9 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
             </div>
             <div className="empty__title">무엇이든 물어보세요</div>
             <div className="empty__desc">
-              {settings.chatWebSearch
+              {nvidiaSelected
+                ? '프롬프트와 대화 문맥이 선택한 NVIDIA 서비스로 전송됩니다 · 웹 조사와 도구는 아직 지원하지 않습니다'
+                : settings.chatWebSearch
                 ? '필요할 때 자동으로 인터넷을 조사해 답합니다 · 검색이 불필요하면 로컬에서 처리 (설정에서 끌 수 있어요)'
                 : '모든 대화는 로컬에서 처리됩니다 · 사고 과정은 접힌 상태로 표시됩니다'}
             </div>
@@ -420,21 +449,21 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
       <div className="composer-tools">
         <div className="composer-tools__right">
           <Dropdown
-            value={settings.model}
+            value={nvidiaSelected ? settings.nvidiaModel : settings.model}
             options={modelOptions}
-            onChange={(v) => void onSaveSettings({ model: v })}
+            onChange={(v) => void onSaveSettings(nvidiaSelected ? { nvidiaModel: v } : { model: v })}
             mono
             align="right"
             title="모델"
             placeholder="모델"
           />
-          <Dropdown
+          {!nvidiaSelected && <Dropdown
             value={settings.reasoningEffort}
             options={EFFORT_OPTIONS}
             onChange={(v) => void onSaveSettings({ reasoningEffort: v as ReasoningEffort })}
             align="right"
             title="추론 성능"
-          />
+          />}
         </div>
       </div>
       </div>

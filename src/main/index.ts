@@ -11,7 +11,10 @@ import {
   backendInfo,
   backendToken,
   onBackendChange,
-  clearBackendNvidiaCredential
+  clearBackendNvidiaCredential,
+  setBackendNvidiaCredential,
+  bindBackendNvidiaCredential,
+  backendNvidiaCredentialStatus
 } from './backend'
 import { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
 import { recordUsage, usageSummary, clearUsage } from './usage'
@@ -29,8 +32,10 @@ import { freezeAppDataWrites } from './appdata-guard'
 import {
   deleteNvidiaCredential,
   nvidiaCredentialStatus,
+  readNvidiaCredentialForTransfer,
   saveNvidiaCredential
 } from './nvidia-credentials'
+import { prepareNvidiaExecution } from './nvidia-execution'
 import {
   destroyComfySurface,
   reloadComfySurface,
@@ -59,7 +64,11 @@ import {
   clearAllConversations
 } from './conversations'
 import type { AppSettings } from '../shared/settings'
-import type { NvidiaCredentialBindingInput } from '../shared/nvidia'
+import {
+  canonicalizeNvidiaBinding,
+  sameNvidiaBinding,
+  type NvidiaCredentialBindingInput
+} from '../shared/nvidia'
 import type { ComfySurfaceRequest } from '../shared/comfy'
 import type { ConversationKind, ConversationSave } from '../shared/conversation'
 
@@ -310,8 +319,22 @@ app.whenReady().then(() => {
     }
     // 디스코드 봇 On/Off를 공용 '저장'으로 바꿔도 런타임 봇이 즉시 시작/중지되도록 재적용
     // (예전엔 '연결/적용' 버튼으로만 반영돼, 토글 후 저장하면 플래그만 바뀌고 봇 상태는 그대로였다).
-    if ('discordEnabled' in patch) void applyDiscordConfig()
-    if (previous.activeLlmProvider !== 'ollama' && next.activeLlmProvider === 'ollama') {
+    // 공급자 전환도 즉시 재적용한다. 실행 중인 Ollama Discord 봇이 NVIDIA
+    // 선택 뒤에도 계속 남아 공급자 우회 경로가 되지 않도록 NVIDIA에서는 중지한다.
+    if ('discordEnabled' in patch || 'activeLlmProvider' in patch) void applyDiscordConfig()
+    const previousBinding = previous.activeLlmProvider === 'nvidia'
+      ? canonicalizeNvidiaBinding({
+          deploymentMode: previous.nvidiaDeploymentMode,
+          endpoint: previous.nvidiaDeploymentMode === 'nim' ? previous.nvidiaNimEndpoint : undefined
+        })
+      : null
+    const nextBinding = next.activeLlmProvider === 'nvidia'
+      ? canonicalizeNvidiaBinding({
+          deploymentMode: next.nvidiaDeploymentMode,
+          endpoint: next.nvidiaDeploymentMode === 'nim' ? next.nvidiaNimEndpoint : undefined
+        })
+      : null
+    if (previousBinding && (!nextBinding || !sameNvidiaBinding(previousBinding, nextBinding))) {
       void clearBackendNvidiaCredential().catch(() => {})
     }
     return next
@@ -430,6 +453,21 @@ app.whenReady().then(() => {
     await clearBackendNvidiaCredential().catch(() => {})
     deleteNvidiaCredential()
   })
+  ipcMain.handle(
+    'nvidia:execution:prepare',
+    async (e, requestedInput: NvidiaCredentialBindingInput) => {
+      requireMainRenderer(e.sender)
+      return prepareNvidiaExecution(requestedInput, {
+        loadSettings,
+        credentialStatus: nvidiaCredentialStatus,
+        readCredential: readNvidiaCredentialForTransfer,
+        setSidecarCredential: setBackendNvidiaCredential,
+        bindSidecarNim: (endpoint) => bindBackendNvidiaCredential('nim', endpoint),
+        clearSidecarCredential: clearBackendNvidiaCredential,
+        sidecarStatus: backendNvidiaCredentialStatus
+      })
+    }
+  )
   onBackendChange((i) => {
     BrowserWindow.getAllWindows().forEach((w) => w.webContents.send('backend:status', i))
     // 백엔드가 준비되면 항상 디스코드 설정을 적용한다. enabled=false여도 apply는 예약 저장소를

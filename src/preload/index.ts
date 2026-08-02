@@ -2,7 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { AppSettings } from '../shared/settings'
 import type {
   NvidiaCredentialBindingInput,
-  NvidiaCredentialStatus
+  NvidiaCredentialStatus,
+  NvidiaExecutionPrepareResult
 } from '../shared/nvidia'
 import type { BackendInfo } from '../shared/backend'
 import type { UpdateStatus } from '../shared/update'
@@ -53,6 +54,10 @@ const api = {
       replace: (binding: NvidiaCredentialBindingInput, apiKey: string): Promise<void> =>
         ipcRenderer.invoke('nvidia:credential:replace', binding, apiKey),
       delete: (): Promise<void> => ipcRenderer.invoke('nvidia:credential:delete')
+    },
+    execution: {
+      prepare: (binding: NvidiaCredentialBindingInput): Promise<NvidiaExecutionPrepareResult> =>
+        ipcRenderer.invoke('nvidia:execution:prepare', binding)
     }
   },
   backend: {

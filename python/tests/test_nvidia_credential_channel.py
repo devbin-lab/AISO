@@ -5,6 +5,7 @@ import itertools
 import pytest
 
 import main
+from llm import LlmEvent
 
 try:
     from fastapi.testclient import TestClient
@@ -127,3 +128,135 @@ def test_lookalike_127_hostname_is_not_treated_as_loopback(client):
         json={"deploymentMode": "nim", "endpoint": "http://127.evil.example/v1", "apiKey": "key"},
     )
     assert response.status_code == 400
+
+
+def test_keyless_nim_bind_is_exact_and_build_bind_is_rejected(client):
+    endpoint = "https://nim.example.com/v1"
+    nim = client.post(
+        "/internal/credentials/bind",
+        headers=headers(),
+        json={"deploymentMode": "nim", "endpoint": endpoint + "/"},
+    )
+    assert nim.status_code == 200
+    assert main._credential_memory.status() == {
+        "hasCredential": False,
+        "binding": {"deploymentMode": "nim", "endpoint": endpoint},
+    }
+    build = client.post(
+        "/internal/credentials/bind",
+        headers=headers(),
+        json={"deploymentMode": "build", "endpoint": main.NVIDIA_BUILD_BASE_URL},
+    )
+    assert build.status_code == 400
+
+
+def test_nvidia_chat_uses_only_exact_sidecar_binding_and_never_ollama(client, monkeypatch):
+    canary = "CANARY-SIDECAR-TRANSFER-68312"
+    saved = client.post(
+        "/internal/credentials/set",
+        headers=headers(),
+        json={
+            "deploymentMode": "build",
+            "endpoint": main.NVIDIA_BUILD_BASE_URL,
+            "apiKey": canary,
+        },
+    )
+    assert saved.status_code == 200
+    calls = []
+
+    class FakeNvidiaRuntime:
+        async def chat_stream(self, _request):
+            yield LlmEvent(kind="content", text="nvidia-only")
+            yield LlmEvent(kind="done", done_reason="stop", output_tokens=2)
+
+    def fake_create_runtime(name, endpoint, **kwargs):
+        calls.append((name, endpoint, kwargs))
+        assert name == "nvidia"
+        return FakeNvidiaRuntime()
+
+    monkeypatch.setattr(main, "create_runtime", fake_create_runtime)
+    response = client.post(
+        "/chat",
+        headers=headers(ordinary=True, channel=False),
+        json={
+            "provider": "nvidia",
+            "deployment_mode": "build",
+            "endpoint": main.NVIDIA_BUILD_BASE_URL,
+            "model": "meta/llama-test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "research": False,
+        },
+    )
+    assert response.status_code == 200
+    assert "nvidia-only" in response.text
+    assert '"type": "done"' in response.text
+    assert canary not in response.text
+    assert calls == [
+        (
+            "nvidia",
+            main.NVIDIA_BUILD_BASE_URL,
+            {"credential": canary, "deployment_mode": "build"},
+        )
+    ]
+
+
+def test_nvidia_binding_mismatch_and_research_block_before_runtime_egress(client, monkeypatch):
+    saved = client.post(
+        "/internal/credentials/set",
+        headers=headers(),
+        json={
+            "deploymentMode": "build",
+            "endpoint": main.NVIDIA_BUILD_BASE_URL,
+            "apiKey": "CANARY-NOT-FOR-NIM-88214",
+        },
+    )
+    assert saved.status_code == 200
+    calls = []
+    monkeypatch.setattr(main, "create_runtime", lambda *args, **kwargs: calls.append((args, kwargs)))
+    ordinary = headers(ordinary=True, channel=False)
+    base = {
+        "provider": "nvidia",
+        "model": "meta/llama-test",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    mismatch = client.post(
+        "/chat",
+        headers=ordinary,
+        json={
+            **base,
+            "deployment_mode": "nim",
+            "endpoint": "https://nim.example.com/v1",
+            "research": False,
+        },
+    )
+    research = client.post(
+        "/chat",
+        headers=ordinary,
+        json={
+            **base,
+            "deployment_mode": "build",
+            "endpoint": main.NVIDIA_BUILD_BASE_URL,
+            "research": True,
+        },
+    )
+    assert '"type": "error"' in mismatch.text
+    assert '"type": "error"' in research.text
+    assert calls == []
+
+
+def test_nvidia_agent_is_blocked_before_workspace_or_tool_execution(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(main, "validate_workspace", lambda *_args: calls.append("workspace"))
+    monkeypatch.setattr(main, "run_agent", lambda **_kwargs: calls.append("agent"))
+    response = client.post(
+        "/agent",
+        headers=headers(ordinary=True, channel=False),
+        json={
+            "provider": "nvidia",
+            "workspace": "C:/untrusted",
+            "messages": [{"role": "user", "content": "run a tool"}],
+        },
+    )
+    assert response.status_code == 200
+    assert '"type": "error"' in response.text
+    assert calls == []

@@ -15,8 +15,9 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "test:comfy-model-analysis": "node --experimental-strip-types --test src/main/comfy-model-analysis.test.ts src/main/comfy-workflow-template.test.ts",
     "test:gate2": "node --experimental-strip-types --test src/shared/nvidia.test.ts src/main/settings-storage.test.ts src/main/nvidia-credential-store.test.ts",
+    "test:gate3": "node --experimental-strip-types --test src/main/nvidia-execution.test.ts",
     "test:renderer": "vitest run --config vitest.config.ts",
-    "test": "npm run test:comfy-model-analysis && npm run test:gate2 && npm run test:renderer",
+    "test": "npm run test:comfy-model-analysis && npm run test:gate2 && npm run test:gate3 && npm run test:renderer",
     "build:pyruntime": "powershell -ExecutionPolicy Bypass -File scripts/build-pyruntime.ps1",
     "build:win": "electron-vite build && electron-builder --win",
     "dist:win": "npm run build:pyruntime && npm run build:win"

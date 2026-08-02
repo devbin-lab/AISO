@@ -42,6 +42,9 @@ export async function ragIndex(
   onEvent: (e: RagIndexEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {
+  if (settings.activeLlmProvider === 'nvidia') {
+    throw new Error('NVIDIA RAG 색인은 아직 지원하지 않습니다. Ollama로 전환해 주세요.')
+  }
   const res = await fetch(`http://127.0.0.1:${port}/rag/index`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },

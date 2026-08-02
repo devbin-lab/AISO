@@ -64,6 +64,10 @@ function App(): React.JSX.Element {
 
   // Ollama 헬스 폴링 (백엔드 준비 후 5초 간격)
   useEffect(() => {
+    if (settings.activeLlmProvider !== 'ollama') {
+      setHealth(null)
+      return
+    }
     if (backend.state !== 'ready' || backend.port == null) {
       setHealth(null)
       return
@@ -87,7 +91,7 @@ function App(): React.JSX.Element {
       alive = false
       window.clearInterval(t)
     }
-  }, [backend.state, backend.port, settings.ollamaHost])
+  }, [backend.state, backend.port, settings.activeLlmProvider, settings.ollamaHost])
 
   // 테마 적용 (html data-theme + 네이티브 타이틀바 색)
   useEffect(() => {
@@ -135,7 +139,7 @@ function App(): React.JSX.Element {
 
   return (
     <div className="frame">
-      <Titlebar backend={backend} health={health} convToggle={convToggle} />
+      <Titlebar backend={backend} health={health} provider={settings.activeLlmProvider} convToggle={convToggle} />
       <div className="body">
         <Sidebar view={view} onNavigate={navigate} />
         <main className="content">

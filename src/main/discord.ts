@@ -75,6 +75,26 @@ export async function applyDiscordConfig(): Promise<DiscordApplyResult> {
   const info = backendInfo()
   if (info.state !== 'ready' || !info.port) return { ok: false, detail: '백엔드가 아직 준비되지 않았습니다.' }
   const s = loadSettings()
+  if (s.activeLlmProvider === 'nvidia' && s.discordEnabled) {
+    try {
+      await fetch(`http://127.0.0.1:${info.port}/discord/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Aiso-Token': backendToken() },
+        body: JSON.stringify({
+          enabled: false,
+          token: '',
+          data_dir: join(app.getPath('userData'), 'discord'),
+          model: s.model,
+          context_length: s.contextLength,
+          keep_alive: s.keepAlive,
+          ollama_host: s.ollamaHost
+        })
+      })
+    } catch {
+      /* 차단 결과는 아래의 고정 안내로 반환한다. */
+    }
+    return { ok: false, detail: 'NVIDIA Discord 연결은 Gate 5 이후에 지원합니다. Ollama로 전환해 주세요.' }
+  }
   const token = loadDiscordToken()
   // 소유자·채널·허용목록은 봇이 런타임에 자동 판별/관리한다. 동적 상태는 이 폴더에 영속.
   const dataDir = join(app.getPath('userData'), 'discord')

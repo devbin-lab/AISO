@@ -5,14 +5,12 @@ Electron 메인 프로세스가 앱 시작 시 이 서버를 스폰한다:
 """
 
 import hmac
-import ipaddress
 import json
 import os
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -35,12 +33,14 @@ from rag import search as rag_search
 from rag import status as rag_status
 from tools import ToolError, validate_workspace
 from llm import (
+    NVIDIA_BUILD_BASE_URL,
     LlmFailureKind,
     LlmModelRuntime,
     LlmProviderError,
     LlmRequest,
     LlmRuntime,
     create_runtime,
+    canonicalize_nvidia_endpoint,
 )
 
 # discord.py는 선택적 — 미설치/임포트 오류가 사이드카(채팅·에이전트) 전체를 죽이지 않게 가드한다.
@@ -58,7 +58,6 @@ MAX_DISCORD_PARSE_RETRIES = 2  # 디스코드 툴 루프의 툴콜 파싱오류 
 # 렌더러만 아는 이 토큰을 X-Aiso-Token 헤더로 검사해 근본적으로 잠근다.
 AUTH_TOKEN = os.environ.get("AISO_AUTH_TOKEN", "")
 CREDENTIAL_CHANNEL_TOKEN = os.environ.get("AISO_CREDENTIAL_CHANNEL_TOKEN", "")
-NVIDIA_BUILD_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 
 class _CredentialMemory:
@@ -79,9 +78,19 @@ class _CredentialMemory:
             self._used_nonces.discard(self._nonce_order.popleft())
 
     def set(self, binding: dict[str, str], api_key: str) -> None:
-        self.clear_secret()
+        self.bind(binding)
         self._secret = bytearray(api_key.encode("utf-8"))
+
+    def bind(self, binding: dict[str, str]) -> None:
+        self.clear_secret()
         self._binding = dict(binding)
+
+    def credential_for(self, binding: dict[str, str]) -> str | None:
+        if self._binding != binding:
+            raise HTTPException(status_code=409, detail="NVIDIA credential binding mismatch")
+        if self._secret is None:
+            return None
+        return self._secret.decode("utf-8")
 
     def clear_secret(self) -> None:
         if self._secret is not None:
@@ -104,29 +113,11 @@ def _credential_nonce(request: Request) -> str:
 
 
 def _credential_binding(deployment_mode: str, endpoint: str) -> dict[str, str]:
-    if deployment_mode == "build":
-        if endpoint != NVIDIA_BUILD_BASE_URL:
-            raise HTTPException(status_code=400, detail="invalid NVIDIA Build binding")
-        return {"deploymentMode": "build", "endpoint": NVIDIA_BUILD_BASE_URL}
-    if deployment_mode != "nim":
-        raise HTTPException(status_code=400, detail="unsupported NVIDIA deployment mode")
     try:
-        parsed = urlsplit(endpoint)
-        _ = parsed.port
+        canonical = canonicalize_nvidia_endpoint(deployment_mode, endpoint)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail="invalid NIM endpoint") from exc
-    host = (parsed.hostname or "").lower()
-    loopback = host == "localhost" or host.endswith(".localhost")
-    try:
-        loopback = loopback or ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        pass
-    if (
-        parsed.scheme not in ("http", "https") or not host or parsed.username or parsed.password
-        or parsed.query or parsed.fragment or (parsed.scheme == "http" and not loopback)
-    ):
-        raise HTTPException(status_code=400, detail="invalid NIM endpoint")
-    return {"deploymentMode": "nim", "endpoint": endpoint}
+        raise HTTPException(status_code=400, detail="invalid NVIDIA credential binding") from exc
+    return {"deploymentMode": deployment_mode, "endpoint": canonical}
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
@@ -208,6 +199,11 @@ class CredentialSetRequest(BaseModel):
     apiKey: str = Field(min_length=1, max_length=16384)
 
 
+class CredentialBindRequest(BaseModel):
+    deploymentMode: Literal["build", "nim"]
+    endpoint: str = Field(min_length=1, max_length=2048)
+
+
 @app.post("/internal/credentials/set")
 async def credential_set(request: Request, body: CredentialSetRequest):
     _credential_nonce(request)
@@ -220,6 +216,16 @@ async def credential_set(request: Request, body: CredentialSetRequest):
 async def credential_clear(request: Request):
     _credential_nonce(request)
     _credential_memory.clear_secret()
+    return {"ok": True}
+
+
+@app.post("/internal/credentials/bind")
+async def credential_bind(request: Request, body: CredentialBindRequest):
+    _credential_nonce(request)
+    binding = _credential_binding(body.deploymentMode, body.endpoint)
+    if body.deploymentMode == "build":
+        raise HTTPException(status_code=400, detail="NVIDIA Build requires a credential")
+    _credential_memory.bind(binding)
     return {"ok": True}
 
 
@@ -236,6 +242,9 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
+    provider: Literal["ollama", "nvidia"] = "ollama"
+    deployment_mode: Literal["build", "nim"] | None = None
+    endpoint: str | None = None
     model: str = "gemma4:12b"
     reasoning_effort: str = Field(default="medium", pattern="^(low|medium|high)$")
     temperature: float = 0.7
@@ -369,6 +378,19 @@ async def _stream_chat(runtime: LlmRuntime, request: LlmRequest):
                 yield {"type": "content", "text": event.text}
             elif event.kind == "tool_call_delta":
                 yield {"type": "tool_calls", "calls": list(event.tool_calls or [])}
+            elif event.kind == "usage":
+                yield {
+                    "type": "usage",
+                    "input": event.input_tokens,
+                    "output": event.output_tokens,
+                    "total": event.total_tokens,
+                }
+            elif event.kind == "incomplete":
+                yield {"type": "incomplete", "error": event.error or "응답 스트림이 불완전하게 종료되었습니다."}
+            elif event.kind == "cancelled":
+                yield {"type": "cancelled", "error": event.error or "응답이 취소되었습니다."}
+            elif event.kind == "error":
+                yield {"type": "error", "error": event.error or "LLM 응답 오류"}
             elif event.kind == "done":
                 if event.done_reason == "length":
                     yield {
@@ -395,7 +417,9 @@ async def _prepare_model(host: str, model: str) -> LlmModelRuntime:
 async def chat(req: ChatRequest):
     """NDJSON 스트리밍 채팅. think(추론 강도)는 지원 모델(gemma4·gpt-oss 등)에 적용된다."""
     host = (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
-    runtime = create_runtime("ollama", host)
+    runtime: LlmRuntime | None = None
+    if req.provider == "ollama":
+        runtime = create_runtime("ollama", host)
     base = LlmRequest(
         model=req.model,
         messages=[{"role": m.role, "content": m.content} for m in req.messages],
@@ -408,6 +432,62 @@ async def chat(req: ChatRequest):
     )
 
     async def gen():
+        if req.provider == "nvidia":
+            if req.research:
+                yield json.dumps(
+                    {"type": "error", "error": "NVIDIA 웹 조사 채팅은 Gate 4 이후에 지원합니다. 웹 검색을 끄고 일반 채팅을 사용하세요."},
+                    ensure_ascii=False,
+                ) + "\n"
+                return
+            if not req.model.strip():
+                yield json.dumps(
+                    {"type": "error", "error": "NVIDIA 모델명을 설정해 주세요."}, ensure_ascii=False
+                ) + "\n"
+                return
+            try:
+                mode = req.deployment_mode or "build"
+                endpoint = canonicalize_nvidia_endpoint(mode, req.endpoint or "")
+                binding = {"deploymentMode": mode, "endpoint": endpoint}
+                credential = _credential_memory.credential_for(binding)
+                if mode == "build" and not credential:
+                    raise ValueError("NVIDIA Build API 키가 준비되지 않았습니다.")
+                nvidia_runtime = create_runtime(
+                    "nvidia",
+                    endpoint,
+                    credential=credential,
+                    deployment_mode=mode,
+                )
+                chat_stream = _stream_chat(nvidia_runtime, base)
+                completed = False
+                try:
+                    async for chunk in chat_stream:
+                        yield json.dumps(chunk, ensure_ascii=False) + "\n"
+                    completed = True
+                finally:
+                    if not completed:
+                        await chat_stream.aclose()
+                return
+            except HTTPException:
+                yield json.dumps(
+                    {"type": "error", "error": "현재 NVIDIA 배포 대상에 맞는 자격 증명이 준비되지 않았습니다."},
+                    ensure_ascii=False,
+                ) + "\n"
+                return
+            except LlmProviderError as e:
+                yield json.dumps({"type": "error", "error": e.body}, ensure_ascii=False) + "\n"
+                return
+            except (ValueError, TypeError):
+                yield json.dumps(
+                    {"type": "error", "error": "NVIDIA 실행 설정 또는 자격 증명을 확인하세요."}, ensure_ascii=False
+                ) + "\n"
+                return
+            except Exception:  # noqa: BLE001 - upstream detail/key must never escape
+                yield json.dumps(
+                    {"type": "error", "error": "NVIDIA 연결 중 안전하게 처리할 수 없는 오류가 발생했습니다."},
+                    ensure_ascii=False,
+                ) + "\n"
+                return
+
         # 웹 검색 켜짐 → 조사 루프(web_search·web_fetch)로 위임. NDJSON 이벤트는 동일 계약.
         if req.research:
             research_stream = run_research_chat(
@@ -429,6 +509,7 @@ async def chat(req: ChatRequest):
                     await research_stream.aclose()
             return
 
+        assert runtime is not None
         model_runtime = await _prepare_model(host, req.model)
         attempts = runtime.prepare_attempts(base, req.reasoning_effort, model_runtime)
         noticed = False
@@ -676,6 +757,7 @@ async def ollama_unload(req: UnloadRequest):
 
 class AgentRequest(BaseModel):
     messages: list[ChatMessage]
+    provider: Literal["ollama", "nvidia"] = "ollama"
     workspace: str
     model: str = "gemma4:12b"
     reasoning_effort: str = Field(default="medium", pattern="^(low|medium|high)$")
@@ -709,6 +791,13 @@ class ApprovalRequest(BaseModel):
 @app.post("/agent")
 async def agent(req: AgentRequest):
     """에이전트 하네스 — 파일 툴 콜링 루프. NDJSON 이벤트 스트림."""
+    if req.provider == "nvidia":
+        async def unsupported():
+            yield json.dumps(
+                {"type": "error", "error": "NVIDIA Agent와 도구 실행은 Gate 5 이후에 지원합니다."},
+                ensure_ascii=False,
+            ) + "\n"
+        return StreamingResponse(unsupported(), media_type="application/x-ndjson")
     host = (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
     global _preview_root
     try:  # 에이전트가 만드는 파일을 우측 미리보기에서 바로 볼 수 있게 루트 설정

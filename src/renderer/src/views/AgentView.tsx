@@ -139,12 +139,17 @@ function AgentView({
 
   // RAG 색인 상태 로드 (작업 폴더·백엔드 준비 시)
   useEffect(() => {
-    if (backend.state === 'ready' && backend.port && settings.workspace.trim()) {
+    if (
+      settings.activeLlmProvider === 'ollama' &&
+      backend.state === 'ready' &&
+      backend.port &&
+      settings.workspace.trim()
+    ) {
       ragStatus(backend.port, settings.workspace).then(setRag).catch(() => setRag(null))
     } else {
       setRag(null)
     }
-  }, [backend.state, backend.port, settings.workspace])
+  }, [backend.state, backend.port, settings.activeLlmProvider, settings.workspace])
 
   const previewUrl =
     backend.port && previewPath
@@ -271,8 +276,9 @@ function AgentView({
   const backendReady = backend.state === 'ready' && backend.port != null
   const hasWorkspace = settings.workspace.trim().length > 0
   const ollamaOk = health?.ollama === true
+  const nvidiaSelected = settings.activeLlmProvider === 'nvidia'
   // 작업 폴더는 선택 사항 — 없어도 웹 조사·스킬 제작은 가능(백엔드가 로컬 도구를 잠근다).
-  const ready = backendReady && ollamaOk
+  const ready = backendReady && ollamaOk && !nvidiaSelected
   const canSend = ready && !running && input.trim().length > 0
 
   // ---- 이벤트 → 타임라인 리듀서 (순수: 기존 객체를 변형하지 않는다) ----
@@ -501,7 +507,7 @@ function AgentView({
 
   // 작업 폴더를 임베딩 색인 (진행 상황 표시). 임베딩 모델은 채팅 모델과 무관.
   const runIndex = async (): Promise<void> => {
-    if (!backendReady || !hasWorkspace || indexing) return
+    if (nvidiaSelected || !backendReady || !hasWorkspace || indexing) return
     autoIndexedRef.current = settings.workspace // 이 워크스페이스는 (자동/수동) 색인 시도함 → 자동 재트리거 방지
     setIndexing(true)
     setRagNote(null)
@@ -541,7 +547,7 @@ function AgentView({
   // 색인이 없으면 자동으로 한 번 색인한다 (매번 수동 클릭 불필요). 이후 파일 변경은 백엔드가
   // 백그라운드로 재색인하므로 최초 1회만 트리거하면 된다.
   useEffect(() => {
-    if (!settings.ragEnabled || !backendReady || !hasWorkspace || indexing) return
+    if (nvidiaSelected || !settings.ragEnabled || !backendReady || !hasWorkspace || indexing) return
     if (rag == null || rag.indexed) return // 상태 미확인 or 이미 색인됨
     if (autoIndexedRef.current === settings.workspace) return // 이 워크스페이스는 이미 시도함
     // 임베딩 모델이 설치돼 있을 때만 (health 로드 대기 + 미설치면 조용히 대기 — 수동 버튼으로 처리)
@@ -555,6 +561,7 @@ function AgentView({
     backendReady,
     hasWorkspace,
     indexing,
+    nvidiaSelected,
     settings.ragEnabled,
     settings.workspace,
     settings.embeddingModel,
@@ -589,6 +596,7 @@ function AgentView({
 
   let notice: { text: string; kind: 'err' | 'warn' } | null = null
   if (backend.state !== 'ready') notice = { text: '백엔드 엔진 준비 중…', kind: 'warn' }
+  else if (nvidiaSelected) notice = { text: 'NVIDIA Agent와 도구 실행은 Gate 5 이후에 지원합니다. 일반 채팅만 사용할 수 있습니다.', kind: 'warn' }
   else if (!ollamaOk) notice = { text: 'Ollama에 연결할 수 없습니다 — Ollama 앱을 실행하세요', kind: 'err' }
   else if (!hasWorkspace)
     notice = {
@@ -794,9 +802,11 @@ function AgentView({
           <button
             className={`ws-pick rag-chip ${rag?.indexed ? 'rag-chip--on' : ''}`}
             onClick={() => void runIndex()}
-            disabled={indexing || !backendReady}
+            disabled={nvidiaSelected || indexing || !backendReady}
             data-tip={
-              rag?.indexed
+              nvidiaSelected
+                ? 'NVIDIA RAG 색인은 아직 지원하지 않습니다'
+                : rag?.indexed
                 ? `RAG 활성 · 조각 ${rag.count}개 (${rag.embed_model}) · 클릭하면 다시 만듭니다`
                 : 'RAG(검색 증강) — 작업 폴더를 의미 검색용으로 준비해 에이전트가 관련 코드·문서를 자동 참고 (자동 실행)'
             }

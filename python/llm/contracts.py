@@ -18,6 +18,16 @@ class LlmFailureKind(str, Enum):
     REASONING_UNSUPPORTED = "reasoning_unsupported"
     TOOLS_UNSUPPORTED = "tools_unsupported"
     TOOL_PARSE = "tool_parse"
+    AUTH = "auth"
+    PAYMENT = "payment"
+    RATE_LIMIT = "rate_limit"
+    NOT_FOUND = "not_found"
+    INVALID_REQUEST = "invalid_request"
+    UPSTREAM = "upstream"
+    CONNECT = "connect"
+    TIMEOUT = "timeout"
+    MALFORMED = "malformed"
+    TRUNCATED = "truncated"
 
 
 class LlmProviderError(Exception):
@@ -68,6 +78,8 @@ class LlmEvent:
     text: str = ""
     tool_calls: Sequence[Mapping[str, Any]] | None = None
     output_tokens: int | None = None
+    input_tokens: int | None = None
+    total_tokens: int | None = None
     total_duration: int | None = None
     done_reason: str | None = None
     error: str | None = None

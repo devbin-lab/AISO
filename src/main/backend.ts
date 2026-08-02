@@ -60,7 +60,7 @@ function credentialChannelHeaders(nonce: string): Record<string, string> {
 }
 
 async function credentialChannelRequest(
-  operation: 'set' | 'clear' | 'status',
+  operation: 'set' | 'bind' | 'clear' | 'status',
   body?: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
   if (info.state !== 'ready' || info.port === null) throw new Error('사이드카가 준비되지 않았습니다.')
@@ -83,6 +83,13 @@ export async function setBackendNvidiaCredential(
   apiKey: string
 ): Promise<void> {
   await credentialChannelRequest('set', { deploymentMode, endpoint, apiKey })
+}
+
+export async function bindBackendNvidiaCredential(
+  deploymentMode: 'nim',
+  endpoint: string
+): Promise<void> {
+  await credentialChannelRequest('bind', { deploymentMode, endpoint })
 }
 
 export async function clearBackendNvidiaCredential(): Promise<void> {

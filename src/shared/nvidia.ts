@@ -24,6 +24,11 @@ export interface NvidiaCredentialStatus {
   detail?: string
 }
 
+export interface NvidiaExecutionPrepareResult {
+  ready: true
+  credential: 'stored' | 'not_required'
+}
+
 function isLoopbackHostname(hostname: string): boolean {
   const host = hostname.toLowerCase()
   if (host === 'localhost' || host.endsWith('.localhost')) return true

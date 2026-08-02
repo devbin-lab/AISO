@@ -1,4 +1,8 @@
-import { type AppSettings, resolveTemperature } from '../../../shared/settings'
+import {
+  type AppSettings,
+  resolveTemperature,
+  snapshotLlmSettings
+} from '../../../shared/settings'
 import { authHeaders } from './backend'
 
 export interface ChatChunk {
@@ -12,6 +16,9 @@ export interface ChatChunk {
     | 'tool_result'
     | 'usage'
     | 'reset_content'
+    | 'incomplete'
+    | 'cancelled'
+    | 'tool_calls'
   text?: string
   error?: string
   eval_count?: number
@@ -39,16 +46,30 @@ export async function streamChat(
   signal?: AbortSignal
 ): Promise<void> {
   const lastUserText = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
+  const snapshot = snapshotLlmSettings(settings)
+  if (snapshot.provider === 'nvidia') {
+    if (settings.chatWebSearch) {
+      throw new Error('NVIDIA 웹 조사 채팅은 아직 지원하지 않습니다. 설정에서 웹 검색을 끄고 일반 채팅을 사용하세요.')
+    }
+    if (!snapshot.model.trim()) throw new Error('설정에서 NVIDIA 모델명을 입력해 주세요.')
+    await window.api.nvidia.execution.prepare({
+      deploymentMode: snapshot.deploymentMode!,
+      endpoint: snapshot.endpoint
+    })
+  }
   const res = await fetch(`http://127.0.0.1:${port}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({
       messages,
-      model: settings.model,
+      provider: snapshot.provider,
+      deployment_mode: snapshot.deploymentMode,
+      endpoint: snapshot.endpoint,
+      model: snapshot.model,
       reasoning_effort: settings.reasoningEffort,
       temperature: resolveTemperature(settings, lastUserText),
       context_length: settings.contextLength,
-      ollama_host: settings.ollamaHost,
+      ollama_host: snapshot.provider === 'ollama' ? snapshot.endpoint : undefined,
       keep_alive: settings.keepAlive,
       research: settings.chatWebSearch
     }),
@@ -61,20 +82,31 @@ export async function streamChat(
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buf = ''
+  let terminal = false
+  const processLine = (lineValue: string): void => {
+    const line = lineValue.trim()
+    if (!line) return
+    let chunk: ChatChunk
+    try {
+      chunk = JSON.parse(line) as ChatChunk
+    } catch {
+      throw new Error('백엔드 응답 스트림 형식이 올바르지 않습니다.')
+    }
+    onChunk(chunk)
+    if (['done', 'error', 'incomplete', 'cancelled'].includes(chunk.type)) terminal = true
+  }
   for (;;) {
     const { done, value } = await reader.read()
     if (done) break
     buf += decoder.decode(value, { stream: true })
     let idx: number
     while ((idx = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, idx).trim()
+      const line = buf.slice(0, idx)
       buf = buf.slice(idx + 1)
-      if (!line) continue
-      try {
-        onChunk(JSON.parse(line) as ChatChunk)
-      } catch {
-        /* 불완전한 JSON 라인 무시 */
-      }
+      processLine(line)
     }
   }
+  buf += decoder.decode()
+  if (buf.trim()) processLine(buf)
+  if (!terminal) throw new Error('백엔드 응답이 완료 표식 없이 종료되었습니다.')
 }

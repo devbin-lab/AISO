@@ -41,6 +41,9 @@ export async function streamAgent(
   signal?: AbortSignal,
   comfySelection?: ComfySelectionRequest
 ): Promise<void> {
+  if (settings.activeLlmProvider === 'nvidia') {
+    throw new Error('NVIDIA Agent와 도구 실행은 Gate 5 이후에 지원합니다. Ollama로 전환해 주세요.')
+  }
   const lastUserText = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
   const comfySelectionMode = settings.comfyModelSelectionMode === 'manual' ? 'manual' : 'auto'
   const selectedComfyModelId =
@@ -52,6 +55,7 @@ export async function streamAgent(
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({
       messages,
+      provider: settings.activeLlmProvider,
       workspace,
       model: settings.model,
       reasoning_effort: settings.reasoningEffort,
