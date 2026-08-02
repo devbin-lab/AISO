@@ -229,7 +229,7 @@ def test_generate_image_is_conditionally_exposed_and_emits_reference(env, monkey
         seen["generate"] = kwargs
         return generated_result()
 
-    monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
+    monkeypatch.setattr(agent, "_release_llm_for_image", fake_unload)
     monkeypatch.setattr(agent, "generate_image", fake_generate_image)
     chat = FakeChat(
         [
@@ -299,7 +299,7 @@ def test_manual_comfy_selection_forces_the_exact_profile_id(env, monkeypatch):
         seen.update(kwargs)
         return generated_result()
 
-    monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
+    monkeypatch.setattr(agent, "_release_llm_for_image", fake_unload)
     monkeypatch.setattr(agent, "generate_image", fake_generate_image)
     chat = FakeChat([
         {"calls": [("generate_image", {"prompt": "1girl", "model_hint": "another model"})]}
@@ -355,7 +355,7 @@ def test_completed_meta_plan_plus_successful_image_finishes_without_followup_llm
     async def fake_generate_image(**_kwargs):
         return generated_result()
 
-    monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
+    monkeypatch.setattr(agent, "_release_llm_for_image", fake_unload)
     monkeypatch.setattr(agent, "generate_image", fake_generate_image)
     chat = FakeChat(
         [
@@ -392,7 +392,7 @@ def test_plan_completion_after_image_finishes_without_third_llm_turn(env, monkey
     async def fake_generate_image(**_kwargs):
         return generated_result()
 
-    monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
+    monkeypatch.setattr(agent, "_release_llm_for_image", fake_unload)
     monkeypatch.setattr(agent, "generate_image", fake_generate_image)
     chat = FakeChat(
         [
@@ -436,7 +436,7 @@ def test_multi_image_terminal_failure_preserves_verified_success_context(env, mo
             return generated_result()
         raise agent.GenerationError("ComfyUI 이미지 생성에 실패했습니다 (RuntimeError).")
 
-    monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
+    monkeypatch.setattr(agent, "_release_llm_for_image", fake_unload)
     monkeypatch.setattr(agent, "generate_image", first_succeeds_second_fails)
     chat = FakeChat(
         [
@@ -487,7 +487,7 @@ def test_same_environment_generation_error_retries_once_then_stops_without_web_s
             "ComfyUI에 연결할 수 없습니다.", retryable=True, kind="transport"
         )
 
-    monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
+    monkeypatch.setattr(agent, "_release_llm_for_image", fake_unload)
     monkeypatch.setattr(agent, "generate_image", fail_generation)
     chat = FakeChat(
         [
@@ -533,7 +533,7 @@ def test_environment_generation_error_can_recover_on_single_internal_retry(env, 
             )
         return generated_result()
 
-    monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
+    monkeypatch.setattr(agent, "_release_llm_for_image", fake_unload)
     monkeypatch.setattr(agent, "generate_image", flaky_generation)
     chat = FakeChat(
         [
@@ -574,7 +574,7 @@ def test_cancel_and_generation_timeout_are_terminal_without_auto_retry(env, monk
         attempts += 1
         raise agent.GenerationError(detail)
 
-    monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
+    monkeypatch.setattr(agent, "_release_llm_for_image", fake_unload)
     monkeypatch.setattr(agent, "generate_image", terminal_generation)
     chat = FakeChat(
         [
@@ -616,7 +616,7 @@ def test_execution_seed_error_cannot_retry_when_retryable_flag_is_incorrect(env,
             kind="terminal",
         )
 
-    monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
+    monkeypatch.setattr(agent, "_release_llm_for_image", fake_unload)
     monkeypatch.setattr(agent, "generate_image", execution_failure)
     events = env.run(
         FakeChat(
@@ -647,7 +647,7 @@ def test_generation_input_error_keeps_existing_llm_correction_flow_without_auto_
         attempts += 1
         raise agent.GenerationError("프롬프트는 1~4,000자여야 합니다.", kind="input")
 
-    monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
+    monkeypatch.setattr(agent, "_release_llm_for_image", fake_unload)
     monkeypatch.setattr(agent, "generate_image", invalid_generation)
     chat = FakeChat(
         [
@@ -686,7 +686,7 @@ def test_corrected_image_input_error_finishes_after_success_without_third_llm_tu
             raise agent.GenerationError("프롬프트는 1~4,000자여야 합니다.", kind="input")
         return generated_result()
 
-    monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
+    monkeypatch.setattr(agent, "_release_llm_for_image", fake_unload)
     monkeypatch.setattr(agent, "generate_image", invalid_then_valid)
     chat = FakeChat(
         [
@@ -774,7 +774,7 @@ def test_clear_image_request_is_nudged_once_when_model_asks_again(env, monkeypat
             },
         }
 
-    monkeypatch.setattr(agent, "_unload_ollama_for_image", fake_unload)
+    monkeypatch.setattr(agent, "_release_llm_for_image", fake_unload)
     monkeypatch.setattr(agent, "generate_image", fake_generate_image)
     chat = FakeChat(
         [

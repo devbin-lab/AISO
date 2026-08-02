@@ -31,14 +31,13 @@ from rag import RagError, build_index
 from rag import search as rag_search
 from rag import status as rag_status
 from tools import ToolError, validate_workspace
-from ollama_util import (
-    OllamaHTTPError,
-    build_attempts,
-    is_load_crash,
-    is_think_unsupported,
-    is_tool_parse_error,
-    is_tools_unsupported,
-    model_layers,
+from llm import (
+    LlmFailureKind,
+    LlmModelRuntime,
+    LlmProviderError,
+    LlmRequest,
+    LlmRuntime,
+    create_runtime,
 )
 
 # discord.py는 선택적 — 미설치/임포트 오류가 사이드카(채팅·에이전트) 전체를 죽이지 않게 가드한다.
@@ -188,10 +187,7 @@ async def health(host: str | None = None):
     """백엔드 생존 + Ollama 도달성/모델 목록."""
     target = (host or DEFAULT_OLLAMA).rstrip("/")
     try:
-        async with httpx.AsyncClient(timeout=3) as client:
-            r = await client.get(f"{target}/api/tags")
-            r.raise_for_status()
-            models = [m.get("name", "") for m in r.json().get("models", [])]
+        models = await create_runtime("ollama", target).list_models()
         return {"status": "ok", "ollama": True, "models": models}
     except Exception as e:  # noqa: BLE001 — 도달 실패 사유를 그대로 전달
         return {"status": "ok", "ollama": False, "models": [], "detail": str(e)[:200]}
@@ -246,65 +242,63 @@ async def comfy_image(
         raise HTTPException(status_code=502, detail=str(e)) from None
 
 
-async def _stream_ollama(host: str, payload: dict):
-    """Ollama /api/chat 스트림을 순회하며 청크 dict를 낸다."""
-    timeout = httpx.Timeout(None, connect=5)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", f"{host}/api/chat", json=payload) as r:
-            if r.status_code != 200:
-                body = (await r.aread()).decode(errors="ignore")
-                raise OllamaHTTPError(r.status_code, body)
-            async for line in r.aiter_lines():
-                line = line.strip()
-                if not line:
-                    continue
-                data = json.loads(line)
-                if data.get("error"):  # 스트림 도중 오류(gpt-oss 툴콜 파싱 실패 등) → 상위에서 재시도/오류 처리
-                    raise OllamaHTTPError(500, str(data["error"]))
-                msg = data.get("message") or {}
-                # thinking(사고과정)과 content(최종답변)는 분리되어 온다 (gemma4·gpt-oss 등 think 지원 모델)
-                thinking = msg.get("thinking")
-                if thinking:
-                    yield {"type": "thinking", "text": thinking}
-                content = msg.get("content")
-                if content:
-                    yield {"type": "content", "text": content}
-                # 툴콜 — tools를 넘긴 호출(디스코드 서버 구성 루프)에서만 발생. /chat은 tools가 없어 무영향.
-                if msg.get("tool_calls"):
-                    yield {"type": "tool_calls", "calls": msg["tool_calls"]}
-                if data.get("done"):
-                    if data.get("done_reason") == "length":
-                        yield {
-                            "type": "notice",
-                            "text": "⚠ 컨텍스트 한도 도달 — 응답이 잘렸습니다. 설정에서 컨텍스트 길이를 늘려보세요.",
-                        }
+async def _stream_chat(runtime: LlmRuntime, request: LlmRequest):
+    """공용 계약 이벤트를 기존 렌더러 NDJSON 이벤트로 변환한다.
+
+    기존 호출자는 이 호환 래퍼만 사용하고, Ollama NDJSON 전송은 어댑터가 전담한다.
+    """
+    stream = runtime.chat_stream(request)
+    stream_completed = False
+    try:
+        async for event in stream:
+            if event.kind == "thinking":
+                yield {"type": "thinking", "text": event.text}
+            elif event.kind == "content":
+                yield {"type": "content", "text": event.text}
+            elif event.kind == "tool_call_delta":
+                yield {"type": "tool_calls", "calls": list(event.tool_calls or [])}
+            elif event.kind == "done":
+                if event.done_reason == "length":
                     yield {
-                        "type": "done",
-                        "eval_count": data.get("eval_count"),  # 생성 토큰 (출력만 집계)
-                        "total_duration": data.get("total_duration"),
+                        "type": "notice",
+                        "text": "⚠ 컨텍스트 한도 도달 — 응답이 잘렸습니다. 설정에서 컨텍스트 길이를 늘려보세요.",
                     }
+                yield {
+                    "type": "done",
+                    "eval_count": event.output_tokens,  # 생성 토큰 (출력만 집계)
+                    "total_duration": event.total_duration,
+                }
+        stream_completed = True
+    finally:
+        if not stream_completed:
+            await stream.aclose()
+
+
+async def _prepare_model(host: str, model: str) -> LlmModelRuntime:
+    """실행 시작 시 runtime 모델 준비 결과를 고정한다."""
+    return await create_runtime("ollama", host).prepare_model(model)
 
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
     """NDJSON 스트리밍 채팅. think(추론 강도)는 지원 모델(gemma4·gpt-oss 등)에 적용된다."""
     host = (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
-    base: dict = {
-        "model": req.model,
-        "messages": [{"role": m.role, "content": m.content} for m in req.messages],
-        "stream": True,
-        "keep_alive": req.keep_alive,  # 모델 상주 → 콜드 재로드 방지
-        "options": {
-            "temperature": req.temperature,
+    runtime = create_runtime("ollama", host)
+    base = LlmRequest(
+        model=req.model,
+        messages=[{"role": m.role, "content": m.content} for m in req.messages],
+        temperature=req.temperature,
+        max_output_tokens=MAX_GEN_TOKENS,
+        provider_options={
+            "keep_alive": req.keep_alive,  # 모델 상주 → 콜드 재로드 방지
             "num_ctx": req.context_length,
-            "num_predict": MAX_GEN_TOKENS,  # 한 턴 생성 상한(폭주 방지, num_ctx와 분리)
         },
-    }
+    )
 
     async def gen():
         # 웹 검색 켜짐 → 조사 루프(web_search·web_fetch)로 위임. NDJSON 이벤트는 동일 계약.
         if req.research:
-            async for ev in run_research_chat(
+            research_stream = run_research_chat(
                 host=host,
                 model=req.model,
                 messages=[{"role": m.role, "content": m.content} for m in req.messages],
@@ -312,23 +306,37 @@ async def chat(req: ChatRequest):
                 temperature=req.temperature,
                 context_length=req.context_length,
                 keep_alive=req.keep_alive,
-            ):
-                yield json.dumps(ev, ensure_ascii=False) + "\n"
+            )
+            research_completed = False
+            try:
+                async for ev in research_stream:
+                    yield json.dumps(ev, ensure_ascii=False) + "\n"
+                research_completed = True
+            finally:
+                if not research_completed:
+                    await research_stream.aclose()
             return
 
-        layers = await model_layers(host, req.model)
-        attempts = build_attempts(base, req.reasoning_effort, layers)
+        model_runtime = await _prepare_model(host, req.model)
+        attempts = runtime.prepare_attempts(base, req.reasoning_effort, model_runtime)
         noticed = False
-        for i, payload in enumerate(attempts):
+        for i, attempt in enumerate(attempts):
             try:
-                async for chunk in _stream_ollama(host, payload):
-                    yield json.dumps(chunk, ensure_ascii=False) + "\n"
+                chat_stream = _stream_chat(runtime, attempt)
+                chat_completed = False
+                try:
+                    async for chunk in chat_stream:
+                        yield json.dumps(chunk, ensure_ascii=False) + "\n"
+                    chat_completed = True
+                finally:
+                    if not chat_completed:
+                        await chat_stream.aclose()
                 return
-            except OllamaHTTPError as e:
+            except LlmProviderError as e:
                 last = i == len(attempts) - 1
-                crash = is_load_crash(e.body)
-                if not last and (crash or is_think_unsupported(e.body)):
-                    if crash and not noticed:
+                load_failure = e.kind is LlmFailureKind.LOAD_FAILURE
+                if not last and (load_failure or e.kind is LlmFailureKind.REASONING_UNSUPPORTED):
+                    if load_failure and not noticed:
                         noticed = True
                         print("[ollama] 적재 실패(VRAM 부족 추정) → CPU 오프로드로 재시도")
                         yield json.dumps(
@@ -337,7 +345,7 @@ async def chat(req: ChatRequest):
                         ) + "\n"
                     continue
                 yield json.dumps(
-                    {"type": "error", "error": f"Ollama 오류 ({e.status}): {e.body[:300]}"},
+                    {"type": "error", "error": f"{e.provider_name} 오류 ({e.status}): {e.body[:300]}"},
                     ensure_ascii=False,
                 ) + "\n"
                 return
@@ -361,41 +369,51 @@ async def _discord_step(
     tools: list | None = None,
 ) -> dict:
     """디스코드 봇용 한 턴 생성 — 전체 텍스트와 툴 호출을 모아 돌려준다(오프로드 사다리 재사용)."""
-    base = {
-        "model": model,
-        "messages": messages,
-        "stream": True,
-        "keep_alive": keep_alive,
-        "options": {"temperature": 0.7, "num_ctx": context_length, "num_predict": MAX_GEN_TOKENS},
-    }
-    if tools:
-        base["tools"] = tools
-    layers = await model_layers(host, model)
-    attempts = build_attempts(base, "medium", layers)
-    for i, payload in enumerate(attempts):
+    base = LlmRequest(
+        model=model,
+        messages=messages,
+        tools=tools,
+        temperature=0.7,
+        max_output_tokens=MAX_GEN_TOKENS,
+        provider_options={"keep_alive": keep_alive, "num_ctx": context_length},
+    )
+    runtime = create_runtime("ollama", host)
+    model_runtime = await _prepare_model(host, model)
+    attempts = runtime.prepare_attempts(base, "medium", model_runtime)
+    for i, attempt in enumerate(attempts):
         parse_tries = 0
         while True:  # 파싱오류는 같은 payload 재생성(에이전트 경로와 동일 회복 계약), 그 외는 아래에서 분기
             try:
                 parts: list[str] = []
                 calls: list = []
-                async for chunk in _stream_ollama(host, payload):
-                    if chunk.get("type") == "content":
-                        parts.append(chunk["text"])
-                    elif chunk.get("type") == "tool_calls":
-                        calls.extend(chunk["calls"])
+                chat_stream = _stream_chat(runtime, attempt)
+                chat_completed = False
+                try:
+                    async for chunk in chat_stream:
+                        if chunk.get("type") == "content":
+                            parts.append(chunk["text"])
+                        elif chunk.get("type") == "tool_calls":
+                            calls.extend(chunk["calls"])
+                    chat_completed = True
+                finally:
+                    if not chat_completed:
+                        await chat_stream.aclose()
                 return {"content": "".join(parts).strip(), "tool_calls": calls}
-            except OllamaHTTPError as e:
+            except LlmProviderError as e:
                 # 모델이 도구를 지원하지 않으면(400) 도구 없이 한 번 더 시도(도구 못 붙인다고 채팅 전체가 죽지 않게).
-                if tools and is_tools_unsupported(e.body):
+                if tools and e.kind is LlmFailureKind.TOOLS_UNSUPPORTED:
                     return await _discord_step(
                         messages, model=model, context_length=context_length,
                         keep_alive=keep_alive, host=host, tools=None,
                     )
                 # gpt-oss 툴콜 파싱 오류 → 같은 payload로 재생성(대개 회복). 안 그러면 서버구성이 무응답으로 실패.
-                if is_tool_parse_error(e.body) and parse_tries < MAX_DISCORD_PARSE_RETRIES:
+                if e.kind is LlmFailureKind.TOOL_PARSE and parse_tries < MAX_DISCORD_PARSE_RETRIES:
                     parse_tries += 1
                     continue
-                if i < len(attempts) - 1 and (is_load_crash(e.body) or is_think_unsupported(e.body)):
+                if i < len(attempts) - 1 and e.kind in (
+                    LlmFailureKind.LOAD_FAILURE,
+                    LlmFailureKind.REASONING_UNSUPPORTED,
+                ):
                     break  # 오프로드 사다리 다음 단계로
                 return {"content": f"(모델 오류 {e.status})", "tool_calls": []}
             except Exception as e:  # noqa: BLE001
@@ -418,12 +436,14 @@ async def _discord_research(
 ) -> str:
     """브리핑 예약용 — 웹 조사 루프(run_research_chat)를 돌려 최종 본문 텍스트를 모아 돌려준다."""
     parts: list[str] = []
+    research_stream = run_research_chat(
+        host=host, model=model,
+        messages=[{"role": m["role"], "content": m["content"]} for m in messages],
+        context_length=context_length, keep_alive=keep_alive,
+    )
+    research_completed = False
     try:
-        async for ev in run_research_chat(
-            host=host, model=model,
-            messages=[{"role": m["role"], "content": m["content"]} for m in messages],
-            context_length=context_length, keep_alive=keep_alive,
-        ):
+        async for ev in research_stream:
             t = ev.get("type")
             if t == "content":
                 parts.append(ev.get("text", ""))
@@ -431,8 +451,12 @@ async def _discord_research(
                 # 리서치 루프가 '스니펫만 본 임시 답'을 폐기하라는 신호 — 누적분을 버린다
                 # (안 그러면 서두·폐기 초안·최종답이 뒤섞인 브리핑이 자율 전송된다).
                 parts.clear()
+        research_completed = True
     except Exception as e:  # noqa: BLE001
         return f"(브리핑 생성 실패: {e})"
+    finally:
+        if not research_completed:
+            await research_stream.aclose()
     return "".join(parts).strip() or "(빈 브리핑)"
 
 
@@ -528,29 +552,14 @@ class UnloadRequest(BaseModel):
 async def ollama_unload(req: UnloadRequest):
     """로드된 Ollama 모델을 즉시 VRAM에서 내린다(긴급 GPU 확보).
 
-    /api/ps로 현재 로드된 모델을 찾아, 각 모델에 빈 프롬프트 + keep_alive:0을 보내 언로드한다.
+    LLM runtime이 현재 적재 모델을 찾아 best-effort로 해제한다.
     생성 중인 모델은 그 요청이 끝난 뒤 내려간다(Ollama가 직렬 처리)."""
     host = (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
-    unloaded: list[str] = []
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=5)) as client:
-            r = await client.get(f"{host}/api/ps")
-            models = (r.json().get("models") or []) if r.status_code == 200 else []
-            for m in models:
-                name = m.get("name") or m.get("model")
-                if not name:
-                    continue
-                try:
-                    await client.post(
-                        f"{host}/api/generate",
-                        json={"model": name, "prompt": "", "keep_alive": 0},
-                    )
-                    unloaded.append(name)
-                except Exception:  # noqa: BLE001 — 개별 모델 실패는 넘기고 나머지 계속
-                    pass
+        unloaded = await create_runtime("ollama", host).release_accelerator_memory()
         return {"ok": True, "unloaded": unloaded}
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "detail": str(e), "unloaded": unloaded}
+        return {"ok": False, "detail": str(e), "unloaded": []}
 
 
 class AgentRequest(BaseModel):
@@ -596,7 +605,7 @@ async def agent(req: AgentRequest):
         pass
 
     async def gen():
-        async for ev in run_agent(
+        agent_stream = run_agent(
             host=host,
             workspace=req.workspace,
             model=req.model,
@@ -613,8 +622,15 @@ async def agent(req: AgentRequest):
             comfy_profiles=req.comfy_profiles,
             comfy_selection_mode=req.comfy_selection_mode,
             selected_comfy_model_id=req.selected_comfy_model_id,
-        ):
-            yield json.dumps(ev, ensure_ascii=False) + "\n"
+        )
+        agent_completed = False
+        try:
+            async for ev in agent_stream:
+                yield json.dumps(ev, ensure_ascii=False) + "\n"
+            agent_completed = True
+        finally:
+            if not agent_completed:
+                await agent_stream.aclose()
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 

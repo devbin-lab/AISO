@@ -16,24 +16,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # python/ 를 i
 
 import discordbot  # noqa: E402
 import main  # noqa: E402
-from ollama_util import OllamaHTTPError  # noqa: E402
+from llm import LlmFailureKind, LlmModelRuntime, LlmProviderError, LlmRequest  # noqa: E402
 
 
 # ── #6: 툴 미지원 모델 → tools 없이 폴백 ────────────────────────────────
 def test_discord_step_falls_back_when_tools_unsupported(monkeypatch):
     seen_tools: list = []
 
-    async def fake_layers(host, model):
-        return None
+    async def fake_prepare_model(host, model):
+        return LlmModelRuntime(model=model)
 
-    async def fake_stream(host, payload):
-        seen_tools.append("tools" in payload)
-        if "tools" in payload:  # 도구를 붙인 첫 시도 → 모델이 도구 미지원(400)
-            raise OllamaHTTPError(400, '{"error":"model does not support tools"}')
+    async def fake_stream(runtime, request):
+        seen_tools.append(request.tools is not None)
+        if request.tools is not None:  # 도구를 붙인 첫 시도 → 모델이 도구 미지원(400)
+            raise LlmProviderError(
+                400,
+                '{"error":"model does not support tools"}',
+                provider_name="Ollama",
+                kind=LlmFailureKind.TOOLS_UNSUPPORTED,
+            )
         yield {"type": "content", "text": "안녕하세요"}  # 도구 없이 재시도 → 성공
 
-    monkeypatch.setattr(main, "model_layers", fake_layers)
-    monkeypatch.setattr(main, "_stream_ollama", fake_stream)
+    monkeypatch.setattr(main, "_prepare_model", fake_prepare_model)
+    monkeypatch.setattr(main, "_stream_chat", fake_stream)
 
     out = asyncio.run(
         main._discord_step(
@@ -72,17 +77,22 @@ def test_discord_step_retries_on_tool_parse_error(monkeypatch):
     예전엔 삼켜서 서버구성이 '(빈 응답)'으로 조용히 실패했다."""
     calls = {"n": 0}
 
-    async def fake_layers(host, model):
-        return None
+    async def fake_prepare_model(host, model):
+        return LlmModelRuntime(model=model)
 
-    async def fake_stream(host, payload):
+    async def fake_stream(runtime, request):
         calls["n"] += 1
-        if calls["n"] == 1:  # 첫 시도 → 파싱오류(스트림 중간 error → _stream_ollama이 OllamaHTTPError로 올림)
-            raise OllamaHTTPError(500, "error parsing tool call: raw='We need...'")
+        if calls["n"] == 1:  # 첫 시도 → 파싱오류(스트림 중간 error → 재생성)
+            raise LlmProviderError(
+                500,
+                "error parsing tool call: raw='We need...'",
+                provider_name="Ollama",
+                kind=LlmFailureKind.TOOL_PARSE,
+            )
         yield {"type": "content", "text": "복구된 응답"}  # 재생성 → 성공
 
-    monkeypatch.setattr(main, "model_layers", fake_layers)
-    monkeypatch.setattr(main, "_stream_ollama", fake_stream)
+    monkeypatch.setattr(main, "_prepare_model", fake_prepare_model)
+    monkeypatch.setattr(main, "_stream_chat", fake_stream)
     out = asyncio.run(
         main._discord_step(
             [{"role": "user", "content": "팀 서버 꾸며줘"}],
@@ -93,44 +103,26 @@ def test_discord_step_retries_on_tool_parse_error(monkeypatch):
     assert out["content"] == "복구된 응답" and calls["n"] == 2  # 재생성 1회로 회복
 
 
-def test_stream_ollama_raises_on_mid_stream_error(monkeypatch):
-    """_stream_ollama이 스트림 중간의 {'error':...} 라인을 OllamaHTTPError로 올린다(삼키지 않음)."""
-    import json as _json
+def test_stream_chat_propagates_public_runtime_error():
+    """실행 경로는 concrete provider 오류가 아닌 공용 오류를 그대로 받는다."""
 
-    class _Resp:
-        status_code = 200
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def aiter_lines(self):
-            yield _json.dumps({"message": {"content": "부분"}})
-            yield _json.dumps({"error": "error parsing tool call: raw='x'"})
-
-        async def aread(self):
-            return b""
-
-    class _Client:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        def stream(self, method, url, json=None):
-            return _Resp()
-
-    monkeypatch.setattr(main.httpx, "AsyncClient", lambda *a, **k: _Client())
+    class Runtime:
+        async def chat_stream(self, request):
+            if False:  # pragma: no cover - async generator 표식
+                yield None
+            raise LlmProviderError(
+                500,
+                "error parsing tool call: raw='x'",
+                provider_name="Ollama",
+                kind=LlmFailureKind.TOOL_PARSE,
+            )
 
     async def run():
         with_err = False
         try:
-            async for _ in main._stream_ollama("h", {"model": "m"}):
+            async for _ in main._stream_chat(Runtime(), LlmRequest(model="m", messages=[])):
                 pass
-        except OllamaHTTPError as e:
+        except LlmProviderError as e:
             with_err = "parsing tool" in e.body
         return with_err
 
@@ -165,15 +157,15 @@ def test_lock_overwrites_includes_allowlist(monkeypatch):
 
 def test_discord_step_other_400_does_not_loop(monkeypatch):
     """tools 미지원이 아닌 다른 400은 폴백하지 않고 오류를 반환한다(무한 재귀 방지)."""
-    async def fake_layers(host, model):
-        return None
+    async def fake_prepare_model(host, model):
+        return LlmModelRuntime(model=model)
 
-    async def fake_stream(host, payload):
-        raise OllamaHTTPError(400, '{"error":"invalid options"}')
+    async def fake_stream(runtime, request):
+        raise LlmProviderError(400, '{"error":"invalid options"}', provider_name="Ollama")
         yield  # pragma: no cover — async generator 표식
 
-    monkeypatch.setattr(main, "model_layers", fake_layers)
-    monkeypatch.setattr(main, "_stream_ollama", fake_stream)
+    monkeypatch.setattr(main, "_prepare_model", fake_prepare_model)
+    monkeypatch.setattr(main, "_stream_chat", fake_stream)
     out = asyncio.run(
         main._discord_step(
             [{"role": "user", "content": "x"}],

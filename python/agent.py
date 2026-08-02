@@ -13,8 +13,6 @@ import re
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-import httpx
-
 import discordops  # 서버 구성·전송(디스코드) — 모듈 자체는 discord 미의존(지연 import)
 import discordsched  # 예약(디스코드) — 순수 파이썬
 from comfy_generation import (
@@ -25,15 +23,7 @@ from comfy_generation import (
 )
 from comfy_workflows import MAX_PROMPT_LENGTH
 
-from ollama_util import (
-    OllamaHTTPError,
-    build_attempts,
-    is_load_crash,
-    is_think_unsupported,
-    is_tool_parse_error,
-    is_tools_unsupported,
-    model_layers,
-)
+from llm import LlmFailureKind, LlmModelRuntime, LlmProviderError, LlmRequest, create_runtime
 from rag import (
     SEARCH_DOCS_SCHEMA,
     RagError,
@@ -522,34 +512,19 @@ def resolve_approval(key: str, approved: bool) -> bool:
     return True
 
 
-async def _unload_ollama_for_image(host: str) -> list[str]:
-    """ComfyUI에 VRAM을 넘기기 위해 현재 적재된 Ollama 모델을 best-effort로 내린다."""
-    unloaded: list[str] = []
+async def _release_llm_for_image(host: str) -> list[str]:
+    """ComfyUI에 VRAM을 넘기기 위해 runtime의 적재 모델을 best-effort로 해제한다."""
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=5)) as client:
-            response = await client.get(f"{host.rstrip('/')}/api/ps")
-            response.raise_for_status()
-            for item in response.json().get("models") or []:
-                name = item.get("name") or item.get("model")
-                if not isinstance(name, str) or not name:
-                    continue
-                try:
-                    result = await client.post(
-                        f"{host.rstrip('/')}/api/generate",
-                        json={"model": name, "prompt": "", "keep_alive": 0},
-                    )
-                    result.raise_for_status()
-                    unloaded.append(name)
-                except Exception:  # noqa: BLE001 — 다른 적재 모델은 계속 정리
-                    continue
+        return await create_runtime("ollama", host).release_accelerator_memory(
+            require_success=True,
+            timeout_seconds=30,
+        )
     except Exception:  # noqa: BLE001 — 언로드 조회 실패만으로 생성 요청을 막지는 않음
-        pass
-    return unloaded
+        return []
 
 
-async def _chat_turn(host: str, payload: dict) -> AsyncGenerator[dict, None]:
-    """한 턴 스트리밍. content/thinking 토큰을 흘리고, 마지막에 종합 결과를 yield."""
-    timeout = httpx.Timeout(None, connect=5)
+async def _chat_turn(host: str, request: LlmRequest) -> AsyncGenerator[dict, None]:
+    """공용 LLM 이벤트 한 턴을 기존 Agent 최종 결과로 모은다."""
     content = ""
     thinking = ""
     tool_calls: list[dict] = []
@@ -557,43 +532,41 @@ async def _chat_turn(host: str, payload: dict) -> AsyncGenerator[dict, None]:
     output_tokens = 0  # eval_count — 이 턴에 '생성'된 토큰 (입력 토큰은 세지 않는다)
     rep_next = REP_MIN_LEN        # content가 이 길이를 넘으면 반복 퇴행 검사
     rep_next_think = REP_MIN_LEN  # thinking도 동일하게 검사 (사고 채널에서 폭주하는 경우)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", f"{host}/api/chat", json=payload) as r:
-            if r.status_code != 200:
-                body = (await r.aread()).decode(errors="ignore")
-                raise OllamaHTTPError(r.status_code, body)
-            async for line in r.aiter_lines():
-                line = line.strip()
-                if not line:
-                    continue
-                data = json.loads(line)
-                if data.get("error"):  # 스트림 도중 오류(툴콜 파싱 실패 등) → 상위에서 재생성 처리
-                    raise OllamaHTTPError(500, str(data["error"]))
-                msg = data.get("message") or {}
-                if msg.get("thinking"):
-                    thinking += msg["thinking"]
-                    yield {"type": "thinking", "text": msg["thinking"]}
-                    # 사고(thinking) 채널에서 같은 덩어리를 무한 반복하는 퇴행도 끊는다.
-                    # (content만 보면 놓친다 — 실제 폭주는 종종 thinking에서 먼저 터진다.)
-                    if len(thinking) >= rep_next_think:
-                        rep_next_think = len(thinking) + REP_CHECK_EVERY
-                        if _looks_degenerate(thinking):
-                            done_reason = "repetition"
-                            break
-                if msg.get("content"):
-                    content += msg["content"]
-                    yield {"type": "content", "text": msg["content"]}
-                    # 같은 덩어리를 무한 반복하는 퇴행이면 스트림을 끊는다(num_predict보다 훨씬 일찍).
-                    if len(content) >= rep_next:
-                        rep_next = len(content) + REP_CHECK_EVERY
-                        if _looks_degenerate(content):
-                            done_reason = "repetition"
-                            break
-                if msg.get("tool_calls"):
-                    tool_calls.extend(msg["tool_calls"])
-                if data.get("done"):
-                    done_reason = data.get("done_reason")
-                    output_tokens = data.get("eval_count") or 0
+    runtime = create_runtime("ollama", host)
+    stream = runtime.chat_stream(request)
+    stream_completed = False
+    try:
+        async for event in stream:
+            if event.kind == "thinking":
+                thinking += event.text
+                yield {"type": "thinking", "text": event.text}
+                # 사고(thinking) 채널에서 같은 덩어리를 무한 반복하는 퇴행도 끊는다.
+                # (content만 보면 놓친다 — 실제 폭주는 종종 thinking에서 먼저 터진다.)
+                if len(thinking) >= rep_next_think:
+                    rep_next_think = len(thinking) + REP_CHECK_EVERY
+                    if _looks_degenerate(thinking):
+                        done_reason = "repetition"
+                        break
+            elif event.kind == "content":
+                content += event.text
+                yield {"type": "content", "text": event.text}
+                # 같은 덩어리를 무한 반복하는 퇴행이면 스트림을 끊는다(num_predict보다 훨씬 일찍).
+                if len(content) >= rep_next:
+                    rep_next = len(content) + REP_CHECK_EVERY
+                    if _looks_degenerate(content):
+                        done_reason = "repetition"
+                        break
+            elif event.kind == "tool_call_delta":
+                tool_calls.extend(event.tool_calls or [])
+            elif event.kind == "done":
+                done_reason = event.done_reason
+                output_tokens = event.output_tokens or 0
+        stream_completed = True
+    finally:
+        # 중단·취소·공급자 오류일 때만 HTTP 스트림을 즉시 정리한다.
+        # 정상 소비 뒤에는 이미 소진된 자식 제너레이터를 다시 닫지 않는다.
+        if not stream_completed:
+            await stream.aclose()
     yield {
         "_final": True,
         "content": content,
@@ -665,7 +638,7 @@ def _maybe_reindex(root: Path, host: str, dirty: bool, rag_available: bool) -> N
 
 
 async def _generate_turn(
-    host: str, base: dict, reasoning_effort: str, layers: Any, offload_noticed: bool
+    host: str, base: LlmRequest, reasoning_effort: str, model_runtime: LlmModelRuntime, offload_noticed: bool
 ) -> AsyncGenerator[dict, None]:
     """한 턴 생성 — 오프로드 사다리 + gpt-oss 파싱오류 재생성 + 스트리밍을 캡슐화한다.
 
@@ -681,26 +654,34 @@ async def _generate_turn(
         final = None
         yielded_any = False  # 이 시도에서 이미 토큰을 흘렸는지 (중복 렌더 방지)
         parse_failed = False
-        attempts = build_attempts(base, reasoning_effort, layers)
-        for i, payload in enumerate(attempts):
+        runtime = create_runtime("ollama", host)
+        attempts = runtime.prepare_attempts(base, reasoning_effort, model_runtime)
+        for i, attempt in enumerate(attempts):
             try:
-                async for ev in _chat_turn(host, payload):
-                    if ev.get("_final"):
-                        final = ev
-                    else:
-                        yielded_any = True
-                        yield ev
+                turn_stream = _chat_turn(host, attempt)
+                turn_completed = False
+                try:
+                    async for ev in turn_stream:
+                        if ev.get("_final"):
+                            final = ev
+                        else:
+                            yielded_any = True
+                            yield ev
+                    turn_completed = True
+                finally:
+                    if not turn_completed:
+                        await turn_stream.aclose()
                 break
-            except OllamaHTTPError as e:
+            except LlmProviderError as e:
                 # 스트리밍 전에 난 파싱 오류(내용 미출력)면 재생성으로 회복 가능
-                if is_tool_parse_error(e.body) and not yielded_any:
+                if e.kind is LlmFailureKind.TOOL_PARSE and not yielded_any:
                     parse_failed = True
                     final = None
                     break
                 last = i == len(attempts) - 1
-                crash = is_load_crash(e.body)
-                if not last and (crash or is_think_unsupported(e.body)):
-                    if crash and not offload_noticed:
+                load_failure = e.kind is LlmFailureKind.LOAD_FAILURE
+                if not last and (load_failure or e.kind is LlmFailureKind.REASONING_UNSUPPORTED):
+                    if load_failure and not offload_noticed:
                         offload_noticed = True
                         yield {
                             "type": "notice",
@@ -708,7 +689,8 @@ async def _generate_turn(
                         }
                     continue
                 yield {"_gen": True, "final": None,
-                       "error": f"Ollama 오류 ({e.status}): {e.body[:300]}",
+                       "error": f"{e.provider_name} 오류 ({e.status}): {e.body[:300]}",
+                       "error_kind": e.kind,
                        "offload_noticed": offload_noticed}
                 return
             except Exception as e:  # noqa: BLE001
@@ -729,9 +711,16 @@ async def _generate_turn(
             "추론 강도를 낮추거나 다시 시도해보세요."
             if parse_failed else "빈 응답"
         )
-        yield {"_gen": True, "final": None, "error": err, "offload_noticed": offload_noticed}
+        yield {"_gen": True, "final": None, "error": err,
+               "error_kind": LlmFailureKind.UNKNOWN, "offload_noticed": offload_noticed}
         return
-    yield {"_gen": True, "final": final, "error": None, "offload_noticed": offload_noticed}
+    yield {"_gen": True, "final": final, "error": None,
+           "error_kind": None, "offload_noticed": offload_noticed}
+
+
+async def _prepare_model(host: str, model: str) -> LlmModelRuntime:
+    """실행 시작 시 runtime 모델 준비 결과를 고정한다."""
+    return await create_runtime("ollama", host).prepare_model(model)
 
 
 async def _run_agent_impl(
@@ -784,7 +773,7 @@ async def _run_agent_impl(
         "",
     ) if last_user_index > 0 else ""
     plan: list[dict] = []
-    layers = await model_layers(host, model)
+    model_runtime = await _prepare_model(host, model)
     offload_noticed = False
     dirty = False  # 파일이 실제로 변경됐는지 (자동 재색인 트리거)
     last_call_sig: str | None = None  # 직전 툴 호출 서명 (무한 루프 감지용)
@@ -1003,33 +992,40 @@ async def _run_agent_impl(
     for step in range(MAX_STEPS):
         working = compact_convo(convo, context_length, reserve_tokens)
         messages = [system_msg, *([rag_message] if rag_message else []), *working]
-        base = {
-            "model": model,
-            "messages": messages,
-            "tools": tools,
-            "stream": True,
-            "keep_alive": keep_alive,
-            "options": {
-                "temperature": temperature,
+        base = LlmRequest(
+            model=model,
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            max_output_tokens=MAX_GEN_TOKENS,
+            provider_options={
+                "keep_alive": keep_alive,
                 "num_ctx": context_length,
-                "num_predict": MAX_GEN_TOKENS,  # 한 턴 생성 상한(폭주 방지, num_ctx와 분리)
             },
-        }
+        )
         # 생성(오프로드 사다리 + 파싱오류 재생성 + 스트리밍)은 _generate_turn에 위임한다.
         # 스트림/알림은 그대로 흘리고, 종료 마커(_gen)에서 최종 결과 또는 치명 오류를 받는다.
         final = None
         gen_error = None
-        async for ev in _generate_turn(host, base, reasoning_effort, layers, offload_noticed):
-            if ev.get("_gen"):
-                final = ev["final"]
-                gen_error = ev["error"]
-                offload_noticed = ev["offload_noticed"]
-            elif image_requested and ev.get("type") == "content":
-                # 도구 호출 여부는 스트림 마지막에만 알 수 있다. 이미지 요청의 content를 먼저
-                # 내보내면 같은 응답에 든 가짜 외부 이미지 링크가 tool 결과보다 앞서 노출된다.
-                continue
-            else:
-                yield ev
+        generation_stream = _generate_turn(host, base, reasoning_effort, model_runtime, offload_noticed)
+        generation_completed = False
+        try:
+            async for ev in generation_stream:
+                if ev.get("_gen"):
+                    final = ev["final"]
+                    gen_error = ev["error"]
+                    gen_error_kind = ev.get("error_kind")
+                    offload_noticed = ev["offload_noticed"]
+                elif image_requested and ev.get("type") == "content":
+                    # 도구 호출 여부는 스트림 마지막에만 알 수 있다. 이미지 요청의 content를 먼저
+                    # 내보내면 같은 응답에 든 가짜 외부 이미지 링크가 tool 결과보다 앞서 노출된다.
+                    continue
+                else:
+                    yield ev
+            generation_completed = True
+        finally:
+            if not generation_completed:
+                await generation_stream.aclose()
         if gen_error is not None:  # 치명적 종료(연결·Ollama·빈 응답·파싱 소진) → 런 종료
             yield {"type": "error", "error": gen_error}
             _maybe_reindex(root, host, dirty, rag_available)
@@ -1221,7 +1217,7 @@ async def _run_agent_impl(
                         )
                     if not image_enabled or not comfy_base_url:
                         raise ToolError("Agent에서 사용할 수 있는 ComfyUI 모델 프로필이 없습니다.")
-                    await _unload_ollama_for_image(host)
+                    await _release_llm_for_image(host)
                     generation_args = {key: value for key, value in args.items() if key in _IMAGE_TOOL_ARGS}
                     generation_context = _bounded_image_selection_context(last_user_request)
                     try:
@@ -1434,29 +1430,32 @@ async def run_agent(
     """
     cleanup_state: dict[str, Any] = {}
     completed_normally = False
+    implementation_stream = _run_agent_impl(
+        host=host,
+        workspace=workspace,
+        model=model,
+        messages=messages,
+        reasoning_effort=reasoning_effort,
+        temperature=temperature,
+        context_length=context_length,
+        approval_mode=approval_mode,
+        session_id=session_id,
+        rag_enabled=rag_enabled,
+        rag_top_k=rag_top_k,
+        keep_alive=keep_alive,
+        comfy_base_url=comfy_base_url,
+        comfy_profiles=comfy_profiles,
+        comfy_selection_mode=comfy_selection_mode,
+        selected_comfy_model_id=selected_comfy_model_id,
+        _cleanup_state=cleanup_state,
+    )
     try:
-        async for event in _run_agent_impl(
-            host=host,
-            workspace=workspace,
-            model=model,
-            messages=messages,
-            reasoning_effort=reasoning_effort,
-            temperature=temperature,
-            context_length=context_length,
-            approval_mode=approval_mode,
-            session_id=session_id,
-            rag_enabled=rag_enabled,
-            rag_top_k=rag_top_k,
-            keep_alive=keep_alive,
-            comfy_base_url=comfy_base_url,
-            comfy_profiles=comfy_profiles,
-            comfy_selection_mode=comfy_selection_mode,
-            selected_comfy_model_id=selected_comfy_model_id,
-            _cleanup_state=cleanup_state,
-        ):
+        async for event in implementation_stream:
             yield event
         completed_normally = True
     finally:
+        if not completed_normally:
+            await implementation_stream.aclose()
         if not completed_normally:
             cleanup_root = cleanup_state.get("root")
             if isinstance(cleanup_root, Path):
@@ -1538,7 +1537,7 @@ async def run_research_chat(
     두 툴 다 SAFE(읽기 전용·web_fetch는 SSRF 차단)라 채팅에선 승인 없이 실행한다.
     """
     tools = [REGISTRY[n].schema for n in RESEARCH_TOOL_NAMES]
-    layers = await model_layers(host, model)
+    model_runtime = await _prepare_model(host, model)
     offload_noticed = False
     convo: list[dict] = list(messages)  # user/assistant/tool. 시스템은 매 턴 재구성(프리픽스 고정).
     total_tokens = 0
@@ -1557,32 +1556,39 @@ async def run_research_chat(
 
     for step in range(MAX_RESEARCH_STEPS):
         working = compact_convo(convo, context_length, reserve_tokens)
-        base = {
-            "model": model,
-            "messages": [system_msg, *working],
-            "stream": True,
-            "keep_alive": keep_alive,
-            "options": {
-                "temperature": temperature,
+        base = LlmRequest(
+            model=model,
+            messages=[system_msg, *working],
+            tools=None if tools_disabled else tools,
+            temperature=temperature,
+            max_output_tokens=MAX_GEN_TOKENS,
+            provider_options={
+                "keep_alive": keep_alive,
                 "num_ctx": context_length,
-                "num_predict": MAX_GEN_TOKENS,  # 한 턴 생성 상한(폭주·반복 퇴행 방지)
             },
-        }
-        if not tools_disabled:
-            base["tools"] = tools
+        )
 
         final = None
         gen_error = None
-        async for ev in _generate_turn(host, base, reasoning_effort, layers, offload_noticed):
-            if ev.get("_gen"):
-                final = ev["final"]
-                gen_error = ev["error"]
-                offload_noticed = ev["offload_noticed"]
-            else:
-                yield ev
+        gen_error_kind = None
+        generation_stream = _generate_turn(host, base, reasoning_effort, model_runtime, offload_noticed)
+        generation_completed = False
+        try:
+            async for ev in generation_stream:
+                if ev.get("_gen"):
+                    final = ev["final"]
+                    gen_error = ev["error"]
+                    gen_error_kind = ev.get("error_kind")
+                    offload_noticed = ev["offload_noticed"]
+                else:
+                    yield ev
+            generation_completed = True
+        finally:
+            if not generation_completed:
+                await generation_stream.aclose()
         if gen_error is not None:
             # 툴 미지원 모델 → tools 없이 1회 폴백(대개 첫 턴에서 판명, convo 오염 없음).
-            if not tools_disabled and is_tools_unsupported(gen_error):
+            if not tools_disabled and gen_error_kind is LlmFailureKind.TOOLS_UNSUPPORTED:
                 tools_disabled = True
                 yield {"type": "notice", "text": "이 모델은 도구 호출을 지원하지 않아 웹 검색 없이 답합니다."}
                 continue

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """세션 최적화 감사에서 확정·적용한 개선들의 회귀 방지 테스트.
 
-- model_layers: block_count 없는 모델도 결과(None)를 캐시해 /api/show HTTP를 반복하지 않는다.
+- runtime model preparation: block_count 없는 모델도 결과(None)를 캐시해 show 조회를 반복하지 않는다.
 - prepare_ops: 보호대상 분리 + 검증을 한 곳에서(두 입구 공유).
 - build_job/commit_job: 등록 전 완전 검증(개수·길이) + 선계산 시각 그대로 커밋(드리프트 없음).
 """
@@ -16,12 +16,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # python/ 를 i
 
 import discordops as ops  # noqa: E402
 import discordsched as sched  # noqa: E402
-import ollama_util  # noqa: E402
+from llm.providers import ollama as ollama_provider  # noqa: E402
 
 NOW = datetime(2026, 7, 16, 22, 0)
 
 
-# ── model_layers: 확정 결과(None 포함) 캐시 — HTTP 반복 방지 ─────────────
+# ── runtime model preparation: 확정 결과(None 포함) 캐시 — HTTP 반복 방지 ──
 class _FakeResp:
     def __init__(self, info):
         self._info = info
@@ -50,23 +50,25 @@ class _FakeClient:
         return _FakeResp(self._info)
 
 
-def test_model_layers_caches_none_no_repeat_http(monkeypatch):
-    ollama_util._layer_cache.clear()
+def test_model_preparation_caches_none_no_repeat_http(monkeypatch):
+    ollama_provider.OllamaAdapter.reset_cache()
     _FakeClient.calls = 0
     # block_count 키가 없는 모델 — 예전엔 매 호출마다 POST /api/show를 반복했다
-    monkeypatch.setattr(ollama_util.httpx, "AsyncClient", lambda *a, **k: _FakeClient({"foo": 1}))
-    r1 = asyncio.run(ollama_util.model_layers("h", "no-block-model"))
-    r2 = asyncio.run(ollama_util.model_layers("h", "no-block-model"))
-    assert r1 is None and r2 is None
+    monkeypatch.setattr(ollama_provider.httpx, "AsyncClient", lambda *a, **k: _FakeClient({"foo": 1}))
+    adapter = ollama_provider.OllamaAdapter("h")
+    r1 = asyncio.run(adapter.prepare_model("no-block-model"))
+    r2 = asyncio.run(adapter.prepare_model("no-block-model"))
+    assert r1.state["layers"] is None and r2.state["layers"] is None
     assert _FakeClient.calls == 1  # 두 번째는 캐시 히트 → HTTP 0회
 
 
-def test_model_layers_caches_positive(monkeypatch):
-    ollama_util._layer_cache.clear()
+def test_model_preparation_caches_positive(monkeypatch):
+    ollama_provider.OllamaAdapter.reset_cache()
     _FakeClient.calls = 0
-    monkeypatch.setattr(ollama_util.httpx, "AsyncClient", lambda *a, **k: _FakeClient({"gemma.block_count": 42}))
-    assert asyncio.run(ollama_util.model_layers("h", "m")) == 42
-    assert asyncio.run(ollama_util.model_layers("h", "m")) == 42
+    monkeypatch.setattr(ollama_provider.httpx, "AsyncClient", lambda *a, **k: _FakeClient({"gemma.block_count": 42}))
+    adapter = ollama_provider.OllamaAdapter("h")
+    assert asyncio.run(adapter.prepare_model("m")).state["layers"] == 42
+    assert asyncio.run(adapter.prepare_model("m")).state["layers"] == 42
     assert _FakeClient.calls == 1
 
 

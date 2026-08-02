@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 
 import agent
+from llm import LlmModelRuntime, LlmRequest
+from llm.providers import ollama as ollama_provider
 from toolspec import REGISTRY
 
 
@@ -28,8 +30,8 @@ def _final(tool_calls, content="", tokens=1) -> dict:
 
 def _script(monkeypatch, turns: list[dict], on_execute):
     """_generate_turn이 turns를 차례로 내도록, execute를 on_execute로 대역화."""
-    async def fake_layers(host, model):  # 네트워크 차단
-        return None
+    async def fake_prepare_model(host, model):  # 네트워크 차단
+        return LlmModelRuntime(model=model)
 
     calls = {"i": 0}
 
@@ -38,7 +40,7 @@ def _script(monkeypatch, turns: list[dict], on_execute):
         calls["i"] += 1
         yield {"_gen": True, "final": t, "error": None, "offload_noticed": offload}
 
-    monkeypatch.setattr(agent, "model_layers", fake_layers)
+    monkeypatch.setattr(agent, "_prepare_model", fake_prepare_model)
     monkeypatch.setattr(agent, "_generate_turn", fake_generate)
     monkeypatch.setattr(agent, "execute", on_execute)
     return calls
@@ -219,12 +221,12 @@ def test_chat_turn_aborts_repetitive_stream(monkeypatch):
     block = "수정하겠습니다. function update(){ draw(); requestAnimationFrame(update); } 진행합니다.\n"
     chunk = _json.dumps({"message": {"content": block}}, ensure_ascii=False)
     lines = [chunk] * 120 + [_json.dumps({"done": True, "done_reason": "stop", "eval_count": 9})]
-    monkeypatch.setattr(agent.httpx, "AsyncClient", lambda *a, **k: _Client(lines))
+    monkeypatch.setattr(ollama_provider.httpx, "AsyncClient", lambda *a, **k: _Client(lines))
 
     async def run():
         final = None
         n_content = 0
-        async for ev in agent._chat_turn("h", {"model": "m"}):
+        async for ev in agent._chat_turn("h", LlmRequest(model="m", messages=[])):
             if ev.get("_final"):
                 final = ev
             elif ev.get("type") == "content":
@@ -275,12 +277,12 @@ def test_chat_turn_aborts_repetitive_thinking(monkeypatch):
     block = "Actually, let's do this: 1. Create skill with urllib. 2. Run it. 3. Confirm.\n"
     chunk = _json.dumps({"message": {"thinking": block}}, ensure_ascii=False)
     lines = [chunk] * 200 + [_json.dumps({"done": True, "done_reason": "stop", "eval_count": 9})]
-    monkeypatch.setattr(agent.httpx, "AsyncClient", lambda *a, **k: _Client(lines))
+    monkeypatch.setattr(ollama_provider.httpx, "AsyncClient", lambda *a, **k: _Client(lines))
 
     async def run():
         final = None
         n_think = 0
-        async for ev in agent._chat_turn("h", {"model": "m"}):
+        async for ev in agent._chat_turn("h", LlmRequest(model="m", messages=[])):
             if ev.get("_final"):
                 final = ev
             elif ev.get("type") == "thinking":

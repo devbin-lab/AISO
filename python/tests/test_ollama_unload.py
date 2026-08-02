@@ -3,7 +3,7 @@
 
 로드된 모델을 /api/ps로 찾아 각 모델에 prompt:''+keep_alive:0을 보내 언로드한다는
 계약을 고정한다. keep_alive를 0이 아닌 값으로 바꾸거나 /api/ps 조회를 빼면 여기서 잡힌다.
-네트워크는 타지 않는다(httpx.AsyncClient를 가짜로 교체).
+네트워크는 타지 않는다(runtime 어댑터의 HTTP client를 가짜로 교체).
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # python/ 를 import 경로에
 
 import main  # noqa: E402
+from llm.providers import ollama as ollama_provider  # noqa: E402
 
 try:
     from fastapi.testclient import TestClient  # noqa: E402
@@ -63,7 +64,7 @@ class _FakeClient:
 
 def _install(monkeypatch, models: list[dict]) -> None:
     _FakeClient.posts = []
-    monkeypatch.setattr(main.httpx, "AsyncClient", lambda *a, **k: _FakeClient(models))
+    monkeypatch.setattr(ollama_provider.httpx, "AsyncClient", lambda *a, **k: _FakeClient(models))
 
 
 def test_unload_sends_keepalive_zero_per_loaded_model(monkeypatch):

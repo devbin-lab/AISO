@@ -565,7 +565,7 @@ def run_tool(root: Path, name: str, args: dict) -> str:
         raise ToolError(f"파일 시스템 오류: {e}")
 
 
-# Ollama /api/chat 의 tools 파라미터로 넘길 함수 스키마
+# LLM runtime의 tools 파라미터로 넘길 함수 스키마
 TOOL_SCHEMAS = [
     {
         "type": "function",

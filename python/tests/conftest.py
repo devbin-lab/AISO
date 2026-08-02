@@ -16,19 +16,30 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # python/ 를 import 경로에
 
 import agent  # noqa: E402
-from ollama_util import OllamaHTTPError  # noqa: E402  (테스트에서 재수출)
+from llm import LlmFailureKind, LlmProviderError, LlmRequest  # noqa: E402
+from llm.providers.ollama import OllamaAdapter  # noqa: E402
 
-__all__ = ["OllamaHTTPError", "FakeChat", "parse_error", "load_crash", "types"]
+__all__ = ["FakeChat", "parse_error", "load_crash", "types"]
 
 
-def parse_error() -> OllamaHTTPError:
+def parse_error() -> LlmProviderError:
     """gpt-oss 툴콜 파싱 500 오류(재생성으로 회복 가능)를 흉내낸다."""
-    return OllamaHTTPError(500, "error parsing tool call: raw='We need to respond: ...'")
+    return LlmProviderError(
+        500,
+        "error parsing tool call: raw='We need to respond: ...'",
+        provider_name="Ollama",
+        kind=LlmFailureKind.TOOL_PARSE,
+    )
 
 
-def load_crash() -> OllamaHTTPError:
+def load_crash() -> LlmProviderError:
     """VRAM 부족 등 모델 로드 크래시(오프로드 사다리로 회복 가능)를 흉내낸다."""
-    return OllamaHTTPError(500, "cudaMalloc failed: out of memory")
+    return LlmProviderError(
+        500,
+        "cudaMalloc failed: out of memory",
+        provider_name="Ollama",
+        kind=LlmFailureKind.LOAD_FAILURE,
+    )
 
 
 class FakeChat:
@@ -45,7 +56,9 @@ class FakeChat:
         self.payloads: list[dict] = []
 
     def __call__(self, host, payload):
-        self.payloads.append(payload)
+        self.payloads.append(
+            OllamaAdapter.serialize_request(payload) if isinstance(payload, LlmRequest) else payload
+        )
         spec = self.script[self.calls] if self.calls < len(self.script) else self.script[-1]
         self.calls += 1
         return self._gen(spec)
@@ -132,7 +145,10 @@ def env(monkeypatch):
     async def fake_layers(host, model):
         return None
 
-    monkeypatch.setattr(agent, "model_layers", fake_layers)
+    async def fake_prepare_model(host, model):
+        return agent.LlmModelRuntime(model=model)
+
+    monkeypatch.setattr(agent, "_prepare_model", fake_prepare_model)
     monkeypatch.setattr(agent, "rag_status", lambda root: {})  # 색인 없음 → RAG 비활성
 
     e = _Env(monkeypatch, ws)
