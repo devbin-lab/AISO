@@ -1,4 +1,8 @@
-import { type AppSettings, resolveTemperature } from '../../../shared/settings'
+import {
+  type AppSettings,
+  snapshotLlmSettings,
+  resolveTemperature
+} from '../../../shared/settings'
 import type { AgentEvent, AgentToolCatalog, ApprovalMode } from '../../../shared/agent'
 import type { ComfyModelProfile } from '../../../shared/comfy-model'
 import { authHeaders } from './backend'
@@ -35,15 +39,17 @@ export async function streamAgent(
   workspace: string,
   messages: AgentMessage[],
   sessionId: string,
+  assistantTurnId: string,
   approvalMode: ApprovalMode,
   comfyProfiles: ComfyModelProfile[],
   onEvent: (e: AgentEvent) => void,
   signal?: AbortSignal,
   comfySelection?: ComfySelectionRequest
 ): Promise<void> {
-  if (settings.activeLlmProvider === 'nvidia') {
-    throw new Error('NVIDIA Agent와 도구 실행은 Gate 5 이후에 지원합니다. Ollama로 전환해 주세요.')
-  }
+  const target = snapshotLlmSettings(settings)
+  const nvidiaGrant = target.provider === 'nvidia'
+    ? await window.api.nvidia.agent.prepare({ sessionId, assistantTurnId })
+    : null
   const lastUserText = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
   const comfySelectionMode = settings.comfyModelSelectionMode === 'manual' ? 'manual' : 'auto'
   const selectedComfyModelId =
@@ -55,22 +61,28 @@ export async function streamAgent(
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({
       messages,
-      provider: settings.activeLlmProvider,
-      workspace,
-      model: settings.model,
+      provider: target.provider,
+      workspace: target.provider === 'nvidia' ? '' : workspace,
+      model: target.model,
+      assistant_turn_id: assistantTurnId,
+      nvidia_grant: nvidiaGrant?.grantId ?? '',
+      deployment_mode: target.deploymentMode,
+      endpoint: target.endpoint,
       reasoning_effort: settings.reasoningEffort,
       temperature: resolveTemperature(settings, lastUserText),
       context_length: settings.contextLength,
       approval_mode: approvalMode,
       session_id: sessionId,
       ollama_host: settings.ollamaHost,
-      rag_enabled: settings.ragEnabled,
+      rag_enabled: target.provider === 'nvidia' ? false : settings.ragEnabled,
       rag_top_k: settings.ragTopK,
       keep_alive: settings.keepAlive,
-      comfy_base_url: settings.comfyBaseUrl,
-      comfy_profiles: comfyProfiles,
-      comfy_selection_mode: comfySelectionMode,
-      ...(selectedComfyModelId ? { selected_comfy_model_id: selectedComfyModelId } : {})
+      comfy_base_url: target.provider === 'nvidia' ? null : settings.comfyBaseUrl,
+      comfy_profiles: target.provider === 'nvidia' ? [] : comfyProfiles,
+      comfy_selection_mode: target.provider === 'nvidia' ? 'auto' : comfySelectionMode,
+      ...(target.provider !== 'nvidia' && selectedComfyModelId
+        ? { selected_comfy_model_id: selectedComfyModelId }
+        : {})
     }),
     signal
   })

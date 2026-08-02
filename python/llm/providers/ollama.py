@@ -94,6 +94,24 @@ class OllamaAdapter:
         serialized: list[dict[str, Any]] = []
         for message in messages:
             copied = dict(message)
+            if copied.get("role") == "assistant" and isinstance(copied.get("tool_calls"), list):
+                ollama_calls: list[dict[str, Any]] = []
+                for call in copied["tool_calls"]:
+                    function = dict(call.get("function") or {}) if isinstance(call, dict) else {}
+                    arguments = function.get("arguments", {})
+                    if isinstance(arguments, str):
+                        try:
+                            parsed = json.loads(arguments)
+                            arguments = parsed if isinstance(parsed, dict) else {}
+                        except json.JSONDecodeError:
+                            arguments = {}
+                    ollama_calls.append({
+                        "function": {
+                            "name": function.get("name", ""),
+                            "arguments": arguments if isinstance(arguments, dict) else {},
+                        }
+                    })
+                copied["tool_calls"] = ollama_calls
             # OpenAI 전용 필드는 Ollama payload에 내보내지 않는다. 기존 Ollama tool 메시지는
             # ID 없이 그대로 직렬화되어 v0.3.1 형식을 보존한다.
             if copied.get("role") == "tool":

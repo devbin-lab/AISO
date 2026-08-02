@@ -17,6 +17,7 @@ export const NVIDIA_CAPABILITY_MAX_AGE_MS = 24 * 60 * 60 * 1000
 /** Monotonic in-process fence preventing a late probe from restoring invalidated cache data. */
 export class NvidiaCapabilityRevision {
   private value = 0
+  private mutationDepth = 0
 
   snapshot(): number {
     return this.value
@@ -26,8 +27,19 @@ export class NvidiaCapabilityRevision {
     this.value += 1
   }
 
+  beginMutation(): void {
+    this.mutationDepth += 1
+    this.value += 1
+  }
+
+  endMutation(): void {
+    if (this.mutationDepth <= 0) throw new Error('NVIDIA capability mutation is not active')
+    this.mutationDepth -= 1
+    this.value += 1
+  }
+
   isCurrent(snapshot: number): boolean {
-    return snapshot === this.value
+    return this.mutationDepth === 0 && snapshot === this.value
   }
 }
 
@@ -166,7 +178,7 @@ export class NvidiaCapabilityCache {
     if (!entry) return null
     const checked = Date.parse(entry.checkedAt)
     const age = this.now() - checked
-    if (age < 0 || age > NVIDIA_CAPABILITY_MAX_AGE_MS) return null
+    if (age < 0 || age >= NVIDIA_CAPABILITY_MAX_AGE_MS) return null
     return entry
   }
 

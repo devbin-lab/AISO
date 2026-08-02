@@ -168,7 +168,7 @@ def test_agent_execution_wire_payload_and_event_order(monkeypatch):
     assert payload[0]["options"] == {"temperature": 0.2, "num_predict": agent.MAX_GEN_TOKENS, "num_ctx": 4096}
     assert payload[0]["messages"][-1] == {"role": "user", "content": "hello"}
     assert [tool["function"]["name"] for tool in payload[0]["tools"]] == [
-        "update_plan", "web_fetch", "web_search", "create_skill", "run_skill",
+        "update_plan", "get_system_time", "web_fetch", "web_search", "create_skill", "run_skill",
     ]
 
 

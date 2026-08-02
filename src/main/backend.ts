@@ -7,6 +7,7 @@ import { existsSync } from 'fs'
 import { ensureSkillsDir } from './skills'
 import type { BackendInfo } from '../shared/backend'
 import type { LlmModelCapabilities, LlmCapabilityState } from '../shared/llm'
+import type { NvidiaAgentPrepareInput, NvidiaAgentPrepareResult } from '../shared/nvidia'
 
 /**
  * FastAPI 사이드카 수명주기 관리.
@@ -100,6 +101,57 @@ export async function clearBackendNvidiaCredential(): Promise<void> {
 
 export async function backendNvidiaCredentialStatus(): Promise<Record<string, unknown>> {
   return credentialChannelRequest('status')
+}
+
+async function nvidiaAgentChannelRequest(
+  operation: 'grant' | 'clear',
+  body?: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  if (info.state !== 'ready' || info.port === null) throw new Error('사이드카가 준비되지 않았습니다.')
+  const nonce = randomBytes(24).toString('hex')
+  const response = await fetch(`http://127.0.0.1:${info.port}/internal/nvidia-agent/${operation}`, {
+    method: 'POST',
+    redirect: 'error',
+    signal: AbortSignal.timeout(3_000),
+    headers: credentialChannelHeaders(nonce),
+    body: JSON.stringify(body ?? {})
+  })
+  if (!response.ok) throw new Error('NVIDIA Agent 실행 허가를 안전하게 준비하지 못했습니다.')
+  return await response.json() as Record<string, unknown>
+}
+
+export async function issueBackendNvidiaAgentGrant(
+  input: NvidiaAgentPrepareInput & {
+    deploymentMode: 'build' | 'nim'
+    endpoint: string
+    model: string
+    ttlSeconds: number
+  }
+): Promise<NvidiaAgentPrepareResult> {
+  const result = await nvidiaAgentChannelRequest('grant', {
+    sessionId: input.sessionId,
+    assistantTurnId: input.assistantTurnId,
+    deploymentMode: input.deploymentMode,
+    endpoint: input.endpoint,
+    model: input.model,
+    ttlSeconds: input.ttlSeconds
+  })
+  if (
+    typeof result.grantId !== 'string' || result.grantId.length < 32 ||
+    typeof result.expiresInSeconds !== 'number' || result.expiresInSeconds <= 0
+  ) {
+    throw new Error('NVIDIA Agent 실행 허가 응답 형식이 올바르지 않습니다.')
+  }
+  return {
+    grantId: result.grantId,
+    assistantTurnId: input.assistantTurnId,
+    expiresInSeconds: result.expiresInSeconds
+  }
+}
+
+export async function clearBackendNvidiaAgentGrants(): Promise<void> {
+  if (!credentialChannelToken || info.state !== 'ready') return
+  await nvidiaAgentChannelRequest('clear')
 }
 
 async function nvidiaRuntimeRequest(
@@ -280,7 +332,8 @@ export async function startBackend(ollamaHost: string): Promise<void> {
       AISO_TOOLS_DIR: toolsDir,
       AISO_SKILLS_DIR: skillsDirPath,
       AISO_AUTH_TOKEN: AUTH_TOKEN,
-      AISO_CREDENTIAL_CHANNEL_TOKEN: credentialChannelToken
+      AISO_CREDENTIAL_CHANNEL_TOKEN: credentialChannelToken,
+      AISO_AGENT_LEDGER_PATH: join(app.getPath('userData'), 'agent-tool-ledger.sqlite3')
     },
     windowsHide: true
   })

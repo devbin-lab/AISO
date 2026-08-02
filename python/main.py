@@ -7,6 +7,8 @@ Electron 메인 프로세스가 앱 시작 시 이 서버를 스폰한다:
 import hmac
 import json
 import os
+import secrets
+import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,6 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent import MAX_GEN_TOKENS, resolve_approval, run_agent, run_research_chat
+from agent_ledger import AgentExecutionLedger, LedgerError
 from toolspec import get_builtin_tool_catalog
 from comfy_client import (
     ComfyAPIError,
@@ -58,6 +61,8 @@ MAX_DISCORD_PARSE_RETRIES = 2  # 디스코드 툴 루프의 툴콜 파싱오류 
 # 렌더러만 아는 이 토큰을 X-Aiso-Token 헤더로 검사해 근본적으로 잠근다.
 AUTH_TOKEN = os.environ.get("AISO_AUTH_TOKEN", "")
 CREDENTIAL_CHANNEL_TOKEN = os.environ.get("AISO_CREDENTIAL_CHANNEL_TOKEN", "")
+AGENT_LEDGER_PATH = os.environ.get("AISO_AGENT_LEDGER_PATH", "")
+NVIDIA_AGENT_GRANT_TTL_SECONDS = 60
 
 
 class _CredentialMemory:
@@ -106,6 +111,69 @@ class _CredentialMemory:
 _credential_memory = _CredentialMemory()
 
 
+class _NvidiaAgentGrantStore:
+    """One-use in-memory grants minted only through the Main-only channel."""
+
+    def __init__(self) -> None:
+        self._grants: dict[str, dict[str, Any]] = {}
+
+    def clear(self) -> None:
+        self._grants.clear()
+
+    def _prune(self) -> None:
+        now = time.monotonic()
+        expired = [token for token, grant in self._grants.items() if grant["expires"] <= now]
+        for token in expired:
+            self._grants.pop(token, None)
+
+    def issue(
+        self,
+        *,
+        session_id: str,
+        assistant_turn_id: str,
+        binding: dict[str, str],
+        model: str,
+        ttl_seconds: float = NVIDIA_AGENT_GRANT_TTL_SECONDS,
+    ) -> str:
+        self._prune()
+        # 32 random bytes = 256 bits. The token is never logged or persisted.
+        token = secrets.token_urlsafe(32)
+        self._grants[token] = {
+            "sessionId": session_id,
+            "assistantTurnId": assistant_turn_id,
+            "binding": dict(binding),
+            "model": model,
+            "expires": time.monotonic() + min(NVIDIA_AGENT_GRANT_TTL_SECONDS, ttl_seconds),
+        }
+        return token
+
+    def consume(
+        self,
+        token: str,
+        *,
+        session_id: str,
+        assistant_turn_id: str,
+        binding: dict[str, str],
+        model: str,
+    ) -> None:
+        self._prune()
+        # Pop before comparison: even a mismatched attempt consumes the bearer.
+        grant = self._grants.pop(token, None)
+        if grant is None:
+            raise HTTPException(status_code=409, detail="invalid or expired NVIDIA Agent grant")
+        if (
+            grant["sessionId"] != session_id
+            or grant["assistantTurnId"] != assistant_turn_id
+            or grant["binding"] != binding
+            or grant["model"] != model
+        ):
+            raise HTTPException(status_code=409, detail="NVIDIA Agent grant scope mismatch")
+
+
+_nvidia_agent_grants = _NvidiaAgentGrantStore()
+_agent_ledger_startup_error: str | None = None
+
+
 def _credential_nonce(request: Request) -> str:
     nonce = request.headers.get("X-Aiso-Credential-Nonce", "")
     _credential_memory.consume_nonce(nonce)
@@ -121,7 +189,20 @@ def _credential_binding(deployment_mode: str, endpoint: str) -> dict[str, str]:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    global _agent_ledger_startup_error
+    _agent_ledger_startup_error = None
+    if AGENT_LEDGER_PATH:
+        ledger: AgentExecutionLedger | None = None
+        try:
+            ledger = AgentExecutionLedger(AGENT_LEDGER_PATH)
+            ledger.recover_incomplete()
+        except LedgerError:
+            _agent_ledger_startup_error = "NVIDIA Agent 실행 원장을 안전하게 열지 못했습니다."
+        finally:
+            if ledger is not None:
+                ledger.close()
     yield
+    _nvidia_agent_grants.clear()
     _credential_memory.clear_secret()
     if discordbot is not None:
         await discordbot.stop()  # 앱 종료 시 디스코드 봇 게이트웨이 정리
@@ -154,7 +235,7 @@ class TokenAuthMiddleware:
         method = scope.get("method", "")
         path = scope.get("path", "")
         headers = dict(scope.get("headers") or [])
-        if path.startswith("/internal/credentials/"):
+        if path.startswith("/internal/credentials/") or path.startswith("/internal/nvidia-agent/"):
             supplied = headers.get(b"x-aiso-credential-token", b"").decode("latin-1")
             if not CREDENTIAL_CHANNEL_TOKEN or not hmac.compare_digest(supplied, CREDENTIAL_CHANNEL_TOKEN):
                 resp = JSONResponse({"detail": "unauthorized"}, status_code=401)
@@ -204,9 +285,19 @@ class CredentialBindRequest(BaseModel):
     endpoint: str = Field(min_length=1, max_length=2048)
 
 
+class NvidiaAgentGrantRequest(BaseModel):
+    sessionId: str = Field(min_length=16, max_length=256, pattern=r"^[A-Za-z0-9._:-]+$")
+    assistantTurnId: str = Field(min_length=16, max_length=256, pattern=r"^[A-Za-z0-9._:-]+$")
+    deploymentMode: Literal["build", "nim"]
+    endpoint: str = Field(min_length=1, max_length=2048)
+    model: str = Field(min_length=1, max_length=512)
+    ttlSeconds: float = Field(gt=0, le=NVIDIA_AGENT_GRANT_TTL_SECONDS)
+
+
 @app.post("/internal/credentials/set")
 async def credential_set(request: Request, body: CredentialSetRequest):
     _credential_nonce(request)
+    _nvidia_agent_grants.clear()
     binding = _credential_binding(body.deploymentMode, body.endpoint)
     _credential_memory.set(binding, body.apiKey)
     return {"ok": True}
@@ -215,6 +306,7 @@ async def credential_set(request: Request, body: CredentialSetRequest):
 @app.post("/internal/credentials/clear")
 async def credential_clear(request: Request):
     _credential_nonce(request)
+    _nvidia_agent_grants.clear()
     _credential_memory.clear_secret()
     return {"ok": True}
 
@@ -222,6 +314,7 @@ async def credential_clear(request: Request):
 @app.post("/internal/credentials/bind")
 async def credential_bind(request: Request, body: CredentialBindRequest):
     _credential_nonce(request)
+    _nvidia_agent_grants.clear()
     binding = _credential_binding(body.deploymentMode, body.endpoint)
     if body.deploymentMode == "build":
         raise HTTPException(status_code=400, detail="NVIDIA Build requires a credential")
@@ -233,6 +326,30 @@ async def credential_bind(request: Request, body: CredentialBindRequest):
 async def credential_status(request: Request):
     _credential_nonce(request)
     return _credential_memory.status()
+
+
+@app.post("/internal/nvidia-agent/grant")
+async def nvidia_agent_grant(request: Request, body: NvidiaAgentGrantRequest):
+    _credential_nonce(request)
+    binding = _credential_binding(body.deploymentMode, body.endpoint)
+    credential = _credential_memory.credential_for(binding)
+    if body.deploymentMode == "build" and not credential:
+        raise HTTPException(status_code=409, detail="NVIDIA credential is not ready")
+    token = _nvidia_agent_grants.issue(
+        session_id=body.sessionId,
+        assistant_turn_id=body.assistantTurnId,
+        binding=binding,
+        model=body.model.strip(),
+        ttl_seconds=body.ttlSeconds,
+    )
+    return {"grantId": token, "expiresInSeconds": body.ttlSeconds}
+
+
+@app.post("/internal/nvidia-agent/clear")
+async def nvidia_agent_grant_clear(request: Request):
+    _credential_nonce(request)
+    _nvidia_agent_grants.clear()
+    return {"ok": True}
 
 
 class NvidiaTargetRequest(BaseModel):
@@ -824,6 +941,10 @@ class AgentRequest(BaseModel):
     context_length: int = 16384  # /chat와 통일 — 모드 전환 시 num_ctx 변경으로 인한 재로드 방지
     approval_mode: str = Field(default="read", pattern="^(manual|read|auto)$")
     session_id: str = ""
+    assistant_turn_id: str = ""
+    nvidia_grant: str = ""
+    deployment_mode: Literal["build", "nim"] | None = None
+    endpoint: str = Field(default="", max_length=2048)
     ollama_host: str | None = None
     rag_enabled: bool = True
     rag_top_k: int = 5
@@ -850,13 +971,30 @@ class ApprovalRequest(BaseModel):
 @app.post("/agent")
 async def agent(req: AgentRequest):
     """에이전트 하네스 — 파일 툴 콜링 루프. NDJSON 이벤트 스트림."""
+    runtime: LlmRuntime | None = None
+    ledger: AgentExecutionLedger | None = None
     if req.provider == "nvidia":
-        async def unsupported():
-            yield json.dumps(
-                {"type": "error", "error": "NVIDIA Agent와 도구 실행은 Gate 5 이후에 지원합니다."},
-                ensure_ascii=False,
-            ) + "\n"
-        return StreamingResponse(unsupported(), media_type="application/x-ndjson")
+        if not req.deployment_mode or not req.endpoint or not req.model.strip():
+            raise HTTPException(status_code=400, detail="NVIDIA Agent target is incomplete")
+        if len(req.session_id) < 16 or len(req.assistant_turn_id) < 16 or not req.nvidia_grant:
+            raise HTTPException(status_code=400, detail="NVIDIA Agent execution scope is invalid")
+        binding = _credential_binding(req.deployment_mode, req.endpoint)
+        _nvidia_agent_grants.consume(
+            req.nvidia_grant,
+            session_id=req.session_id,
+            assistant_turn_id=req.assistant_turn_id,
+            binding=binding,
+            model=req.model.strip(),
+        )
+        if _agent_ledger_startup_error or not AGENT_LEDGER_PATH:
+            raise HTTPException(status_code=503, detail="NVIDIA Agent execution ledger is unavailable")
+        try:
+            ledger = AgentExecutionLedger(AGENT_LEDGER_PATH)
+        except LedgerError as error:
+            raise HTTPException(status_code=503, detail="NVIDIA Agent execution ledger is unavailable") from error
+        runtime = _nvidia_runtime_for_target(
+            NvidiaTargetRequest(deployment_mode=req.deployment_mode, endpoint=binding["endpoint"])
+        )
     host = (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
     global _preview_root
     try:  # 에이전트가 만드는 파일을 우측 미리보기에서 바로 볼 수 있게 루트 설정
@@ -867,7 +1005,7 @@ async def agent(req: AgentRequest):
     async def gen():
         agent_stream = run_agent(
             host=host,
-            workspace=req.workspace,
+            workspace="" if req.provider == "nvidia" else req.workspace,
             model=req.model,
             messages=[{"role": m.role, "content": m.content} for m in req.messages],
             reasoning_effort=req.reasoning_effort,
@@ -875,13 +1013,17 @@ async def agent(req: AgentRequest):
             context_length=req.context_length,
             approval_mode=req.approval_mode,
             session_id=req.session_id,
-            rag_enabled=req.rag_enabled,
+            rag_enabled=False if req.provider == "nvidia" else req.rag_enabled,
             rag_top_k=req.rag_top_k,
             keep_alive=req.keep_alive,
-            comfy_base_url=req.comfy_base_url,
-            comfy_profiles=req.comfy_profiles,
+            comfy_base_url=None if req.provider == "nvidia" else req.comfy_base_url,
+            comfy_profiles=[] if req.provider == "nvidia" else req.comfy_profiles,
             comfy_selection_mode=req.comfy_selection_mode,
             selected_comfy_model_id=req.selected_comfy_model_id,
+            provider=req.provider,
+            runtime=runtime,
+            assistant_turn_id=req.assistant_turn_id,
+            execution_ledger=ledger,
         )
         agent_completed = False
         try:
@@ -891,6 +1033,8 @@ async def agent(req: AgentRequest):
         finally:
             if not agent_completed:
                 await agent_stream.aclose()
+            if ledger is not None:
+                ledger.close()
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 

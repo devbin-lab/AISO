@@ -5,7 +5,9 @@ import type {
   NvidiaExecutionPrepareResult,
   NvidiaCapabilitySnapshot,
   NvidiaCapabilityTargetInput,
-  NvidiaModelListResult
+  NvidiaModelListResult,
+  NvidiaAgentPrepareInput,
+  NvidiaAgentPrepareResult
 } from '../shared/nvidia'
 import type { PingResult } from '../shared/ipc'
 import type { BackendInfo } from '../shared/backend'
@@ -54,6 +56,9 @@ export interface AisoAPI {
       status: (target: NvidiaCapabilityTargetInput) => Promise<NvidiaCapabilitySnapshot | null>
       probe: (target: NvidiaCapabilityTargetInput) => Promise<NvidiaCapabilitySnapshot>
       clear: (target: NvidiaCapabilityTargetInput) => Promise<void>
+    }
+    agent: {
+      prepare: (input: NvidiaAgentPrepareInput) => Promise<NvidiaAgentPrepareResult>
     }
   }
   backend: {

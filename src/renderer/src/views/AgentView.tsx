@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AppSettings, ReasoningEffort } from '../../../shared/settings'
+import {
+  snapshotLlmSettings,
+  type AppSettings,
+  type ReasoningEffort
+} from '../../../shared/settings'
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import type {
   AgentEvent,
@@ -70,6 +74,9 @@ type Item =
   | {
       kind: 'tool'
       callId: string
+      approvalId: string
+      providerToolCallId: string
+      assistantTurnId: string
       name: string
       args: Record<string, unknown>
       status: ToolStatus
@@ -80,6 +87,7 @@ type Item =
   | { kind: 'meta'; tokens: number; seconds: number } // 실행 완료 후 토큰·소요시간 요약줄
 
 interface Props {
+  active: boolean
   settings: AppSettings
   backend: BackendInfo
   health: HealthInfo | null
@@ -97,6 +105,7 @@ function argPath(args: Record<string, unknown>): string {
 }
 
 function AgentView({
+  active,
   settings,
   backend,
   health,
@@ -123,19 +132,66 @@ function AgentView({
   const [manualComfyLoading, setManualComfyLoading] = useState(false)
   const [elapsed, setElapsed] = useState(0) // 현재 실행 경과(초) — '멈춘 것처럼 보임' 방지용 활동 표시
   const [liveTokens, setLiveTokens] = useState(0) // 이번 실행 누적 토큰(실시간 표시)
+  const [nvidiaAgentCapability, setNvidiaAgentCapability] = useState<
+    'idle' | 'loading' | 'supported' | 'blocked'
+  >('idle')
   const runStartRef = useRef(0)
   const runTokensRef = useRef(0) // 완료 시 사용량 기록용(마지막 usage.total)
 
   // 작업 폴더가 정해지면 사이드카에 미리보기 루트를 알려준다 (/f 정적 서빙용)
   useEffect(() => {
-    if (backend.state === 'ready' && backend.port && settings.workspace) {
+    if (
+      settings.activeLlmProvider !== 'nvidia' &&
+      backend.state === 'ready' && backend.port && settings.workspace
+    ) {
       fetch(`http://127.0.0.1:${backend.port}/preview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ workspace: settings.workspace })
       }).catch(() => {})
     }
-  }, [backend.state, backend.port, settings.workspace])
+  }, [backend.state, backend.port, settings.activeLlmProvider, settings.workspace])
+
+  // Metadata-only local cache lookup. Starting Agent never probes NVIDIA implicitly;
+  // Main remains the authoritative gate and revalidates again before minting a grant.
+  useEffect(() => {
+    if (!active) return
+    if (settings.activeLlmProvider !== 'nvidia') {
+      setNvidiaAgentCapability('idle')
+      return
+    }
+    let cancelled = false
+    setNvidiaAgentCapability('loading')
+    try {
+      const target = snapshotLlmSettings(settings)
+      if (!target.model) {
+        setNvidiaAgentCapability('blocked')
+        return
+      }
+      void window.api.nvidia.capabilities.status({
+        deploymentMode: target.deploymentMode!,
+        endpoint: target.endpoint,
+        model: target.model
+      }).then((snapshot) => {
+        if (!cancelled) {
+          setNvidiaAgentCapability(
+            snapshot?.capabilities.tools === 'supported' ? 'supported' : 'blocked'
+          )
+        }
+      }).catch(() => {
+        if (!cancelled) setNvidiaAgentCapability('blocked')
+      })
+    } catch {
+      setNvidiaAgentCapability('blocked')
+    }
+    return () => { cancelled = true }
+  }, [
+    active,
+    settings.activeLlmProvider,
+    settings.nvidiaDeploymentMode,
+    settings.nvidiaModel,
+    settings.nvidiaNimEndpoint
+  ])
 
   // RAG 색인 상태 로드 (작업 폴더·백엔드 준비 시)
   useEffect(() => {
@@ -189,13 +245,20 @@ function AgentView({
   }, [])
 
   useEffect(() => {
-    if (settings.comfyModelSelectionMode === 'manual') {
+    if (
+      settings.activeLlmProvider !== 'nvidia' &&
+      settings.comfyModelSelectionMode === 'manual'
+    ) {
       void refreshManualComfyProfiles()
       return
     }
     setManualComfyProfiles([])
     setManualComfyProfileId('')
-  }, [settings.comfyModelSelectionMode, refreshManualComfyProfiles])
+  }, [
+    settings.activeLlmProvider,
+    settings.comfyModelSelectionMode,
+    refreshManualComfyProfiles
+  ])
 
   // 실행이 끝나면 세션 저장 (스크린샷은 용량 커서 제외 — 재실행 시 재생성됨)
   useEffect(() => {
@@ -278,7 +341,9 @@ function AgentView({
   const ollamaOk = health?.ollama === true
   const nvidiaSelected = settings.activeLlmProvider === 'nvidia'
   // 작업 폴더는 선택 사항 — 없어도 웹 조사·스킬 제작은 가능(백엔드가 로컬 도구를 잠근다).
-  const ready = backendReady && ollamaOk && !nvidiaSelected
+  const ready = backendReady && (
+    nvidiaSelected ? nvidiaAgentCapability === 'supported' : ollamaOk
+  )
   const canSend = ready && !running && input.trim().length > 0
 
   // ---- 이벤트 → 타임라인 리듀서 (순수: 기존 객체를 변형하지 않는다) ----
@@ -330,15 +395,26 @@ function AgentView({
         if (openAsst) next[li] = { ...openAsst, streaming: false }
         // update_plan은 카드로 그리지 않고 계획 패널에서 표시
         if (ev.name !== 'update_plan') {
-          next.push({ kind: 'tool', callId: ev.id, name: ev.name, args: ev.args, status: 'running' })
+          next.push({
+            kind: 'tool',
+            callId: ev.executionId,
+            approvalId: ev.approvalId,
+            providerToolCallId: ev.providerToolCallId,
+            assistantTurnId: ev.assistantTurnId,
+            name: ev.name,
+            args: ev.args,
+            status: 'running'
+          })
         }
       } else if (ev.type === 'approval_request') {
         return next.map((i) =>
-          i.kind === 'tool' && i.callId === ev.id ? { ...i, status: 'awaiting' as const } : i
+          i.kind === 'tool' && i.callId === ev.executionId
+            ? { ...i, approvalId: ev.approvalId, status: 'awaiting' as const }
+            : i
         )
       } else if (ev.type === 'tool_result') {
         return next.map((i) =>
-          i.kind === 'tool' && i.callId === ev.id
+          i.kind === 'tool' && i.callId === ev.executionId
             ? {
                 ...i,
                 status: ev.ok ? ('done' as const) : ev.rejected ? ('rejected' as const) : ('error' as const),
@@ -359,7 +435,7 @@ function AgentView({
     })
   }
 
-  const decide = async (callId: string, approved: boolean): Promise<void> => {
+  const decide = async (callId: string, approvalId: string, approved: boolean): Promise<void> => {
     if (backend.port == null) return
     setItems((prev) =>
       prev.map((i) =>
@@ -367,7 +443,7 @@ function AgentView({
       )
     )
     try {
-      await approveAgent(backend.port, sessionRef.current, callId, approved)
+      await approveAgent(backend.port, sessionRef.current, approvalId, approved)
     } catch (err) {
       console.error('승인 전송 실패:', err)
     }
@@ -379,9 +455,11 @@ function AgentView({
     const previousAssistant = [...historyRef.current]
       .reverse()
       .find((message) => message.role === 'assistant')?.content ?? ''
-    const imageRequested = looksLikeImageGenerationRequest(text, previousAssistant)
-    const manualSelection = settings.comfyModelSelectionMode === 'manual'
-    const availableComfyProfiles = await listComfyProfilesForAgent(manualSelection)
+    const imageRequested = !nvidiaSelected && looksLikeImageGenerationRequest(text, previousAssistant)
+    const manualSelection = !nvidiaSelected && settings.comfyModelSelectionMode === 'manual'
+    const availableComfyProfiles = nvidiaSelected
+      ? []
+      : await listComfyProfilesForAgent(manualSelection)
     const selectedComfyProfile = availableComfyProfiles.find(
       (profile) => profile.id === manualComfyProfileId
     )
@@ -426,6 +504,10 @@ function AgentView({
       typeof crypto !== 'undefined' && 'randomUUID' in crypto
         ? crypto.randomUUID()
         : String(Math.random())
+    const assistantTurnId =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}.${Math.random()}`
 
     try {
       if (comfyProfiles.length > 0 && imageRequested) {
@@ -444,6 +526,7 @@ function AgentView({
         settings.workspace,
         historyRef.current,
         sessionRef.current,
+        assistantTurnId,
         approvalMode,
         comfyProfiles,
         reduce,
@@ -468,7 +551,7 @@ function AgentView({
         historyRef.current = [...historyRef.current, { role: 'assistant', content: finalTextRef.current }]
       }
       // 재색인은 백엔드에서 백그라운드로 돌므로, 잠시 뒤 색인 칩 수치를 갱신한다
-      if (backend.port && settings.workspace.trim()) {
+      if (!nvidiaSelected && backend.port && settings.workspace.trim()) {
         const port = backend.port
         window.setTimeout(() => {
           ragStatus(port, settings.workspace).then(setRag).catch(() => {})
@@ -481,7 +564,9 @@ function AgentView({
     abortRef.current?.abort()
     // 승인 대기 중인 툴은 거부 처리 → 백엔드 홀딩 해제
     items.forEach((i) => {
-      if (i.kind === 'tool' && i.status === 'awaiting') void decide(i.callId, false)
+      if (i.kind === 'tool' && i.status === 'awaiting') {
+        void decide(i.callId, i.approvalId, false)
+      }
     })
   }
 
@@ -596,7 +681,19 @@ function AgentView({
 
   let notice: { text: string; kind: 'err' | 'warn' } | null = null
   if (backend.state !== 'ready') notice = { text: '백엔드 엔진 준비 중…', kind: 'warn' }
-  else if (nvidiaSelected) notice = { text: 'NVIDIA Agent와 도구 실행은 Gate 5 이후에 지원합니다. 일반 채팅만 사용할 수 있습니다.', kind: 'warn' }
+  else if (nvidiaSelected && nvidiaAgentCapability === 'loading') {
+    notice = { text: '저장된 NVIDIA 도구 기능 확인 상태를 읽고 있습니다…', kind: 'warn' }
+  } else if (nvidiaSelected && nvidiaAgentCapability !== 'supported') {
+    notice = {
+      text: 'NVIDIA Agent를 사용하려면 설정에서 현재 모델의 도구 기능을 검사해 tools=supported 상태를 확인하세요.',
+      kind: 'warn'
+    }
+  } else if (nvidiaSelected) {
+    notice = {
+      text: 'NVIDIA Agent Gate 5 — 현재는 계획 갱신과 현재 시각 확인 도구만 사용할 수 있습니다.',
+      kind: 'warn'
+    }
+  }
   else if (!ollamaOk) notice = { text: 'Ollama에 연결할 수 없습니다 — Ollama 앱을 실행하세요', kind: 'err' }
   else if (!hasWorkspace)
     notice = {
@@ -758,10 +855,10 @@ function AgentView({
             <b>{TOOL_LABEL[awaiting.name] ?? awaiting.name}</b>
             {argPath(awaiting.args) && <span className="mono"> · {argPath(awaiting.args)}</span>}
           </span>
-          <button className="btn btn--sm" onClick={() => void decide(awaiting.callId, true)}>
+          <button className="btn btn--sm" onClick={() => void decide(awaiting.callId, awaiting.approvalId, true)}>
             승인
           </button>
-          <button className="btn btn--sm btn--ghost2" onClick={() => void decide(awaiting.callId, false)}>
+          <button className="btn btn--sm btn--ghost2" onClick={() => void decide(awaiting.callId, awaiting.approvalId, false)}>
             거부
           </button>
         </div>

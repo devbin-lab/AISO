@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_SETTINGS } from '../../../shared/settings'
 import type { ComfyModelProfile } from '../../../shared/comfy-model'
-import { fetchAgentToolCatalog, streamAgent } from './agent'
+import { approveAgent, fetchAgentToolCatalog, streamAgent } from './agent'
 import { ragIndex } from './rag'
 
 const profile = { id: 'profile-manual-1', agentEnabled: true } as ComfyModelProfile
@@ -9,7 +9,18 @@ const profile = { id: 'profile-manual-1', agentEnabled: true } as ComfyModelProf
 function installApiStub(): void {
   Object.defineProperty(window, 'api', {
     configurable: true,
-    value: { backend: { token: () => 'test-token' } }
+    value: {
+      backend: { token: () => 'test-token' },
+      nvidia: {
+        agent: {
+          prepare: vi.fn().mockResolvedValue({
+            grantId: 'one-use-grant',
+            assistantTurnId: 'assistant-turn-test',
+            expiresInSeconds: 60
+          })
+        }
+      }
+    }
   })
 }
 
@@ -51,6 +62,7 @@ describe('streamAgent ComfyUI model-selection payload', () => {
       '',
       [{ role: 'user', content: '그림을 그려줘' }],
       'session-1',
+      'assistant-turn-1',
       'read',
       [profile],
       vi.fn(),
@@ -74,6 +86,7 @@ describe('streamAgent ComfyUI model-selection payload', () => {
       '',
       [{ role: 'user', content: '그림을 그려줘' }],
       'session-2',
+      'assistant-turn-2',
       'read',
       [profile],
       vi.fn(),
@@ -86,20 +99,81 @@ describe('streamAgent ComfyUI model-selection payload', () => {
     expect(body).not.toHaveProperty('selected_comfy_model_id')
   })
 
-  it('blocks NVIDIA Agent before any backend or external egress', async () => {
+  it('sends only the approval ID to the approval endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await approveAgent(8123, 'session-approval-01', 'approval-distinct-01', true)
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
+    expect(body).toEqual({
+      session_id: 'session-approval-01',
+      call_id: 'approval-distinct-01',
+      approved: true
+    })
+    expect(JSON.stringify(body)).not.toContain('execution-distinct-01')
+    expect(JSON.stringify(body)).not.toContain('provider-call-distinct-01')
+  })
+
+  it('requires a Main grant and strips workspace, RAG, and Comfy metadata from NVIDIA Agent', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamResponse())
+    vi.stubGlobal('fetch', fetchMock)
+
+    await streamAgent(
+      8123,
+      {
+        ...DEFAULT_SETTINGS,
+        activeLlmProvider: 'nvidia',
+        nvidiaDeploymentMode: 'build',
+        nvidiaModel: 'nvidia/test-model',
+        ragEnabled: true,
+        comfyModelSelectionMode: 'manual'
+      },
+      'C:/private/workspace',
+      [{ role: 'user', content: 'run a tool' }],
+      'session-nvidia-0001',
+      'assistant-turn-0001',
+      'read',
+      [profile],
+      vi.fn()
+    )
+
+    expect(window.api.nvidia.agent.prepare).toHaveBeenCalledWith({
+      sessionId: 'session-nvidia-0001',
+      assistantTurnId: 'assistant-turn-0001'
+    })
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
+    expect(body).toMatchObject({
+      provider: 'nvidia',
+      workspace: '',
+      model: 'nvidia/test-model',
+      assistant_turn_id: 'assistant-turn-0001',
+      nvidia_grant: 'one-use-grant',
+      rag_enabled: false,
+      comfy_profiles: [],
+      comfy_base_url: null,
+      comfy_selection_mode: 'auto'
+    })
+    expect(JSON.stringify(body)).not.toContain('C:/private/workspace')
+    expect(body).not.toHaveProperty('selected_comfy_model_id')
+  })
+
+  it('does not call the sidecar when Main refuses the NVIDIA Agent grant', async () => {
+    vi.mocked(window.api.nvidia.agent.prepare).mockRejectedValueOnce(new Error('capability denied'))
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(streamAgent(
       8123,
-      { ...DEFAULT_SETTINGS, activeLlmProvider: 'nvidia' },
-      '',
+      { ...DEFAULT_SETTINGS, activeLlmProvider: 'nvidia', nvidiaModel: 'nvidia/test-model' },
+      'C:/private/workspace',
       [{ role: 'user', content: 'run a tool' }],
-      'session-nvidia',
+      'session-nvidia-0002',
+      'assistant-turn-0002',
       'read',
-      [],
+      [profile],
       vi.fn()
-    )).rejects.toThrow()
+    )).rejects.toThrow('capability denied')
 
     expect(fetchMock).not.toHaveBeenCalled()
   })

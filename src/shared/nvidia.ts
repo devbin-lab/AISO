@@ -45,6 +45,17 @@ export interface NvidiaCapabilitySnapshot {
 
 export type NvidiaModelListResult = LlmModelListResult
 
+export interface NvidiaAgentPrepareInput {
+  sessionId: string
+  assistantTurnId: string
+}
+
+export interface NvidiaAgentPrepareResult {
+  grantId: string
+  assistantTurnId: string
+  expiresInSeconds: number
+}
+
 function isLoopbackHostname(hostname: string): boolean {
   const host = hostname.toLowerCase()
   if (host === 'localhost' || host.endsWith('.localhost')) return true

@@ -16,6 +16,7 @@ REGISTRY에는 넣어 실행 디스패치에 쓴다.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -108,6 +109,19 @@ UPDATE_PLAN_SCHEMA = {
     },
 }
 
+GET_SYSTEM_TIME_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "get_system_time",
+        "description": "작업 폴더나 사용자 파일을 읽지 않고 현재 로컬 날짜와 시각을 확인한다.",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+}
+
+
+async def get_system_time() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
 # 파일 툴의 성질 — 쓰기/삭제 판정 (테스트가 승인 매트릭스로 고정)
 _FILE_MUTATES = {"write_file", "edit_file", "multi_edit", "delete_file", "delete_dir", "move"}
 _FILE_DELETE = {"delete_file", "delete_dir"}
@@ -125,6 +139,10 @@ def _build_registry() -> dict[str, ToolSpec]:
     reg: dict[str, ToolSpec] = {}
     # 1) update_plan (메타, 맨 앞) — AGENT_TOOLS 순서 보존
     reg["update_plan"] = ToolSpec("update_plan", UPDATE_PLAN_SCHEMA, CallKind.META)
+    # Gate 5의 외부 provider 안전 왕복에 사용할 수 있는 합성 read-only 도구.
+    reg["get_system_time"] = ToolSpec(
+        "get_system_time", GET_SYSTEM_TIME_SCHEMA, CallKind.ASYNC_PLAIN, handler=get_system_time
+    )
     # 2) 파일 툴 12개 — TOOL_SCHEMAS 순서 그대로
     for sch in TOOL_SCHEMAS:
         name = sch["function"]["name"]

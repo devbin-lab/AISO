@@ -95,9 +95,9 @@ export interface ComfyGeneratedImage {
 export type AgentEvent =
   | { type: 'thinking'; text: string }
   | { type: 'content'; text: string }
-  | { type: 'tool_call'; id: string; name: string; args: Record<string, unknown> }
-  | { type: 'approval_request'; id: string; name: string; args: Record<string, unknown> }
-  | { type: 'tool_result'; id: string; ok: boolean; output: string; rejected?: boolean }
+  | ({ type: 'tool_call'; name: string; args: Record<string, unknown> } & AgentToolIdentity)
+  | ({ type: 'approval_request'; name: string; args: Record<string, unknown> } & AgentToolIdentity)
+  | ({ type: 'tool_result'; ok: boolean; output: string; rejected?: boolean; reused?: boolean } & AgentToolIdentity)
   | { type: 'screenshot'; id: string; data: string }
   | { type: 'image_result'; id: string; image: ComfyGeneratedImage }
   | { type: 'plan'; steps: PlanStep[] }
@@ -106,7 +106,17 @@ export type AgentEvent =
   | { type: 'done' }
   | { type: 'error'; error: string }
 
+export interface AgentToolIdentity {
+  /** Legacy rendering correlation; equal to executionId. */
+  id: string
+  executionId: string
+  approvalId: string
+  providerToolCallId: string
+  assistantTurnId: string
+}
+
 export const TOOL_LABEL: Record<string, string> = {
+  get_system_time: '현재 시각 확인',
   list_dir: '폴더 목록',
   list_tree: '폴더 구조',
   grep: '내용 검색',

@@ -12,6 +12,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any, AsyncGenerator
+from uuid import uuid4
 
 import discordops  # 서버 구성·전송(디스코드) — 모듈 자체는 discord 미의존(지연 import)
 import discordsched  # 예약(디스코드) — 순수 파이썬
@@ -23,7 +24,16 @@ from comfy_generation import (
 )
 from comfy_workflows import MAX_PROMPT_LENGTH
 
-from llm import LlmFailureKind, LlmModelRuntime, LlmProviderError, LlmRequest, create_runtime
+from llm import LlmFailureKind, LlmModelRuntime, LlmProviderError, LlmRequest, LlmRuntime, create_runtime
+from llm.tool_calls import ToolCallAssembler, ToolCallProtocolError, canonicalize_tool_arguments
+from agent_ledger import (
+    AgentExecutionLedger,
+    LedgerError,
+    LedgerIndeterminate,
+    LedgerInProgress,
+    LedgerKey,
+    LedgerProtocolConflict,
+)
 from rag import (
     SEARCH_DOCS_SCHEMA,
     RagError,
@@ -146,12 +156,14 @@ def compact_convo(convo: list[dict], context_length: int, reserve_tokens: int = 
 # 이 밖의 파일·코드·명령 도구는 작업 폴더가 있어야 하며, 없으면 노출도·실행도 하지 않는다.
 WORKSPACE_FREE_TOOLS = frozenset(
     {
-        "update_plan", "web_search", "web_fetch", "create_skill", "run_skill",
+        "update_plan", "get_system_time", "web_search", "web_fetch", "create_skill", "run_skill",
         "generate_image",
         "discord_server_map", "discord_server_apply", "discord_send",
         "discord_schedule_add", "discord_schedule_list", "discord_schedule_remove",
     }
 )
+
+NVIDIA_GATE5_TOOLS = frozenset({"update_plan", "get_system_time"})
 
 _IMAGE_TOOL_ARGS = frozenset(
     {
@@ -523,7 +535,13 @@ async def _release_llm_for_image(host: str) -> list[str]:
         return []
 
 
-async def _chat_turn(host: str, request: LlmRequest) -> AsyncGenerator[dict, None]:
+async def _chat_turn(
+    host: str,
+    request: LlmRequest,
+    runtime: LlmRuntime | None = None,
+    *,
+    strict_tool_protocol: bool = False,
+) -> AsyncGenerator[dict, None]:
     """공용 LLM 이벤트 한 턴을 기존 Agent 최종 결과로 모은다."""
     content = ""
     thinking = ""
@@ -532,7 +550,9 @@ async def _chat_turn(host: str, request: LlmRequest) -> AsyncGenerator[dict, Non
     output_tokens = 0  # eval_count — 이 턴에 '생성'된 토큰 (입력 토큰은 세지 않는다)
     rep_next = REP_MIN_LEN        # content가 이 길이를 넘으면 반복 퇴행 검사
     rep_next_think = REP_MIN_LEN  # thinking도 동일하게 검사 (사고 채널에서 폭주하는 경우)
-    runtime = create_runtime("ollama", host)
+    runtime = runtime or create_runtime("ollama", host)
+    assembler = ToolCallAssembler() if strict_tool_protocol else None
+    saw_done = False
     stream = runtime.chat_stream(request)
     stream_completed = False
     try:
@@ -557,16 +577,38 @@ async def _chat_turn(host: str, request: LlmRequest) -> AsyncGenerator[dict, Non
                         done_reason = "repetition"
                         break
             elif event.kind == "tool_call_delta":
-                tool_calls.extend(event.tool_calls or [])
+                if assembler is not None:
+                    assembler.add(event.tool_calls or [])
+                else:
+                    tool_calls.extend(event.tool_calls or [])
             elif event.kind == "done":
+                if saw_done:
+                    raise ToolCallProtocolError("LLM 완료 이벤트가 중복되었습니다.")
+                saw_done = True
                 done_reason = event.done_reason
                 output_tokens = event.output_tokens or 0
+            elif event.kind in ("cancelled", "incomplete", "error"):
+                raise ToolCallProtocolError(event.error or "LLM 응답 스트림이 완전하게 종료되지 않았습니다.")
         stream_completed = True
     finally:
         # 중단·취소·공급자 오류일 때만 HTTP 스트림을 즉시 정리한다.
         # 정상 소비 뒤에는 이미 소진된 자식 제너레이터를 다시 닫지 않는다.
         if not stream_completed:
             await stream.aclose()
+    if assembler is not None:
+        assembled = assembler.finalize(saw_done=saw_done, finish_reason=done_reason)
+        tool_calls = [
+            {
+                "index": call.index,
+                "provider_tool_call_id": call.provider_tool_call_id,
+                "function": {
+                    "name": call.name,
+                    "arguments": call.arguments,
+                },
+                "canonical_arguments": call.canonical_arguments,
+            }
+            for call in assembled
+        ]
     yield {
         "_final": True,
         "content": content,
@@ -586,6 +628,40 @@ def _parse_args(raw: Any) -> dict:
         except json.JSONDecodeError:
             return {}
     return {}
+
+
+def _normalize_tool_calls(raw_calls: Any, assistant_turn_id: str) -> list[dict[str, Any]]:
+    if not isinstance(raw_calls, list):
+        raise ToolCallProtocolError("도구 호출 목록 형식이 올바르지 않습니다.")
+    normalized: list[dict[str, Any]] = []
+    provider_ids: set[str] = set()
+    for index, raw in enumerate(raw_calls):
+        if not isinstance(raw, dict) or not isinstance(raw.get("function"), dict):
+            raise ToolCallProtocolError("도구 호출 형식이 올바르지 않습니다.")
+        function = raw["function"]
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            raise ToolCallProtocolError("도구 함수명이 없습니다.")
+        arguments = function.get("arguments")
+        parsed = _parse_args(arguments)
+        provider_id = raw.get("provider_tool_call_id") or raw.get("id")
+        if not isinstance(provider_id, str) or not provider_id:
+            provider_id = f"ollama-{assistant_turn_id}-{index}"
+        if provider_id in provider_ids:
+            raise ToolCallProtocolError("provider 도구 호출 ID가 중복되었습니다.")
+        provider_ids.add(provider_id)
+        canonical = raw.get("canonical_arguments")
+        if not isinstance(canonical, str):
+            canonical = canonicalize_tool_arguments(parsed)
+        normalized.append(
+            {
+                "index": index,
+                "provider_tool_call_id": provider_id,
+                "function": {"name": name, "arguments": parsed},
+                "canonical_arguments": canonical,
+            }
+        )
+    return normalized
 
 
 _reindexing: set[str] = set()  # 진행 중인 워크스페이스 (중복 방지)
@@ -638,7 +714,8 @@ def _maybe_reindex(root: Path, host: str, dirty: bool, rag_available: bool) -> N
 
 
 async def _generate_turn(
-    host: str, base: LlmRequest, reasoning_effort: str, model_runtime: LlmModelRuntime, offload_noticed: bool
+    host: str, base: LlmRequest, reasoning_effort: str, model_runtime: LlmModelRuntime,
+    offload_noticed: bool, runtime: LlmRuntime | None = None, *, strict_tool_protocol: bool = False
 ) -> AsyncGenerator[dict, None]:
     """한 턴 생성 — 오프로드 사다리 + gpt-oss 파싱오류 재생성 + 스트리밍을 캡슐화한다.
 
@@ -654,11 +731,20 @@ async def _generate_turn(
         final = None
         yielded_any = False  # 이 시도에서 이미 토큰을 흘렸는지 (중복 렌더 방지)
         parse_failed = False
-        runtime = create_runtime("ollama", host)
-        attempts = runtime.prepare_attempts(base, reasoning_effort, model_runtime)
+        turn_runtime = runtime or create_runtime("ollama", host)
+        attempts = turn_runtime.prepare_attempts(base, reasoning_effort, model_runtime)
         for i, attempt in enumerate(attempts):
             try:
-                turn_stream = _chat_turn(host, attempt)
+                turn_stream = (
+                    _chat_turn(host, attempt)
+                    if runtime is None
+                    else _chat_turn(
+                        host,
+                        attempt,
+                        turn_runtime,
+                        strict_tool_protocol=strict_tool_protocol,
+                    )
+                )
                 turn_completed = False
                 try:
                     async for ev in turn_stream:
@@ -718,9 +804,11 @@ async def _generate_turn(
            "error_kind": None, "offload_noticed": offload_noticed}
 
 
-async def _prepare_model(host: str, model: str) -> LlmModelRuntime:
+async def _prepare_model(
+    host: str, model: str, runtime: LlmRuntime | None = None
+) -> LlmModelRuntime:
     """실행 시작 시 runtime 모델 준비 결과를 고정한다."""
-    return await create_runtime("ollama", host).prepare_model(model)
+    return await (runtime or create_runtime("ollama", host)).prepare_model(model)
 
 
 async def _run_agent_impl(
@@ -741,9 +829,18 @@ async def _run_agent_impl(
     comfy_profiles: list[dict] | None = None,
     comfy_selection_mode: str = "auto",
     selected_comfy_model_id: str | None = None,
+    provider: str = "ollama",
+    runtime: LlmRuntime | None = None,
+    assistant_turn_id: str = "",
+    execution_ledger: AgentExecutionLedger | None = None,
     _cleanup_state: dict[str, Any] | None = None,
 ) -> AsyncGenerator[dict, None]:
     # 작업 폴더는 선택 사항 — 지정하면 로컬 파일 작업까지, 없으면 웹 조사·스킬만 한다.
+    if provider not in ("ollama", "nvidia"):
+        yield {"type": "error", "error": "지원하지 않는 Agent provider입니다."}
+        return
+    nvidia_gate5 = provider == "nvidia"
+    assistant_turn_id = assistant_turn_id or uuid4().hex
     workspace = (workspace or "").strip()
     no_workspace = not workspace
     root: Path | None = None
@@ -773,7 +870,11 @@ async def _run_agent_impl(
         "",
     ) if last_user_index > 0 else ""
     plan: list[dict] = []
-    model_runtime = await _prepare_model(host, model)
+    model_runtime = (
+        await _prepare_model(host, model)
+        if runtime is None
+        else await _prepare_model(host, model, runtime)
+    )
     offload_noticed = False
     dirty = False  # 파일이 실제로 변경됐는지 (자동 재색인 트리거)
     last_call_sig: str | None = None  # 직전 툴 호출 서명 (무한 루프 감지용)
@@ -787,8 +888,8 @@ async def _run_agent_impl(
     rag_available = False
     rag_context = ""
     workspace_context_exposed = False
-    image_profiles = comfy_profiles if isinstance(comfy_profiles, list) else []
-    image_intent = _looks_like_image_generation_request(last_user_request, previous_assistant)
+    image_profiles = [] if nvidia_gate5 else (comfy_profiles if isinstance(comfy_profiles, list) else [])
+    image_intent = False if nvidia_gate5 else _looks_like_image_generation_request(last_user_request, previous_assistant)
     image_selection_error, manual_comfy_profile_id = _manual_comfy_selection_error(
         comfy_selection_mode,
         selected_comfy_model_id,
@@ -809,16 +910,21 @@ async def _run_agent_impl(
     substantive_tool_names_run: set[str] = set()
     expected_image_results_run = 0
     pending_image_input_errors_run = 0
-    if no_workspace:
+    if nvidia_gate5:
+        tools = [t for t in AGENT_TOOLS if t["function"]["name"] in NVIDIA_GATE5_TOOLS]
+    elif no_workspace:
         # 로컬 접근 도구는 목록에서 제외 — 모델이 아예 보지 못하게 한다.
         tools = [t for t in AGENT_TOOLS if t["function"]["name"] in WORKSPACE_FREE_TOOLS]
     else:
         tools = list(AGENT_TOOLS)
     # 디스코드 봇이 연결돼 있으면 서버 구성 도구를 노출 — search_docs처럼 조건부(스냅샷 불변).
-    try:
-        discord_ready = discordops.available()
-    except Exception:  # noqa: BLE001 — 봇 상태 확인 실패는 도구 미노출로만 처리
+    if nvidia_gate5:
         discord_ready = False
+    else:
+        try:
+            discord_ready = discordops.available()
+        except Exception:  # noqa: BLE001 — 봇 상태 확인 실패는 도구 미노출로만 처리
+            discord_ready = False
     if discord_ready:
         tools = tools + [
             discordops.MAP_SCHEMA, discordops.APPLY_SCHEMA, discordops.SEND_SCHEMA,
@@ -828,7 +934,7 @@ async def _run_agent_impl(
     if image_requested:
         # 모델 프로필과 ComfyUI 주소는 renderer가 주는 신뢰 컨텍스트다. LLM에는 raw graph나 경로를 주지 않는다.
         tools = tools + [GENERATE_IMAGE_SCHEMA]
-    if rag_enabled and not no_workspace:
+    if not nvidia_gate5 and rag_enabled and not no_workspace:
         try:
             if rag_status(root).get("indexed"):
                 rag_available = True
@@ -856,10 +962,13 @@ async def _run_agent_impl(
     # 만들어진 스킬을 (1)'이름 그대로' 부를 수 있는 도구로 노출하고 (2)프롬프트 목록으로도 알린다.
     # 사용자가 만든 스킬(get_current_time 등)을 도구처럼 이름으로 직접 호출할 수 있게 하는 게 핵심.
     # 스킬은 로컬 파일에 접근하지 않으므로 작업 폴더 없이도 쓸 수 있다(no_workspace여도 노출).
-    try:
-        _skills = list_skills()
-    except Exception:  # noqa: BLE001 — 스킬 목록 실패는 치명적이지 않음
+    if nvidia_gate5:
         _skills = []
+    else:
+        try:
+            _skills = list_skills()
+        except Exception:  # noqa: BLE001 — 스킬 목록 실패는 치명적이지 않음
+            _skills = []
     skill_names: set[str] = set()
     if _skills:
         _skill_tools = []
@@ -886,7 +995,13 @@ async def _run_agent_impl(
         stable_sys += (
             "\n\n## 사용 가능한 스킬 — 이름을 도구처럼 직접 호출하거나 run_skill(name=...)로 실행\n" + _lines
         )
-    if no_workspace:
+    if nvidia_gate5:
+        stable_sys += (
+            "\n\n## NVIDIA Gate 5 제한\n"
+            "현재는 작업 폴더, RAG, 웹, Discord, ComfyUI, 사용자 스킬 데이터를 사용할 수 없다. "
+            "노출된 합성 읽기 전용 도구와 계획 갱신만 사용하고 사용할 수 없는 데이터를 추측하지 말라."
+        )
+    elif no_workspace:
         available_without_workspace = (
             "**웹 조사(web_search/web_fetch)**, **스킬 제작·실행(create_skill/run_skill)**"
             + (", **이미지 생성(generate_image)**" if image_enabled else "")
@@ -990,6 +1105,12 @@ async def _run_agent_impl(
     reserve_tokens = (len(stable_sys) + len(json.dumps(tools, ensure_ascii=False))) // 3
 
     for step in range(MAX_STEPS):
+        # The renderer/Main grant scopes the whole user request with a stable base
+        # ID.  Tool execution identity is narrower: one deterministic scope per
+        # assistant model response.  A transport retry of the same response keeps
+        # the same scope, while a later model turn may legitimately reuse the
+        # provider's call ID without colliding in the ledger.
+        assistant_response_id = f"{assistant_turn_id}:{step}"
         working = compact_convo(convo, context_length, reserve_tokens)
         messages = [system_msg, *([rag_message] if rag_message else []), *working]
         base = LlmRequest(
@@ -1007,7 +1128,19 @@ async def _run_agent_impl(
         # 스트림/알림은 그대로 흘리고, 종료 마커(_gen)에서 최종 결과 또는 치명 오류를 받는다.
         final = None
         gen_error = None
-        generation_stream = _generate_turn(host, base, reasoning_effort, model_runtime, offload_noticed)
+        generation_stream = (
+            _generate_turn(host, base, reasoning_effort, model_runtime, offload_noticed)
+            if runtime is None
+            else _generate_turn(
+                host,
+                base,
+                reasoning_effort,
+                model_runtime,
+                offload_noticed,
+                runtime,
+                strict_tool_protocol=nvidia_gate5,
+            )
+        )
         generation_completed = False
         try:
             async for ev in generation_stream:
@@ -1037,7 +1170,12 @@ async def _run_agent_impl(
             total_tokens += turn_tokens
             yield {"type": "usage", "total": total_tokens}
 
-        tool_calls = final.get("tool_calls") or []
+        try:
+            tool_calls = _normalize_tool_calls(final.get("tool_calls") or [], assistant_response_id)
+        except ToolCallProtocolError as error:
+            yield {"type": "error", "error": f"도구 호출 프로토콜 오류: {error}"}
+            _maybe_reindex(root, host, dirty, rag_available)
+            return
         if not tool_calls:
             if image_requested and not image_tool_attempted and not image_nudged:
                 image_nudged = True
@@ -1107,6 +1245,17 @@ async def _run_agent_impl(
             return
 
         # assistant 턴(툴콜 포함)을 대화에 기록
+        wire_tool_calls = [
+            {
+                "id": tc["provider_tool_call_id"],
+                "type": "function",
+                "function": {
+                    "name": tc["function"]["name"],
+                    "arguments": tc["canonical_arguments"],
+                },
+            }
+            for tc in tool_calls
+        ]
         convo.append(
             {
                 "role": "assistant",
@@ -1114,7 +1263,7 @@ async def _run_agent_impl(
                     _safe_image_turn_text(final.get("content", ""))
                     if image_requested else final.get("content", "")
                 ),
-                "tool_calls": tool_calls,
+                "tool_calls": wire_tool_calls,
             }
         )
 
@@ -1127,7 +1276,36 @@ async def _run_agent_impl(
             fn = tc.get("function") or {}
             name = fn.get("name", "")
             args = _parse_args(fn.get("arguments"))
+            provider_tool_call_id = tc["provider_tool_call_id"]
+            canonical_arguments = tc["canonical_arguments"]
             call_id = f"{step}-{idx}"
+            approval_id = f"approval-{assistant_response_id}-{idx}"
+            ledger_key: LedgerKey | None = None
+            ledger_record = None
+            if execution_ledger is not None:
+                ledger_key = LedgerKey(session_id, assistant_response_id, provider_tool_call_id)
+                try:
+                    ledger_record = execution_ledger.reserve(
+                        ledger_key,
+                        canonical_arguments,
+                        tool_name=name,
+                        approval_id=uuid4().hex,
+                        execution_id=uuid4().hex,
+                    )
+                except LedgerProtocolConflict as error:
+                    yield {"type": "error", "error": f"도구 호출 프로토콜 오류: {error}"}
+                    yield {"type": "done"}
+                    return
+                except (LedgerIndeterminate, LedgerInProgress) as error:
+                    yield {"type": "error", "error": str(error)}
+                    yield {"type": "done"}
+                    return
+                except LedgerError:
+                    yield {"type": "error", "error": "Agent 실행 원장을 안전하게 확인할 수 없습니다."}
+                    yield {"type": "done"}
+                    return
+                call_id = ledger_record.execution_id
+                approval_id = ledger_record.approval_id
 
             # 무한 루프 감지: 완전히 동일한 (툴,인자) 호출이 연속 반복되면 정체로 보고 멈춘다.
             # (정상 진행은 서명이 매번 달라지므로 걸리지 않는다 — 다른 파일/다른 동작.)
@@ -1148,7 +1326,38 @@ async def _run_agent_impl(
                 yield {"type": "done"}
                 return
 
-            yield {"type": "tool_call", "id": call_id, "name": name, "args": args}
+            event_ids = {
+                "id": call_id,
+                "executionId": call_id,
+                "approvalId": approval_id,
+                "providerToolCallId": provider_tool_call_id,
+                "assistantTurnId": assistant_response_id,
+            }
+            yield {"type": "tool_call", **event_ids, "name": name, "args": args}
+
+            if ledger_record is not None and ledger_record.reusable:
+                reused_result = ledger_record.result
+                if name == "update_plan":
+                    plan = normalize_plan(args.get("steps"))
+                    done = sum(1 for plan_step in plan if plan_step["status"] == "completed")
+                    yield {"type": "plan", "steps": plan}
+                    reused_result = (
+                        f"계획 갱신됨 (완료 {done}/{len(plan)}).\n" + render_plan(plan).strip()
+                    )
+                yield {
+                    "type": "tool_result",
+                    **event_ids,
+                    "ok": ledger_record.ok,
+                    "output": reused_result,
+                    "rejected": ledger_record.rejected,
+                    "reused": True,
+                }
+                convo.append({
+                    "role": "tool",
+                    "tool_call_id": provider_tool_call_id,
+                    "content": reused_result,
+                })
+                continue
 
             # 작업 폴더 미지정 → 로컬 데이터 접근 '실제 도구'만 차단(웹 조사·스킬은 허용).
             # 목록에서 이미 뺐지만 모델이 호출해도 안 돌게 한 겹 더 막는다. 단 등록되지 않은
@@ -1160,19 +1369,52 @@ async def _run_agent_impl(
                     "로컬 파일·명령·코드 도구가 잠겨 있습니다. 웹 조사(web_search/web_fetch)와 "
                     "스킬(create_skill/run_skill)만 가능합니다. 파일 작업이 필요하면 작업 폴더를 선택하라고 안내하세요."
                 )
-                yield {"type": "tool_result", "id": call_id, "ok": False, "output": result}
-                convo.append({"role": "tool", "content": result})
+                if execution_ledger is not None and ledger_key is not None:
+                    try:
+                        execution_ledger.mark_running(ledger_key)
+                        result = execution_ledger.finish(
+                            ledger_key, status="failed", result=result, ok=False
+                        ).result
+                    except LedgerError:
+                        yield {"type": "error", "error": "Agent 실행 원장을 안전하게 갱신할 수 없습니다."}
+                        yield {"type": "done"}
+                        return
+                yield {"type": "tool_result", **event_ids, "ok": False, "output": result}
+                convo.append({
+                    "role": "tool", "tool_call_id": provider_tool_call_id, "content": result
+                })
                 continue
 
             # 계획 갱신 — 별도 상태로 관리하고 UI에 plan 이벤트로 전달
             if name == "update_plan":
+                if execution_ledger is not None and ledger_key is not None:
+                    try:
+                        execution_ledger.mark_running(ledger_key)
+                    except LedgerError:
+                        yield {"type": "error", "error": "Agent 실행 원장을 안전하게 갱신할 수 없습니다."}
+                        yield {"type": "done"}
+                        return
                 plan = normalize_plan(args.get("steps"))
                 done = sum(1 for s in plan if s["status"] == "completed")
                 yield {"type": "plan", "steps": plan}
                 # 현재 계획 전체를 툴 결과에 담는다 — 모델이 진행 상황을 여기서 확인한다
                 result = f"계획 갱신됨 (완료 {done}/{len(plan)}).\n" + render_plan(plan).strip()
-                yield {"type": "tool_result", "id": call_id, "ok": True, "output": result}
-                convo.append({"role": "tool", "content": result})
+                if execution_ledger is not None and ledger_key is not None:
+                    try:
+                        execution_ledger.finish(
+                            ledger_key,
+                            status="completed",
+                            result="계획 갱신 완료.",
+                            ok=True,
+                        ).result
+                    except LedgerError:
+                        yield {"type": "error", "error": "Agent 실행 결과를 원장에 확정할 수 없습니다."}
+                        yield {"type": "done"}
+                        return
+                yield {"type": "tool_result", **event_ids, "ok": True, "output": result}
+                convo.append({
+                    "role": "tool", "tool_call_id": provider_tool_call_id, "content": result
+                })
                 continue
 
             # 파괴적 툴 → 승인 대기 (모드에 따라). 스킬을 이름으로 부르면 run_skill과 같은 등급(임의 실행).
@@ -1184,11 +1426,21 @@ async def _run_agent_impl(
                 name in DISCORD_FORCE_APPROVE
                 or (workspace_context_exposed and name in NETWORK_EGRESS_TOOLS)
             )
-            if _force_approve or needs_approval(_approval_name, approval_mode):
-                key = f"{session_id}:{call_id}"
+            requires_approval = _force_approve or needs_approval(_approval_name, approval_mode)
+            if requires_approval:
+                if execution_ledger is not None and ledger_key is not None:
+                    try:
+                        execution_ledger.mark_awaiting_approval(ledger_key)
+                    except LedgerError:
+                        yield {"type": "error", "error": "Agent 승인 상태를 원장에 기록할 수 없습니다."}
+                        yield {"type": "done"}
+                        return
+                key = f"{session_id}:{approval_id}"
+                legacy_key = f"{session_id}:{call_id}"
                 event = asyncio.Event()
                 _pending[key] = {"event": event, "approved": False}
-                yield {"type": "approval_request", "id": call_id, "name": name, "args": args}
+                _pending[legacy_key] = _pending[key]
+                yield {"type": "approval_request", **event_ids, "name": name, "args": args}
                 try:
                     await asyncio.wait_for(event.wait(), timeout=APPROVAL_TIMEOUT)
                     approved = _pending[key]["approved"]
@@ -1196,11 +1448,38 @@ async def _run_agent_impl(
                     approved = False
                 finally:
                     _pending.pop(key, None)
+                    _pending.pop(legacy_key, None)
                 if not approved:
                     result = "[거부됨] 사용자가 이 작업을 승인하지 않았습니다."
-                    yield {"type": "tool_result", "id": call_id, "ok": False, "output": result, "rejected": True}
-                    convo.append({"role": "tool", "content": result})
+                    if execution_ledger is not None and ledger_key is not None:
+                        try:
+                            result = execution_ledger.finish(
+                                ledger_key,
+                                status="rejected",
+                                result=result,
+                                ok=False,
+                                rejected=True,
+                            ).result
+                        except LedgerError:
+                            yield {"type": "error", "error": "Agent 거절 결과를 원장에 확정할 수 없습니다."}
+                            yield {"type": "done"}
+                            return
+                    yield {
+                        "type": "tool_result", **event_ids, "ok": False,
+                        "output": result, "rejected": True,
+                    }
+                    convo.append({
+                        "role": "tool", "tool_call_id": provider_tool_call_id, "content": result
+                    })
                     continue
+
+            if execution_ledger is not None and ledger_key is not None:
+                try:
+                    execution_ledger.mark_running(ledger_key)
+                except LedgerError:
+                    yield {"type": "error", "error": "Agent 실행 시작을 원장에 확정할 수 없습니다."}
+                    yield {"type": "done"}
+                    return
 
             try:
                 image_result: dict | None = None
@@ -1236,11 +1515,15 @@ async def _run_agent_impl(
                             result = f"[오류] ComfyUI 이미지 생성이 중단되었습니다: {detail}"
                             yield {
                                 "type": "tool_result",
-                                "id": call_id,
+                                **event_ids,
                                 "ok": False,
                                 "output": result,
                             }
-                            convo.append({"role": "tool", "content": result})
+                            convo.append({
+                                "role": "tool",
+                                "tool_call_id": provider_tool_call_id,
+                                "content": result,
+                            })
                             if completed_images_run:
                                 yield {
                                     "type": "content",
@@ -1274,11 +1557,15 @@ async def _run_agent_impl(
                             result = f"[오류] ComfyUI 이미지 생성이 1회 자동 재시도에서도 실패했습니다: {detail}"
                             yield {
                                 "type": "tool_result",
-                                "id": call_id,
+                                **event_ids,
                                 "ok": False,
                                 "output": result,
                             }
-                            convo.append({"role": "tool", "content": result})
+                            convo.append({
+                                "role": "tool",
+                                "tool_call_id": provider_tool_call_id,
+                                "content": result,
+                            })
                             if completed_images_run:
                                 yield {
                                     "type": "content",
@@ -1315,7 +1602,22 @@ async def _run_agent_impl(
                         result, shot = await execute(spec, root, host, args)
                         if name in WORKSPACE_CONTEXT_TOOLS:
                             workspace_context_exposed = True
-                yield {"type": "tool_result", "id": call_id, "ok": True, "output": result}
+                if execution_ledger is not None and ledger_key is not None:
+                    try:
+                        result = execution_ledger.finish(
+                            ledger_key, status="completed", result=result, ok=True
+                        ).result
+                    except LedgerError:
+                        yield {
+                            "type": "error",
+                            "error": (
+                                "도구 실행 후 결과를 안전하게 확정하지 못했습니다. "
+                                "중복 실행을 막기 위해 자동 재시도하지 않습니다."
+                            ),
+                        }
+                        yield {"type": "done"}
+                        return
+                yield {"type": "tool_result", **event_ids, "ok": True, "output": result}
                 if image_result:
                     if prior_input_errors_available > 0:
                         # 다음 LLM 턴의 성공 호출은 직전 입력 오류 호출을 대체한다. 같은 턴에서
@@ -1329,7 +1631,16 @@ async def _run_agent_impl(
                     yield {"type": "screenshot", "id": call_id, "data": shot}
             except ToolError as e:
                 result = f"[오류] {e}"
-                yield {"type": "tool_result", "id": call_id, "ok": False, "output": result}
+                if execution_ledger is not None and ledger_key is not None:
+                    try:
+                        result = execution_ledger.finish(
+                            ledger_key, status="failed", result=result, ok=False
+                        ).result
+                    except LedgerError:
+                        yield {"type": "error", "error": "도구 실패 결과를 안전하게 확정하지 못했습니다."}
+                        yield {"type": "done"}
+                        return
+                yield {"type": "tool_result", **event_ids, "ok": False, "output": result}
             except Exception as e:  # noqa: BLE001 — 잘못된 인자 등 예기치 못한 예외로 런을
                 # 중단하지 말고, 오류를 모델에 돌려주어 스스로 고쳐 이어가게 한다.
                 if (
@@ -1339,8 +1650,19 @@ async def _run_agent_impl(
                 ):
                     pending_image_input_errors_run += 1
                 result = f"[오류] 툴 실행 실패 ({type(e).__name__}): {e}"
-                yield {"type": "tool_result", "id": call_id, "ok": False, "output": result}
-            convo.append({"role": "tool", "content": result})
+                if execution_ledger is not None and ledger_key is not None:
+                    try:
+                        result = execution_ledger.finish(
+                            ledger_key, status="failed", result=result, ok=False
+                        ).result
+                    except LedgerError:
+                        yield {"type": "error", "error": "도구 실패 결과를 안전하게 확정하지 못했습니다."}
+                        yield {"type": "done"}
+                        return
+                yield {"type": "tool_result", **event_ids, "ok": False, "output": result}
+            convo.append({
+                "role": "tool", "tool_call_id": provider_tool_call_id, "content": result
+            })
 
         # 이미지 전용 요청은 이미 검증된 image_result 카드로 결과가 전달됐다. 로컬 모델에 한 턴을
         # 더 맡기면 존재하지 않는 외부 URL/Markdown 이미지를 지어낼 수 있으므로 확정 문구로 종료한다.
@@ -1422,6 +1744,10 @@ async def run_agent(
     comfy_profiles: list[dict] | None = None,
     comfy_selection_mode: str = "auto",
     selected_comfy_model_id: str | None = None,
+    provider: str = "ollama",
+    runtime: LlmRuntime | None = None,
+    assistant_turn_id: str = "",
+    execution_ledger: AgentExecutionLedger | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Agent 스트림의 공통 정리 경계.
 
@@ -1447,6 +1773,10 @@ async def run_agent(
         comfy_profiles=comfy_profiles,
         comfy_selection_mode=comfy_selection_mode,
         selected_comfy_model_id=selected_comfy_model_id,
+        provider=provider,
+        runtime=runtime,
+        assistant_turn_id=assistant_turn_id,
+        execution_ledger=execution_ledger,
         _cleanup_state=cleanup_state,
     )
     try:

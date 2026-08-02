@@ -6,7 +6,9 @@ import type {
   NvidiaExecutionPrepareResult,
   NvidiaCapabilitySnapshot,
   NvidiaCapabilityTargetInput,
-  NvidiaModelListResult
+  NvidiaModelListResult,
+  NvidiaAgentPrepareInput,
+  NvidiaAgentPrepareResult
 } from '../shared/nvidia'
 import type { BackendInfo } from '../shared/backend'
 import type { UpdateStatus } from '../shared/update'
@@ -73,6 +75,10 @@ const api = {
         ipcRenderer.invoke('nvidia:capabilities:probe', target),
       clear: (target: NvidiaCapabilityTargetInput): Promise<void> =>
         ipcRenderer.invoke('nvidia:capabilities:clear', target)
+    },
+    agent: {
+      prepare: (input: NvidiaAgentPrepareInput): Promise<NvidiaAgentPrepareResult> =>
+        ipcRenderer.invoke('nvidia:agent:prepare', input)
     }
   },
   backend: {

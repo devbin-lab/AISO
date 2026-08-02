@@ -39,12 +39,14 @@ def client(monkeypatch):
     monkeypatch.setattr(main, "AUTH_TOKEN", ORDINARY_TOKEN)
     monkeypatch.setitem(auth_middleware.kwargs, "token", ORDINARY_TOKEN)
     main._credential_memory.clear_secret()
+    main._nvidia_agent_grants.clear()
     main._credential_memory._used_nonces.clear()
     main._credential_memory._nonce_order.clear()
     main.app.middleware_stack = None
     try:
         yield TestClient(main.app)
     finally:
+        main._nvidia_agent_grants.clear()
         main._credential_memory.clear_secret()
         main.app.middleware_stack = None
 
@@ -58,6 +60,125 @@ def test_renderer_token_cannot_access_credential_status(client):
     assert response.status_code == 401
 
 
+def _issue_agent_grant(client, *, session="session-1234567890", turn="assistant-turn-1234567890"):
+    canary = "CANARY-GRANT-KEY-MUST-STAY-MEMORY-44771"
+    stored = client.post(
+        "/internal/credentials/set",
+        headers=headers(),
+        json={
+            "deploymentMode": "build",
+            "endpoint": main.NVIDIA_BUILD_BASE_URL,
+            "apiKey": canary,
+        },
+    )
+    assert stored.status_code == 200
+    response = client.post(
+        "/internal/nvidia-agent/grant",
+        headers=headers(),
+        json={
+            "sessionId": session,
+            "assistantTurnId": turn,
+            "deploymentMode": "build",
+            "endpoint": main.NVIDIA_BUILD_BASE_URL,
+            "model": "model/a",
+            "ttlSeconds": 60,
+        },
+    )
+    assert response.status_code == 200
+    assert canary not in response.text
+    return response.json()["grantId"]
+
+
+def test_agent_grant_is_main_only_scoped_one_use_and_not_persisted(client):
+    denied = client.post(
+        "/internal/nvidia-agent/grant",
+        headers=headers(ordinary=True, channel=False),
+        json={},
+    )
+    assert denied.status_code == 401
+
+    token = _issue_agent_grant(client)
+    assert len(token) >= 43
+    binding = {"deploymentMode": "build", "endpoint": main.NVIDIA_BUILD_BASE_URL}
+    main._nvidia_agent_grants.consume(
+        token,
+        session_id="session-1234567890",
+        assistant_turn_id="assistant-turn-1234567890",
+        binding=binding,
+        model="model/a",
+    )
+    with pytest.raises(main.HTTPException):
+        main._nvidia_agent_grants.consume(
+            token,
+            session_id="session-1234567890",
+            assistant_turn_id="assistant-turn-1234567890",
+            binding=binding,
+            model="model/a",
+        )
+
+
+def test_agent_grant_scope_mismatch_consumes_bearer_and_key_change_revokes_all(client):
+    binding = {"deploymentMode": "build", "endpoint": main.NVIDIA_BUILD_BASE_URL}
+    token = _issue_agent_grant(client)
+    with pytest.raises(main.HTTPException, match="scope mismatch"):
+        main._nvidia_agent_grants.consume(
+            token,
+            session_id="session-1234567890",
+            assistant_turn_id="assistant-turn-DIFFERENT",
+            binding=binding,
+            model="model/a",
+        )
+    with pytest.raises(main.HTTPException, match="invalid or expired"):
+        main._nvidia_agent_grants.consume(
+            token,
+            session_id="session-1234567890",
+            assistant_turn_id="assistant-turn-1234567890",
+            binding=binding,
+            model="model/a",
+        )
+
+    second = _issue_agent_grant(client)
+    replaced = client.post(
+        "/internal/credentials/set",
+        headers=headers(),
+        json={
+            "deploymentMode": "build",
+            "endpoint": main.NVIDIA_BUILD_BASE_URL,
+            "apiKey": "REPLACEMENT-KEY-1234567890",
+        },
+    )
+    assert replaced.status_code == 200
+    with pytest.raises(main.HTTPException, match="invalid or expired"):
+        main._nvidia_agent_grants.consume(
+            second,
+            session_id="session-1234567890",
+            assistant_turn_id="assistant-turn-1234567890",
+            binding=binding,
+            model="model/a",
+        )
+
+
+def test_agent_grant_store_honors_subsecond_capability_ttl(monkeypatch):
+    now = 100.0
+    monkeypatch.setattr(main.time, "monotonic", lambda: now)
+    store = main._NvidiaAgentGrantStore()
+    binding = {"deploymentMode": "build", "endpoint": main.NVIDIA_BUILD_BASE_URL}
+    token = store.issue(
+        session_id="session-1234567890",
+        assistant_turn_id="assistant-turn-1234567890",
+        binding=binding,
+        model="model/a",
+        ttl_seconds=0.25,
+    )
+    now = 100.251
+    with pytest.raises(main.HTTPException, match="invalid or expired"):
+        store.consume(
+            token,
+            session_id="session-1234567890",
+            assistant_turn_id="assistant-turn-1234567890",
+            binding=binding,
+            model="model/a",
+        )
 def test_missing_or_wrong_channel_token_is_rejected(client):
     missing = client.post("/internal/credentials/status", headers=headers(channel=False), json={})
     wrong_headers = headers()
@@ -257,9 +378,56 @@ def test_nvidia_agent_is_blocked_before_workspace_or_tool_execution(client, monk
             "messages": [{"role": "user", "content": "run a tool"}],
         },
     )
-    assert response.status_code == 200
-    assert '"type": "error"' in response.text
+    assert response.status_code == 400
     assert calls == []
+
+
+def test_valid_grant_is_consumed_once_and_nvidia_agent_receives_no_gate6_data(
+    client, monkeypatch, tmp_path
+):
+    token = _issue_agent_grant(client)
+    captured = []
+
+    async def fake_run_agent(**kwargs):
+        captured.append(kwargs)
+        yield {"type": "done"}
+
+    fake_runtime = object()
+    monkeypatch.setattr(main, "AGENT_LEDGER_PATH", str(tmp_path / "ledger.sqlite3"))
+    monkeypatch.setattr(main, "_agent_ledger_startup_error", None)
+    monkeypatch.setattr(main, "_nvidia_runtime_for_target", lambda _target: fake_runtime)
+    monkeypatch.setattr(main, "run_agent", fake_run_agent)
+    body = {
+        "provider": "nvidia",
+        "deployment_mode": "build",
+        "endpoint": main.NVIDIA_BUILD_BASE_URL,
+        "model": "model/a",
+        "workspace": "C:/private-workspace-canary",
+        "messages": [{"role": "user", "content": "safe request"}],
+        "session_id": "session-1234567890",
+        "assistant_turn_id": "assistant-turn-1234567890",
+        "nvidia_grant": token,
+        "rag_enabled": True,
+        "comfy_base_url": "http://127.0.0.1:8188",
+        "comfy_profiles": [{"id": "private-comfy-profile"}],
+    }
+    response = client.post("/agent", headers=headers(ordinary=True, channel=False), json=body)
+    assert response.status_code == 200
+    assert response.text == '{"type": "done"}\n'
+    assert len(captured) == 1
+    call = captured[0]
+    assert call["workspace"] == ""
+    assert call["rag_enabled"] is False
+    assert call["comfy_base_url"] is None and call["comfy_profiles"] == []
+    assert call["runtime"] is fake_runtime
+    assert call["provider"] == "nvidia"
+    assert call["assistant_turn_id"] == "assistant-turn-1234567890"
+    assert call["execution_ledger"]._db is None
+    assert "private-workspace-canary" not in response.text
+
+    replay = client.post("/agent", headers=headers(ordinary=True, channel=False), json=body)
+    assert replay.status_code == 409
+    assert len(captured) == 1
 
 
 def test_explicit_model_discovery_uses_exact_sidecar_binding_and_never_ollama(client, monkeypatch):

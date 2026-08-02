@@ -20,14 +20,14 @@ _META = {"update_plan"}  # 실질 행위 아님 — 어떤 모드에서도 승�
 # 읽기(SAFE) 툴 — read 모드에서 통과, manual 모드에서만 승인
 _SAFE = {
     "list_dir", "list_tree", "read_file", "grep", "glob", "create_dir",
-    "web_fetch", "web_search", "search_docs",
+    "get_system_time", "web_fetch", "web_search", "search_docs",
 }
 _AUTO_APPROVAL_REQUIRED = {
     "delete_file", "delete_dir", "run_web", "run_code", "run_command",
     "create_skill", "run_skill",
 }
 _ALL_TOOLS = [
-    "update_plan", "list_dir", "list_tree", "read_file", "grep", "glob",
+    "update_plan", "get_system_time", "list_dir", "list_tree", "read_file", "grep", "glob",
     "create_dir", "move", "write_file", "edit_file", "multi_edit",
     "delete_file", "delete_dir", "run_web", "run_code", "run_command",
     "web_fetch", "web_search", "create_skill", "run_skill", "search_docs",

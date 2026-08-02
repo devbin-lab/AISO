@@ -16,7 +16,9 @@ import {
   bindBackendNvidiaCredential,
   backendNvidiaCredentialStatus,
   fetchBackendNvidiaModels,
-  probeBackendNvidiaCapabilities
+  probeBackendNvidiaCapabilities,
+  issueBackendNvidiaAgentGrant,
+  clearBackendNvidiaAgentGrants
 } from './backend'
 import { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
 import { recordUsage, usageSummary, clearUsage } from './usage'
@@ -39,6 +41,10 @@ import {
 } from './nvidia-credentials'
 import { prepareNvidiaExecution } from './nvidia-execution'
 import { NvidiaCapabilityCache, NvidiaCapabilityRevision } from './nvidia-capability-cache'
+import {
+  commitNvidiaCapabilityMutation,
+  prepareNvidiaAgentAuthorization
+} from './nvidia-agent-authorization'
 import {
   destroyComfySurface,
   reloadComfySurface,
@@ -119,6 +125,37 @@ function capabilityCache(): NvidiaCapabilityCache {
 function invalidateAllNvidiaCapabilities(): void {
   nvidiaCapabilityRevision.invalidate()
   capabilityCache().clearAll()
+}
+
+async function revokeBackendNvidiaAgentTrust(): Promise<void> {
+  try {
+    await clearBackendNvidiaAgentGrants()
+  } catch (error) {
+    // A live sidecar with an uncertain revoke result must not keep bearer grants.
+    stopBackend()
+    throw error
+  }
+}
+
+async function saveNvidiaCredentialWithTrustReset(
+  binding: NvidiaCredentialBindingInput,
+  apiKey: unknown
+): Promise<void> {
+  await commitNvidiaCapabilityMutation(
+    nvidiaCapabilityRevision,
+    async () => {
+      await saveNvidiaCredential(binding, apiKey)
+      try {
+        await clearBackendNvidiaCredential()
+      } catch (error) {
+        capabilityCache().clearAll()
+        stopBackend()
+        throw error
+      }
+    },
+    () => capabilityCache().clearAll(),
+    () => capabilityCache().clearAll()
+  )
 }
 
 function currentNvidiaBinding(settings: AppSettings): NvidiaCredentialBinding | null {
@@ -377,7 +414,7 @@ app.whenReady().then(() => {
     return loadSettings()
   })
   ipcMain.handle('settings:recovery-status', () => getSettingsRecoveryStatus())
-  ipcMain.handle('settings:set', (_e, patch: Partial<AppSettings>) => {
+  ipcMain.handle('settings:set', async (_e, patch: Partial<AppSettings>) => {
     console.log('[ipc] settings:set', Object.keys(patch ?? {}))
     const previous = loadSettings()
     const next = saveSettings(patch)
@@ -408,16 +445,28 @@ app.whenReady().then(() => {
           endpoint: next.nvidiaDeploymentMode === 'nim' ? next.nvidiaNimEndpoint : undefined
         })
       : null
-    if (previousBinding && (!nextBinding || !sameNvidiaBinding(previousBinding, nextBinding))) {
-      void clearBackendNvidiaCredential().catch(() => {})
-    }
-    if (
+    const nvidiaTrustChanged = (
       previous.activeLlmProvider !== next.activeLlmProvider ||
       previous.nvidiaDeploymentMode !== next.nvidiaDeploymentMode ||
       previous.nvidiaNimEndpoint !== next.nvidiaNimEndpoint ||
       previous.nvidiaModel !== next.nvidiaModel
-    ) {
-      invalidateAllNvidiaCapabilities()
+    )
+    if (nvidiaTrustChanged) {
+      nvidiaCapabilityRevision.beginMutation()
+      try {
+        if (previousBinding && (!nextBinding || !sameNvidiaBinding(previousBinding, nextBinding))) {
+          try {
+            await clearBackendNvidiaCredential()
+          } catch (error) {
+            stopBackend()
+            throw error
+          }
+        }
+        await revokeBackendNvidiaAgentTrust()
+        capabilityCache().clearAll()
+      } finally {
+        nvidiaCapabilityRevision.endMutation()
+      }
     }
     return next
   })
@@ -518,25 +567,32 @@ app.whenReady().then(() => {
     'nvidia:credential:save',
     async (e, binding: NvidiaCredentialBindingInput, apiKey: unknown) => {
       requireMainRenderer(e.sender)
-      await saveNvidiaCredential(binding, apiKey)
-      await clearBackendNvidiaCredential().catch(() => {})
-      invalidateAllNvidiaCapabilities()
+      await saveNvidiaCredentialWithTrustReset(binding, apiKey)
     }
   )
   ipcMain.handle(
     'nvidia:credential:replace',
     async (e, binding: NvidiaCredentialBindingInput, apiKey: unknown) => {
       requireMainRenderer(e.sender)
-      await saveNvidiaCredential(binding, apiKey)
-      await clearBackendNvidiaCredential().catch(() => {})
-      invalidateAllNvidiaCapabilities()
+      await saveNvidiaCredentialWithTrustReset(binding, apiKey)
     }
   )
   ipcMain.handle('nvidia:credential:delete', async (e) => {
     requireMainRenderer(e.sender)
-    await clearBackendNvidiaCredential().catch(() => {})
-    deleteNvidiaCredential()
-    invalidateAllNvidiaCapabilities()
+    nvidiaCapabilityRevision.beginMutation()
+    try {
+      try {
+        await clearBackendNvidiaCredential()
+      } catch (error) {
+        stopBackend()
+        throw error
+      } finally {
+        deleteNvidiaCredential()
+        capabilityCache().clearAll()
+      }
+    } finally {
+      nvidiaCapabilityRevision.endMutation()
+    }
   })
   ipcMain.handle(
     'nvidia:execution:prepare',
@@ -552,18 +608,26 @@ app.whenReady().then(() => {
     await prepareNvidiaExecution(binding, nvidiaPreparationDeps())
     const models = await fetchBackendNvidiaModels(binding.deploymentMode, binding.endpoint)
     await requireUnchangedNvidiaTarget(binding, undefined, expectedRevision)
-    nvidiaCapabilityRevision.invalidate()
-    capabilityCache().removeModelsNotInList(binding, models)
+    await commitNvidiaCapabilityMutation(
+      nvidiaCapabilityRevision,
+      revokeBackendNvidiaAgentTrust,
+      () => capabilityCache().removeModelsNotInList(binding, models),
+      () => capabilityCache().clearBinding(binding)
+    )
     return { models, refreshedAt: new Date().toISOString() }
   })
   ipcMain.handle('nvidia:capabilities:status', (e, target: NvidiaCapabilityTargetInput) => {
     requireMainRenderer(e.sender)
     return capabilityCache().get(target)
   })
-  ipcMain.handle('nvidia:capabilities:clear', (e, target: NvidiaCapabilityTargetInput) => {
+  ipcMain.handle('nvidia:capabilities:clear', async (e, target: NvidiaCapabilityTargetInput) => {
     requireMainRenderer(e.sender)
-    nvidiaCapabilityRevision.invalidate()
-    capabilityCache().clearTarget(target)
+    await commitNvidiaCapabilityMutation(
+      nvidiaCapabilityRevision,
+      revokeBackendNvidiaAgentTrust,
+      () => capabilityCache().clearTarget(target),
+      () => capabilityCache().clearTarget(target)
+    )
   })
   ipcMain.handle('nvidia:capabilities:probe', async (e, target: NvidiaCapabilityTargetInput) => {
     requireMainRenderer(e.sender)
@@ -578,7 +642,27 @@ app.whenReady().then(() => {
       model
     )
     await requireUnchangedNvidiaTarget(binding, model, expectedRevision)
-    return capabilityCache().put({ ...binding, model }, capabilities)
+    return commitNvidiaCapabilityMutation(
+      nvidiaCapabilityRevision,
+      revokeBackendNvidiaAgentTrust,
+      () => capabilityCache().put({ ...binding, model }, capabilities),
+      () => capabilityCache().clearTarget({ ...binding, model })
+    )
+  })
+  ipcMain.handle('nvidia:agent:prepare', async (e, rawInput: unknown) => {
+    requireMainRenderer(e.sender)
+    return prepareNvidiaAgentAuthorization(rawInput, {
+      loadSettings,
+      getCapability: (target) => capabilityCache().get(target),
+      revisionSnapshot: () => nvidiaCapabilityRevision.snapshot(),
+      revisionIsCurrent: (revision) => nvidiaCapabilityRevision.isCurrent(revision),
+      prepareExecution: async (binding) => {
+        await prepareNvidiaExecution(binding, nvidiaPreparationDeps())
+      },
+      issueGrant: issueBackendNvidiaAgentGrant,
+      revokeGrants: revokeBackendNvidiaAgentTrust,
+      now: Date.now
+    })
   })
   onBackendChange((i) => {
     BrowserWindow.getAllWindows().forEach((w) => w.webContents.send('backend:status', i))
