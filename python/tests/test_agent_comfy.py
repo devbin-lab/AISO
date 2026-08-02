@@ -255,8 +255,9 @@ def test_generate_image_is_conditionally_exposed_and_emits_reference(env, monkey
         ]
     )
 
-    events = env.run(
+    events = env.drive(
         chat,
+        approve=True,
         messages=IMAGE_MESSAGES,
         workspace="",
         approval_mode="read",
@@ -274,7 +275,8 @@ def test_generate_image_is_conditionally_exposed_and_emits_reference(env, monkey
     assert "cfg" not in seen["generate"]
     assert "sampler" not in seen["generate"]
     assert "scheduler" not in seen["generate"]
-    assert "approval_request" not in types(events)  # read 모드에서 사용자가 요청한 생성은 바로 실행
+    assert "approval_request" in types(events)
+    assert types(events).index("approval_request") < types(events).index("tool_result")
     assert types(events).index("image_result") == types(events).index("tool_result") + 1
     image_event = next(event for event in events if event["type"] == "image_result")
     assert image_event["image"]["filename"] == "Aiso_00001_.png"
@@ -313,6 +315,7 @@ def test_manual_comfy_selection_forces_the_exact_profile_id(env, monkeypatch):
         comfy_profiles=[PROFILE],
         comfy_selection_mode="manual",
         selected_comfy_model_id="anime-sdxl",
+        approval_mode="auto",
     )
 
     assert seen["selected_profile_id"] == "anime-sdxl"
@@ -339,6 +342,7 @@ def test_manual_comfy_selection_without_a_registered_choice_never_falls_back(env
         workspace="",
         comfy_base_url="http://127.0.0.1:8188",
         comfy_profiles=[PROFILE],
+        approval_mode="auto",
         comfy_selection_mode="manual",
     )
 
@@ -375,6 +379,7 @@ def test_completed_meta_plan_plus_successful_image_finishes_without_followup_llm
         workspace="",
         comfy_base_url="http://127.0.0.1:8188",
         comfy_profiles=[PROFILE],
+        approval_mode="auto",
     )
 
     assert chat.calls == 1
@@ -412,6 +417,7 @@ def test_plan_completion_after_image_finishes_without_third_llm_turn(env, monkey
         workspace="",
         comfy_base_url="http://127.0.0.1:8188",
         comfy_profiles=[PROFILE],
+        approval_mode="auto",
     )
 
     assert chat.calls == 2
@@ -455,6 +461,7 @@ def test_multi_image_terminal_failure_preserves_verified_success_context(env, mo
         workspace="",
         comfy_base_url="http://127.0.0.1:8188",
         comfy_profiles=[PROFILE],
+        approval_mode="auto",
     )
 
     assert attempts == 2
@@ -502,6 +509,7 @@ def test_same_environment_generation_error_retries_once_then_stops_without_web_s
         workspace="",
         comfy_base_url="http://127.0.0.1:8188",
         comfy_profiles=[PROFILE],
+        approval_mode="auto",
     )
 
     assert len(attempts) == 2
@@ -548,6 +556,7 @@ def test_environment_generation_error_can_recover_on_single_internal_retry(env, 
         workspace="",
         comfy_base_url="http://127.0.0.1:8188",
         comfy_profiles=[PROFILE],
+        approval_mode="auto",
     )
 
     assert attempts == 2
@@ -589,6 +598,7 @@ def test_cancel_and_generation_timeout_are_terminal_without_auto_retry(env, monk
         workspace="",
         comfy_base_url="http://127.0.0.1:8188",
         comfy_profiles=[PROFILE],
+        approval_mode="auto",
     )
 
     assert attempts == 1
@@ -629,6 +639,7 @@ def test_execution_seed_error_cannot_retry_when_retryable_flag_is_incorrect(env,
         workspace="",
         comfy_base_url="http://127.0.0.1:8188",
         comfy_profiles=[PROFILE],
+        approval_mode="auto",
     )
 
     assert attempts == 1
@@ -662,6 +673,7 @@ def test_generation_input_error_keeps_existing_llm_correction_flow_without_auto_
         workspace="",
         comfy_base_url="http://127.0.0.1:8188",
         comfy_profiles=[PROFILE],
+        approval_mode="auto",
     )
 
     assert attempts == 1
@@ -702,6 +714,7 @@ def test_corrected_image_input_error_finishes_after_success_without_third_llm_tu
         workspace="",
         comfy_base_url="http://127.0.0.1:8188",
         comfy_profiles=[PROFILE],
+        approval_mode="auto",
     )
 
     assert attempts == 2
@@ -794,6 +807,7 @@ def test_clear_image_request_is_nudged_once_when_model_asks_again(env, monkeypat
         workspace="",
         comfy_base_url="http://127.0.0.1:8188",
         comfy_profiles=[PROFILE],
+        approval_mode="auto",
     )
     assert "notice" in types(events)
     assert "image_result" in types(events)
@@ -821,6 +835,7 @@ def test_generate_image_is_hidden_and_blocked_without_explicit_user_intent(env, 
         workspace="",
         comfy_base_url="http://127.0.0.1:8188",
         comfy_profiles=[PROFILE],
+        approval_mode="auto",
     )
 
     exposed = {tool["function"]["name"] for tool in chat.payloads[0]["tools"]}

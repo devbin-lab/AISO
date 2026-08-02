@@ -230,6 +230,10 @@ def needs_approval(name: str, mode: str) -> bool:
     - read(읽기):   읽기(SAFE)는 통과, 쓰기·편집·삭제·명령은 승인.
     - manual(수동): 읽기 포함 모든 실질 행위를 승인(계획 갱신 같은 메타는 제외).
     """
+    # generate_image는 런타임 조건부 도구라 REGISTRY에는 없지만 ComfyUI output을
+    # 새로 만든다. 읽기 모드에서는 쓰기 작업처럼 승인하고 자동 모드만 바로 실행한다.
+    if name == "generate_image":
+        return mode in ("manual", "read")
     spec = REGISTRY.get(name)
     if mode == "auto":
         # Auto is deliberately not a blanket bypass. Shell/code/browser execution,
@@ -334,7 +338,7 @@ def get_builtin_tool_catalog() -> list[dict[str, Any]]:
             category="image",
             availability="image",
             requirements=("명시적 이미지 생성 요청", "ComfyUI 연결", "등록 모델 준비"),
-            mutates=False,
+            mutates=True,
         )
     )
     return catalog

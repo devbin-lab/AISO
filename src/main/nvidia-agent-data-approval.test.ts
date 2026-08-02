@@ -4,7 +4,9 @@ import { DEFAULT_SETTINGS } from '../shared/settings.ts'
 import type { ComfyModelProfile } from '../shared/comfy-model.ts'
 import {
   NvidiaAgentDataApprovalStore,
+  buildAutomaticNvidiaAgentDataScope,
   buildNvidiaAgentManifestAuthority,
+  fenceNvidiaAgentSettingsMutation,
   validateManifestDecisionInput,
   validateManifestDescribeInput
 } from './nvidia-agent-data-approval.ts'
@@ -76,6 +78,46 @@ test('auto image scope includes only ready profiles enabled for Agent selection'
     [readyProfile('enabled-ready', true), readyProfile('disabled-ready', false), unreadyProfile('enabled-unready')]
   )
   assert.deepEqual(authority.executionScope.comfy.profiles.map(({ id }) => id), ['enabled-ready'])
+})
+
+test('automatic scope comes only from saved workspace RAG and private Comfy readiness', () => {
+  const profiles = [
+    readyProfile('enabled-ready', true),
+    readyProfile('disabled-ready', false),
+    unreadyProfile('enabled-unready')
+  ]
+  assert.deepEqual(buildAutomaticNvidiaAgentDataScope(settings(), profiles), {
+    workspace: true,
+    rag: true,
+    image: true
+  })
+  assert.deepEqual(buildAutomaticNvidiaAgentDataScope(
+    { ...settings(), workspace: '' }, profiles
+  ), { workspace: false, rag: false, image: true })
+  assert.deepEqual(buildAutomaticNvidiaAgentDataScope(
+    { ...settings(), comfyModelSelectionMode: 'manual' }, profiles
+  ), { workspace: true, rag: true, image: false })
+  assert.deepEqual(buildAutomaticNvidiaAgentDataScope(
+    { ...settings(), comfyModelSelectionMode: 'manual' }, profiles, 'disabled-ready'
+  ), { workspace: true, rag: true, image: true, selectedComfyModelId: 'disabled-ready' })
+  assert.throws(
+    () => buildAutomaticNvidiaAgentDataScope(settings(), profiles, 'enabled-ready'),
+    /자동 모델 선택/
+  )
+})
+
+test('policy authorization binds the permission mode into the exact fingerprint', () => {
+  const store = new NvidiaAgentDataApprovalStore()
+  const read = buildNvidiaAgentManifestAuthority(
+    settings(), session, { workspace: true, rag: true, image: false }, [], 'read'
+  )
+  const automatic = buildNvidiaAgentManifestAuthority(
+    settings(), session, { workspace: true, rag: true, image: false }, [], 'auto'
+  )
+  assert.notEqual(read.executionScope.fingerprint, automatic.executionScope.fingerprint)
+  store.authorizePolicy(read)
+  assert.equal(store.requireExact(session, read).approvalMode, 'read')
+  assert.throws(() => store.requireExact(session, automatic), /다시 승인이 필요/)
 })
 
 test('manual image scope includes the exact ready profile even when auto selection is disabled', () => {
@@ -202,4 +244,28 @@ test('pending and approved records remain bounded at 256 entries', () => {
   })
   assert.throws(() => approvedStore.approvedRequest(approvedSessions[0]), /승인되지 않았습니다/)
   assert.deepEqual(approvedStore.approvedRequest(approvedSessions.at(-1)!), request)
+})
+
+test('settings mutation revokes Agent grants before unrelated follow-up work', async () => {
+  const events: string[] = []
+  let releaseRevoke!: () => void
+  const revokeFinished = new Promise<void>((resolve) => {
+    releaseRevoke = resolve
+  })
+  const operation = fenceNvidiaAgentSettingsMutation(
+    true,
+    async () => { events.push('follow-up') },
+    {
+      clearApprovals: () => { events.push('clear-main') },
+      revokeAgentGrants: async () => {
+        events.push('revoke-sidecar')
+        await revokeFinished
+      }
+    }
+  )
+
+  assert.deepEqual(events, ['clear-main', 'revoke-sidecar'])
+  releaseRevoke()
+  await operation
+  assert.deepEqual(events, ['clear-main', 'revoke-sidecar', 'follow-up'])
 })

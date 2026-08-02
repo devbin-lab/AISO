@@ -352,6 +352,87 @@ def test_tool_schema_exposes_only_user_facing_generation_inputs():
     assert {"steps", "cfg", "sampler", "scheduler", "selection_context"}.isdisjoint(properties)
 
 
+def test_pipeline_snapshot_uses_only_the_selected_image_output_path():
+    workflow = {
+        "1": {"class_type": "ImageSource", "inputs": {}},
+        "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+        "80": {"class_type": "LatentUpscaleBy", "inputs": {"samples": ["1", 0], "scale_by": 0.5}},
+        "81": {"class_type": "SaveImage", "inputs": {"images": ["80", 0]}},
+        "90": {"class_type": "VAEDecode", "inputs": {"samples": ["1", 0], "vae": ["1", 1]}},
+        "91": {"class_type": "ImageUpscaleWithModel", "inputs": {"image": ["90", 0]}},
+        "92": {"class_type": "SaveImage", "inputs": {"images": ["91", 0]}},
+    }
+    policy = {"id": "flux-negative-unconnected-v1", "addedPositive": []}
+
+    direct = generation._build_pipeline_snapshot(
+        workflow,
+        output_node_id="2",
+        source="user-workflow",
+        prompt_policy=policy,
+        uses_negative_prompt=False,
+        negative_binding_node_ids=("90",),
+        effective_negative_prompt="",
+    )
+    assert direct == {
+        "source": "user-workflow",
+        "nodeCount": 2,
+        "vaeDecode": False,
+        "negativeMode": "not-connected",
+        "scaleProcess": False,
+        "processingNodes": [],
+    }
+
+    connected_empty = generation._build_pipeline_snapshot(
+        workflow,
+        output_node_id="2",
+        source="aiso-built-in",
+        prompt_policy=policy,
+        uses_negative_prompt=True,
+        negative_binding_node_ids=(),
+        effective_negative_prompt="",
+    )
+    assert connected_empty is not None
+    assert connected_empty["negativeMode"] == "connected-empty"
+
+    downscaled = generation._build_pipeline_snapshot(
+        workflow,
+        output_node_id="81",
+        source="user-workflow",
+        prompt_policy=policy,
+        uses_negative_prompt=False,
+        negative_binding_node_ids=(),
+        effective_negative_prompt="",
+    )
+    assert downscaled == {
+        "source": "user-workflow",
+        "nodeCount": 3,
+        "vaeDecode": False,
+        "negativeMode": "not-connected",
+        # The badge says only that a scale-processing node is on the path;
+        # scale_by=0.5 must never be described as actual enlargement.
+        "scaleProcess": True,
+        "processingNodes": ["LatentUpscaleBy"],
+    }
+
+    upscaled = generation._build_pipeline_snapshot(
+        workflow,
+        output_node_id="92",
+        source="user-workflow",
+        prompt_policy=policy,
+        uses_negative_prompt=False,
+        negative_binding_node_ids=(),
+        effective_negative_prompt="",
+    )
+    assert upscaled == {
+        "source": "user-workflow",
+        "nodeCount": 4,
+        "vaeDecode": True,
+        "negativeMode": "not-connected",
+        "scaleProcess": True,
+        "processingNodes": ["ImageUpscaleWithModel"],
+    }
+
+
 def test_generate_image_uses_typescript_profile_defaults_and_returns_reference_only(monkeypatch):
     profile = raw_profile()
     captured = install_success_fakes(monkeypatch, [profile], seed_output=18_446_744_073_709_551_615)
@@ -377,9 +458,18 @@ def test_generate_image_uses_typescript_profile_defaults_and_returns_reference_o
     assert image["jobId"] == captured["prompt_id"]
     assert image["baseUrl"] == "http://127.0.0.1:8188"
     assert image["originalPrompt"] == "masterpiece, anime character"
+    assert image["originalNegativePrompt"] == "bad anatomy"
     assert image["effectivePrompt"] == "masterpiece, anime character"
-    assert image["effectiveNegativePrompt"] == "bad anatomy"
-    assert image["promptPolicy"]["id"] == "none"
+    assert image["effectiveNegativePrompt"].startswith("bad anatomy, low quality")
+    assert image["promptPolicy"]["id"] == "sd-negative-quality-v1"
+    assert image["pipeline"] == {
+        "source": "aiso-built-in",
+        "nodeCount": 7,
+        "vaeDecode": True,
+        "negativeMode": "conditioning",
+        "scaleProcess": False,
+        "processingNodes": [],
+    }
     assert image["workflow"] == captured["workflow"]
     assert set(image["workflow"]["2"]) == {"class_type", "inputs"}
     assert "작업 ID" in generation.result_to_tool_text(result)
@@ -441,7 +531,17 @@ def test_generate_image_compiles_and_submits_flux2_klein_official_contract(monke
     assert workflow["9"]["inputs"] == {"steps": 4, "width": 1024, "height": 1024}
     assert workflow["5"]["class_type"] == "ConditioningZeroOut"
     assert result["image"]["profileId"] == "flux2_klein"
+    assert result["image"]["originalNegativePrompt"] == "ignored"
     assert result["image"]["effectiveNegativePrompt"] == ""
+    assert result["image"]["promptPolicy"]["id"] == "flux-negative-unconnected-v1"
+    assert result["image"]["pipeline"] == {
+        "source": "aiso-built-in",
+        "nodeCount": 13,
+        "vaeDecode": True,
+        "negativeMode": "not-connected",
+        "scaleProcess": False,
+        "processingNodes": [],
+    }
     assert result["image"]["workflow"] == workflow
 
 
@@ -504,6 +604,14 @@ def test_generate_image_runs_user_api_workflow_without_family_inventory_assumpti
     assert captured["workflow"]["5"]["inputs"]["seed"] == 77
     assert result["image"]["workflow"] == captured["workflow"]
     assert result["image"]["modelName"] == "user-anime.safetensors"
+    assert result["image"]["pipeline"] == {
+        "source": "user-workflow",
+        "nodeCount": 7,
+        "vaeDecode": True,
+        "negativeMode": "conditioning",
+        "scaleProcess": False,
+        "processingNodes": [],
+    }
 
 
 def test_release_failure_does_not_hide_completed_image(monkeypatch, caplog):
@@ -753,7 +861,7 @@ def test_local_input_validation_is_structured_as_input_error():
     assert error.value.kind == "input"
 
 
-def test_prompt_policy_keeps_prompts_and_safe_workflow_unchanged(monkeypatch):
+def test_prompt_policy_records_effective_sd_negative_and_safe_workflow(monkeypatch):
     profile = raw_profile(name="User-supplied model", tag="character")
     captured = install_success_fakes(monkeypatch, [profile])
     prompt = "blue hair, 1girl, masterpiece, blue hair, cherry blossoms"
@@ -769,11 +877,13 @@ def test_prompt_policy_keeps_prompts_and_safe_workflow_unchanged(monkeypatch):
     )
     image = result["image"]
     assert image["originalPrompt"] == prompt
+    assert image["originalNegativePrompt"] == negative_prompt
     assert image["effectivePrompt"] == prompt
-    assert image["effectiveNegativePrompt"] == negative_prompt
+    assert image["effectiveNegativePrompt"].startswith(negative_prompt)
+    assert "low quality" in image["effectiveNegativePrompt"]
     assert image["prompt"] == prompt
     assert captured["workflow"]["2"]["inputs"]["text"] == prompt
-    assert captured["workflow"]["3"]["inputs"]["text"] == negative_prompt
+    assert captured["workflow"]["3"]["inputs"]["text"] == image["effectiveNegativePrompt"]
     assert image["workflow"] == captured["workflow"]
     assert image["workflow"]["5"]["inputs"]["positive"] == ["2", 0]
     assert "client_id" not in repr(image["workflow"])
@@ -786,10 +896,13 @@ def test_prompt_policy_keeps_prompts_and_safe_workflow_unchanged(monkeypatch):
         "addedNegative",
     }
     assert image["promptPolicy"] == {
-        "id": "none",
-        "label": "모델 기본 프롬프트",
-        "description": "Aiso는 모델별 프롬프트 태그나 지침을 자동으로 추가하지 않습니다.",
+        "id": "sd-negative-quality-v1",
+        "label": "SD 품질 네거티브",
+        "description": "SD 계열의 실제 네거티브 조건에 기본 품질 항목을 합치며, 인물 요청일 때만 손·해부학 항목을 추가합니다.",
         "addedPositive": [],
-        "addedNegative": [],
+        "addedNegative": [
+            "low quality", "low resolution", "blurry", "jpeg artifacts", "bad anatomy",
+            "malformed hands", "extra fingers", "missing fingers", "fused fingers",
+        ],
     }
-    assert "프롬프트 정책: 모델 기본 프롬프트 (none)" in generation.result_to_tool_text(result)
+    assert "프롬프트 정책: SD 품질 네거티브 (sd-negative-quality-v1)" in generation.result_to_tool_text(result)

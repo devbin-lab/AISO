@@ -1,4 +1,5 @@
 import type { LlmModelCapabilities, LlmModelListResult } from './llm.ts'
+import type { ApprovalMode } from './agent.ts'
 
 export const NVIDIA_BUILD_BASE_URL = 'https://integrate.api.nvidia.com/v1' as const
 
@@ -50,6 +51,10 @@ export type NvidiaModelListResult = LlmModelListResult
 export interface NvidiaAgentPrepareInput {
   sessionId: string
   assistantTurnId: string
+  /** 사용자 Agent UI에서 선택한 권한 모드. Main이 grant에 고정한다. */
+  approvalMode: ApprovalMode
+  /** ComfyUI 수동 선택 모드에서만 허용되는 등록 프로필 ID. */
+  selectedComfyModelId?: string
 }
 
 export interface NvidiaAgentDataScopeRequest {

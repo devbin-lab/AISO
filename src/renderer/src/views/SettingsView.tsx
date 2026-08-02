@@ -927,11 +927,24 @@ function SettingsView({
                 </div>
                 <div className="row">
                   <div>
-                    <div className="row__label">NVIDIA 기능 사용 범위</div>
-                    <div className="row__hint">
-                      일반 채팅은 현재 모델의 chat·stream 지원 확인 범위에서 사용합니다. Agent·웹 조사·Discord 도구는 현재 대상의 최신 tools=supported 확인과 기능별 전송 승인 또는 동의가 필요합니다.
-                      {' '}NVIDIA Build 요청은 NVIDIA로, 사용자 NIM 요청은 해당 서버 운영자에게 전송됩니다.
-                      {form.nvidiaDeploymentMode === 'nim' && ' 사용자 NIM 호환은 실제 환경 검증 전까지 실험적입니다.'}
+                    <div className="row__label">NVIDIA 데이터 전송 및 Agent 권한</div>
+                    <div className="row__hint nvidia-data-notice">
+                      <p>
+                        NVIDIA 모델로 메시지를 보내면 대화는 NVIDIA Build 또는 사용자가 지정한 NIM 운영자에게 전송됩니다.
+                        반복 확인창은 표시하지 않습니다.
+                      </p>
+                      <ul>
+                        <li><b>수동</b>: 읽기와 변경 작업을 실행하기 전에 확인합니다.</li>
+                        <li><b>읽기</b>: 선택한 작업 폴더·로컬 RAG의 읽기 결과가 모델에 자동 전달될 수 있으며, 생성·변경 작업은 확인합니다.</li>
+                        <li><b>자동</b>: 읽기와 일부 생성·변경 작업을 바로 실행하고, 실행·삭제·외부 발신은 확인합니다.</li>
+                      </ul>
+                      <p>
+                        API 키와 Discord 토큰은 모델 입력에 포함하지 않고 각각 선택한 NVIDIA 서비스와 Discord의 인증에만 사용합니다.
+                        {' '}Aiso는 ComfyUI 원본 워크플로·모델 경로·생성 이미지 바이트를 NVIDIA 대화에 자동 첨부하지 않습니다.
+                        {' '}다만 이미지 생성 프롬프트와 성공·실패 여부·크기 정보는 Agent의 후속 판단을 위해 전달될 수 있으며,
+                        사용자가 대화에 직접 적은 내용은 그대로 전송됩니다.
+                        {form.nvidiaDeploymentMode === 'nim' && ' 사용자 NIM 호환은 실제 환경 검증 전까지 실험적입니다.'}
+                      </p>
                     </div>
                   </div>
                 </div>

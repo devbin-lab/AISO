@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { isIP } from 'node:net'
+import type { ApprovalMode } from '../shared/agent.ts'
 import type { AppSettings } from '../shared/settings.ts'
 import { getComfyAgentReadiness, type ComfyModelProfile } from '../shared/comfy-model.ts'
 import {
@@ -21,6 +22,7 @@ export const NVIDIA_AGENT_MANIFEST_TTL_MS = 10 * 60 * 1000
 
 export interface NvidiaAgentExecutionScope {
   fingerprint: string
+  approvalMode: ApprovalMode
   workspace: string
   ragEnabled: boolean
   ollamaHost: string
@@ -40,6 +42,59 @@ export interface NvidiaAgentManifestAuthority {
   request: NvidiaAgentDataScopeRequest
   target: NvidiaCredentialBinding & { model: string }
   executionScope: NvidiaAgentExecutionScope
+}
+
+export interface NvidiaAgentSettingsFenceDeps {
+  clearApprovals(): void
+  revokeAgentGrants(): Promise<void>
+}
+
+/** 설정 후속 작업보다 먼저 Main 승인과 sidecar bearer를 모두 폐기한다. */
+export async function fenceNvidiaAgentSettingsMutation(
+  scopeChanged: boolean,
+  afterFence: () => Promise<void>,
+  deps: NvidiaAgentSettingsFenceDeps
+): Promise<void> {
+  if (scopeChanged) {
+    deps.clearApprovals()
+    await deps.revokeAgentGrants()
+  }
+  await afterFence()
+}
+
+/** Renderer capability toggles 없이 현재 저장 설정과 private registry로 범위를 결정한다. */
+export function buildAutomaticNvidiaAgentDataScope(
+  settings: AppSettings,
+  profiles: ComfyModelProfile[],
+  selectedComfyModelId?: string
+): NvidiaAgentDataScopeRequest {
+  const workspace = Boolean(settings.workspace.trim())
+  const rag = workspace && settings.ragEnabled
+  const selectionMode = settings.comfyModelSelectionMode === 'manual' ? 'manual' : 'auto'
+
+  if (selectionMode === 'auto' && selectedComfyModelId) {
+    throw new Error('자동 모델 선택에서는 ComfyUI 프로필 ID를 직접 지정할 수 없습니다.')
+  }
+  if (selectionMode === 'manual' && selectedComfyModelId) {
+    const selected = profiles.find((profile) => profile.id === selectedComfyModelId)
+    if (!selected || !getComfyAgentReadiness(selected).ready) {
+      throw new Error('선택한 ComfyUI 모델은 Agent 실행 준비 상태가 아닙니다.')
+    }
+  }
+
+  const image = Boolean(settings.comfyBaseUrl.trim()) && (
+    selectionMode === 'manual'
+      ? Boolean(selectedComfyModelId)
+      : profiles.some((profile) => profile.agentEnabled && getComfyAgentReadiness(profile).ready)
+  )
+  return {
+    workspace,
+    rag,
+    image,
+    ...(image && selectionMode === 'manual' && selectedComfyModelId
+      ? { selectedComfyModelId }
+      : {})
+  }
 }
 
 interface PendingRecord extends NvidiaAgentManifestAuthority {
@@ -151,7 +206,8 @@ export function buildNvidiaAgentManifestAuthority(
   settings: AppSettings,
   sessionId: string,
   request: NvidiaAgentDataScopeRequest,
-  profiles: ComfyModelProfile[]
+  profiles: ComfyModelProfile[],
+  approvalMode: ApprovalMode = 'read'
 ): NvidiaAgentManifestAuthority {
   if (settings.activeLlmProvider !== 'nvidia' || !settings.nvidiaModel.trim()) {
     throw new Error('현재 저장된 NVIDIA Agent 대상이 없습니다.')
@@ -207,6 +263,7 @@ export function buildNvidiaAgentManifestAuthority(
   ]
   const privateScope = {
     target,
+    approvalMode,
     workspace: request.workspace ? settings.workspace.trim() : '',
     ragEnabled: request.rag,
     ollamaHost,
@@ -234,6 +291,7 @@ export function buildNvidiaAgentManifestAuthority(
     target,
     executionScope: {
       fingerprint: scopeFingerprint,
+      approvalMode: privateScope.approvalMode,
       workspace: privateScope.workspace,
       ragEnabled: privateScope.ragEnabled,
       ollamaHost: privateScope.ollamaHost,
@@ -336,6 +394,21 @@ export class NvidiaAgentDataApprovalStore {
     }
   }
 
+  /**
+   * 반복 경고창 대신 현재 설정과 Agent 권한 모드로 Main이 산출한 exact scope를
+   * 짧은 수명의 실행 권한으로 등록한다. Renderer가 capability boolean을 고를 수 없다.
+   */
+  authorizePolicy(authority: NvidiaAgentManifestAuthority): void {
+    this.prune()
+    this.clearSession(authority.manifest.sessionId)
+    this.approved.set(authority.manifest.sessionId, {
+      ...structuredClone(authority),
+      approvedAt: this.now(),
+      expiresAt: this.now() + NVIDIA_AGENT_MANIFEST_TTL_MS
+    })
+    this.enforceRecordLimit(this.approved)
+  }
+
   decide(input: NvidiaAgentManifestDecisionInput): { approved: boolean } {
     this.prune()
     const pending = this.pending.get(input.manifestId)
@@ -366,6 +439,13 @@ export class NvidiaAgentDataApprovalStore {
     const record = this.approved.get(sessionId)
     if (!record) throw new Error('이 NVIDIA Agent 세션의 전송 범위가 승인되지 않았습니다.')
     return structuredClone(record.request)
+  }
+
+  approvedApprovalMode(sessionId: string): ApprovalMode {
+    this.prune()
+    const record = this.approved.get(sessionId)
+    if (!record) throw new Error('이 NVIDIA Agent 세션의 실행 정책이 준비되지 않았습니다.')
+    return record.executionScope.approvalMode
   }
 
   requireExact(sessionId: string, authority: NvidiaAgentManifestAuthority): NvidiaAgentExecutionScope {

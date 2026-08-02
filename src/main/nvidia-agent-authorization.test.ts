@@ -12,7 +12,8 @@ import type { NvidiaAgentExecutionScope } from './nvidia-agent-data-approval.ts'
 
 const input = {
   sessionId: 'session-1234567890',
-  assistantTurnId: 'assistant-turn-1234567890'
+  assistantTurnId: 'assistant-turn-1234567890',
+  approvalMode: 'read' as const
 }
 const supported: NvidiaCapabilitySnapshot = {
   schemaVersion: 1,
@@ -44,6 +45,7 @@ function harness(options: {
   const calls: string[] = []
   const executionScope: NvidiaAgentExecutionScope = {
     fingerprint: 'f'.repeat(64),
+    approvalMode: 'read',
     workspace: '',
     ragEnabled: false,
     ollamaHost: '',
@@ -90,6 +92,15 @@ test('exact current target with fresh tools=supported receives a scoped grant', 
   const result = await prepareNvidiaAgentAuthorization(input, deps)
   assert.equal(result.assistantTurnId, input.assistantTurnId)
   assert.deepEqual(calls, ['prepare', `grant:${NVIDIA_BUILD_BASE_URL}:model/a:60`])
+})
+
+test('Renderer cannot change the permission mode after Main binds the exact scope', async () => {
+  const { deps, calls } = harness()
+  await assert.rejects(
+    prepareNvidiaAgentAuthorization({ ...input, approvalMode: 'auto' }, deps),
+    /권한 모드/
+  )
+  assert.deepEqual(calls, [])
 })
 
 test('stale unknown unsupported or mismatched cache blocks before preparation and grant', async () => {

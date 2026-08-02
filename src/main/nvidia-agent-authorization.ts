@@ -74,7 +74,25 @@ export function validateNvidiaAgentPrepareInput(input: unknown): NvidiaAgentPrep
   if (!valid(value.sessionId) || !valid(value.assistantTurnId)) {
     throw new Error('NVIDIA Agent 실행 식별자 형식이 올바르지 않습니다.')
   }
-  return { sessionId: value.sessionId, assistantTurnId: value.assistantTurnId }
+  if (!['manual', 'read', 'auto'].includes(String(value.approvalMode))) {
+    throw new Error('NVIDIA Agent 권한 모드가 올바르지 않습니다.')
+  }
+  let selectedComfyModelId: string | undefined
+  if (value.selectedComfyModelId !== undefined) {
+    if (
+      typeof value.selectedComfyModelId !== 'string' ||
+      !/^[A-Za-z0-9._-]{1,128}$/.test(value.selectedComfyModelId)
+    ) {
+      throw new Error('ComfyUI 선택 정보가 올바르지 않습니다.')
+    }
+    selectedComfyModelId = value.selectedComfyModelId
+  }
+  return {
+    sessionId: value.sessionId,
+    assistantTurnId: value.assistantTurnId,
+    approvalMode: value.approvalMode as NvidiaAgentPrepareInput['approvalMode'],
+    ...(selectedComfyModelId ? { selectedComfyModelId } : {})
+  }
 }
 
 function savedTarget(settings: AppSettings): ExactNvidiaAgentTarget | null {
@@ -125,6 +143,9 @@ export async function prepareNvidiaAgentAuthorization(
     throw new Error('NVIDIA Agent 기능 확인 상태가 변경 중입니다.')
   }
   let executionScope = deps.getApprovedScope(input.sessionId, target)
+  if (executionScope.approvalMode !== input.approvalMode) {
+    throw new Error('NVIDIA Agent 권한 모드가 실행 허가와 일치하지 않습니다.')
+  }
   requireSupported(target, deps)
   await deps.prepareExecution(target)
   assertUnchanged(target, revision, deps)
@@ -132,6 +153,9 @@ export async function prepareNvidiaAgentAuthorization(
     throw new Error('NVIDIA Agent 전송 승인 범위가 변경되었습니다.')
   }
   executionScope = deps.getApprovedScope(input.sessionId, target)
+  if (executionScope.approvalMode !== input.approvalMode) {
+    throw new Error('NVIDIA Agent 권한 모드가 실행 허가와 일치하지 않습니다.')
+  }
   const capability = requireSupported(target, deps)
   const remainingMs = Date.parse(capability.checkedAt) + NVIDIA_CAPABILITY_MAX_AGE_MS - deps.now()
   if (!Number.isFinite(remainingMs) || remainingMs <= 0) {

@@ -24,7 +24,7 @@ function connState(
   if (backend.state === 'starting') return { kind: 'checking', label: '엔진 시작 중' }
   if (backend.state === 'error' || backend.state === 'stopped')
     return { kind: 'error', label: '엔진 오류', title: backend.detail }
-  if (provider === 'nvidia') return { kind: 'warn', label: 'NVIDIA 선택됨', title: '연결은 채팅 실행 시 확인합니다.' }
+  if (provider === 'nvidia') return { kind: 'warn', label: 'NVIDIA 선택됨', title: '대화는 설정된 NVIDIA 서비스로 전송됩니다.' }
   if (!health) return { kind: 'checking', label: '확인 중' }
   if (!health.ollama) return { kind: 'error', label: 'Ollama 미연결', title: health.detail }
   return { kind: 'ok', label: '연결됨' }

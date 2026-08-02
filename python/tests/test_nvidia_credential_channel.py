@@ -88,6 +88,7 @@ def _issue_agent_grant(client, *, session="session-1234567890", turn="assistant-
             "ttlSeconds": 60,
             "executionScope": {
                 "fingerprint": "f" * 64,
+                "approvalMode": "read",
                 "workspace": "",
                 "ragEnabled": False,
                 "ollamaHost": "",
@@ -427,6 +428,7 @@ def test_valid_grant_is_consumed_once_and_nvidia_agent_receives_no_gate6_data(
         "session_id": "session-1234567890",
         "assistant_turn_id": "assistant-turn-1234567890",
         "nvidia_grant": token,
+        "approval_mode": "auto",
         "rag_enabled": True,
         "comfy_base_url": "http://127.0.0.1:8188",
         "comfy_profiles": [{"id": "private-comfy-profile"}],
@@ -441,6 +443,7 @@ def test_valid_grant_is_consumed_once_and_nvidia_agent_receives_no_gate6_data(
     assert call["comfy_base_url"] is None and call["comfy_profiles"] == []
     assert call["runtime"] is fake_runtime
     assert call["provider"] == "nvidia"
+    assert call["approval_mode"] == "read"
     assert call["assistant_turn_id"] == "assistant-turn-1234567890"
     assert call["execution_ledger"]._db is None
     assert "private-workspace-canary" not in response.text

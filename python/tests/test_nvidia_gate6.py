@@ -445,6 +445,7 @@ def test_gate6_rag_rejects_nonlocal_ollama_before_any_request():
     with pytest.raises(main.HTTPException, match="local Ollama"):
         main._validate_nvidia_agent_execution_scope({
             "fingerprint": "f" * 64,
+            "approvalMode": "read",
             "workspace": "C:/workspace",
             "ragEnabled": True,
             "ollamaHost": "https://ollama.example.com",
@@ -490,6 +491,7 @@ def test_nvidia_comfy_failure_canary_never_reaches_provider_conversation_or_ledg
             session_id="session-gate6-comfy",
             provider="nvidia",
             runtime=runtime,
+            approval_mode="auto",
             assistant_turn_id="assistant-gate6-comfy",
             execution_ledger=ledger,
             comfy_base_url="http://127.0.0.1:8188",

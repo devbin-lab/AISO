@@ -129,7 +129,11 @@ GENERATE_IMAGE_SCHEMA = {
                 },
                 "negative_prompt": {
                     "type": "string",
-                    "description": "피하고 싶은 요소. FLUX.1 split 및 FLUX.2 Klein 기본 템플릿에서는 사용하지 않음",
+                    "description": (
+                        "피하고 싶은 화질 저하·왜곡·불필요 요소. Aiso 내장 SD 계열은 실제 네거티브 입력에 합치고, "
+                        "내장 FLUX 계열은 사용자 스타일과 충돌하지 않는 인식 가능한 항목만 긍정 조건으로 바꾼다. "
+                        "사용자 API 워크플로는 등록된 프롬프트 바인딩을 그대로 따른다"
+                    ),
                     "maxLength": MAX_PROMPT_LENGTH,
                 },
                 "model_hint": {
@@ -190,6 +194,97 @@ async def _wait_for_terminal_job(base_url: str, prompt_id: str) -> dict[str, Any
         "ComfyUI 이미지 생성 제한 시간 30분을 초과했고 해당 작업 취소를 확인하지 못했습니다. "
         "ComfyUI 작업 목록에서 상태를 확인해 주세요."
     )
+
+
+def _upstream_node_ids(
+    workflow: Mapping[str, Mapping[str, Any]],
+    output_node_id: Any,
+) -> set[str]:
+    """표시할 결과 노드에서 실제 입력 연결을 역추적한다."""
+    root = str(output_node_id)
+    if root not in workflow:
+        return set()
+    visited: set[str] = set()
+    pending = [root]
+    while pending:
+        node_id = pending.pop()
+        if node_id in visited:
+            continue
+        node = workflow.get(node_id)
+        if not isinstance(node, Mapping):
+            continue
+        visited.add(node_id)
+        inputs = node.get("inputs")
+        if not isinstance(inputs, Mapping):
+            continue
+        for value in inputs.values():
+            if (
+                isinstance(value, (list, tuple))
+                and len(value) == 2
+                and isinstance(value[1], int)
+                and str(value[0]) in workflow
+            ):
+                pending.append(str(value[0]))
+    return visited
+
+
+def _build_pipeline_snapshot(
+    workflow: Mapping[str, Mapping[str, Any]],
+    *,
+    output_node_id: Any,
+    source: Literal["aiso-built-in", "user-workflow"],
+    prompt_policy: Mapping[str, Any],
+    uses_negative_prompt: bool,
+    negative_binding_node_ids: Iterable[str],
+    effective_negative_prompt: str,
+) -> dict[str, Any] | None:
+    """선택된 결과 이미지로 이어지는 노드만 근거로 기능 표시를 만든다."""
+    active_node_ids = _upstream_node_ids(workflow, output_node_id)
+    if not active_node_ids:
+        return None
+    def node_sort_key(node_id: str) -> tuple[int, int | str]:
+        return (0, int(node_id)) if node_id.isdigit() else (1, node_id)
+
+    active_nodes = [workflow[node_id] for node_id in sorted(active_node_ids, key=node_sort_key)]
+    class_types = [str(node.get("class_type") or "") for node in active_nodes]
+    processing_nodes = list(dict.fromkeys(
+        class_type
+        for class_type in class_types
+        if any(
+            token in class_type.casefold()
+            for token in ("upscale", "imagescale", "facerestore", "detailer")
+        )
+    ))
+    added_positive = prompt_policy.get("addedPositive")
+    positive_constraints_applied = (
+        prompt_policy.get("id") == "flux-positive-constraints-v1"
+        and isinstance(added_positive, list)
+        and any(isinstance(item, str) and item.strip() for item in added_positive)
+    )
+    bound_negative_nodes = {str(node_id) for node_id in negative_binding_node_ids}
+    negative_reaches_output = (
+        uses_negative_prompt
+        if source == "aiso-built-in"
+        else bool(active_node_ids & bound_negative_nodes)
+    )
+
+    return {
+        "source": source,
+        "nodeCount": len(active_node_ids),
+        "vaeDecode": any("vaedecode" in class_type.casefold() for class_type in class_types),
+        "negativeMode": (
+            "positive-constraints"
+            if positive_constraints_applied
+            else "conditioning" if negative_reaches_output and bool(effective_negative_prompt.strip())
+            else "connected-empty" if negative_reaches_output
+            else "not-connected"
+        ),
+        "scaleProcess": any(
+            "upscale" in class_type.casefold() or "imagescale" in class_type.casefold()
+            for class_type in class_types
+        ),
+        "processingNodes": processing_nodes,
+    }
 
 
 async def generate_image(
@@ -289,6 +384,11 @@ async def generate_image(
     workflow_snapshot = snapshot_workflow(
         workflow, allow_user_template=selected.workflow_template is not None
     )
+    uses_negative_prompt = (
+        bool(selected.workflow_template.bindings["negativePrompt"])
+        if selected.workflow_template is not None
+        else selected.architecture not in (ARCH_FLUX1_SPLIT, ARCH_FLUX2_KLEIN_4B)
+    )
     submission_attempted = False
     coordinator = await _begin_generation(normalized_url)
     try:
@@ -332,16 +432,28 @@ async def generate_image(
         if status != "completed" or not isinstance(outputs, list) or not outputs:
             raise GenerationError("ComfyUI 작업은 끝났지만 결과 이미지를 찾을 수 없습니다.")
         output = outputs[0]
+        pipeline = _build_pipeline_snapshot(
+            workflow,
+            output_node_id=output.get("nodeId") if isinstance(output, Mapping) else None,
+            source="user-workflow" if selected.workflow_template is not None else "aiso-built-in",
+            prompt_policy=prompt_application["promptPolicy"],
+            uses_negative_prompt=uses_negative_prompt,
+            negative_binding_node_ids=(
+                (node_id for node_id, _input_name in selected.workflow_template.bindings["negativePrompt"])
+                if selected.workflow_template is not None
+                else ()
+            ),
+            effective_negative_prompt=options.negative_prompt,
+        )
+        negative_reaches_output = bool(
+            pipeline and pipeline["negativeMode"] in ("conditioning", "connected-empty")
+        )
         model_name = primary_model_name(selected)
         summary = f"이미지 생성 완료: {selected.name} ({model_name}), seed {options.seed}"
         if prompt_application["promptPolicy"]["id"] != "none":
-            summary += f". {prompt_application['promptPolicy']['label']} 적용"
-        uses_negative_prompt = (
-            selected.workflow_template is not None
-            and bool(selected.workflow_template.bindings["negativePrompt"])
-        ) or selected.architecture not in (ARCH_FLUX1_SPLIT, ARCH_FLUX2_KLEIN_4B)
-        if not uses_negative_prompt and options.negative_prompt:
-            summary += ". 이 모델의 기본 템플릿은 부정 프롬프트를 사용하지 않았습니다"
+            summary += f". 프롬프트 정책: {prompt_application['promptPolicy']['label']}"
+        if options.negative_prompt and not negative_reaches_output:
+            summary += ". 네거티브 입력이 선택한 결과 이미지 경로에 연결되지 않았습니다"
         ignored_count = (
             0 if selected.workflow_template is not None
             else len(selected.assets) - len(required_assets(selected))
@@ -360,11 +472,13 @@ async def generate_image(
             "prompt": options.prompt,
             "negativePrompt": options.negative_prompt,
             "originalPrompt": prompt_application["originalPrompt"],
+            "originalNegativePrompt": prompt_application["originalNegativePrompt"],
             "effectivePrompt": options.prompt,
             "effectiveNegativePrompt": (
-                options.negative_prompt if uses_negative_prompt else ""
+                options.negative_prompt if negative_reaches_output else ""
             ),
             "promptPolicy": prompt_application["promptPolicy"],
+            **({"pipeline": pipeline} if pipeline is not None else {}),
             "workflow": workflow_snapshot,
             "seed": str(options.seed),
             "width": options.width,

@@ -102,8 +102,12 @@ describe('SettingsView', () => {
 
     await user.click(screen.getByRole('button', { name: 'NVIDIA' }))
     expect(screen.getByDisplayValue('https://integrate.api.nvidia.com/v1')).toHaveProperty('readOnly', true)
-    expect(screen.getByText('NVIDIA 기능 사용 범위')).not.toBeNull()
-    expect(screen.getByText(/최신 tools=supported 확인과 기능별 전송 승인 또는 동의/)).not.toBeNull()
+    expect(screen.getByText('NVIDIA 데이터 전송 및 Agent 권한')).not.toBeNull()
+    expect(screen.getByText(/반복 확인창은 표시하지 않습니다/)).not.toBeNull()
+    expect(screen.getByText(/선택한 작업 폴더·로컬 RAG의 읽기 결과가 모델에 자동 전달/)).not.toBeNull()
+    expect(screen.getByText(/API 키와 Discord 토큰은 모델 입력에 포함하지 않고/)).not.toBeNull()
+    expect(screen.getByText(/원본 워크플로·모델 경로·생성 이미지 바이트를 NVIDIA 대화에 자동 첨부하지 않습니다/)).not.toBeNull()
+    expect(screen.getByText(/이미지 생성 프롬프트와 성공·실패 여부·크기 정보/)).not.toBeNull()
 
     const keyInput = screen.getByPlaceholderText('API 키 입력')
     await user.type(keyInput, 'renderer-canary-key')
@@ -242,8 +246,8 @@ describe('SettingsView', () => {
             description: '등록된 ComfyUI 모델로 이미지를 생성합니다.',
             category: 'image',
             parameters: [{ name: 'prompt', description: '생성 프롬프트' }],
-            mutates: false,
-            approval: { manual: true, read: false, auto: false },
+            mutates: true,
+            approval: { manual: true, read: true, auto: false },
             availability: 'image',
             requirements: ['명시적 이미지 생성 요청', 'ComfyUI 연결', '등록 모델 준비']
           }

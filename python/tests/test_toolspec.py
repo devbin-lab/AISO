@@ -92,6 +92,8 @@ def test_builtin_tool_catalog_tracks_registry_and_conditional_tools():
     image = by_name["generate_image"]
     assert image["description"] == GENERATE_IMAGE_SCHEMA["function"]["description"]
     assert image["availability"] == "image"
+    assert image["mutates"] is True
+    assert image["approval"] == {"manual": True, "read": True, "auto": False}
     assert {"명시적 이미지 생성 요청", "ComfyUI 연결", "등록 모델 준비"} <= set(image["requirements"])
     assert by_name["search_docs"]["availability"] == "rag"
     assert "색인 완료" in by_name["search_docs"]["requirements"]

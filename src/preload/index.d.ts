@@ -8,10 +8,6 @@ import type {
   NvidiaModelListResult,
   NvidiaAgentPrepareInput,
   NvidiaAgentPrepareResult,
-  NvidiaAgentManifestDescribeInput,
-  NvidiaAgentDataManifest,
-  NvidiaAgentManifestDecisionInput,
-  NvidiaAgentManifestDecisionResult,
   NvidiaAgentSessionFinishInput,
   NvidiaResearchPrepareInput,
   NvidiaResearchPrepareResult
@@ -68,8 +64,6 @@ export interface AisoAPI {
       clear: (target: NvidiaCapabilityTargetInput) => Promise<void>
     }
     agent: {
-      describeManifest: (input: NvidiaAgentManifestDescribeInput) => Promise<NvidiaAgentDataManifest>
-      decideManifest: (input: NvidiaAgentManifestDecisionInput) => Promise<NvidiaAgentManifestDecisionResult>
       prepare: (input: NvidiaAgentPrepareInput) => Promise<NvidiaAgentPrepareResult>
       finish: (input: NvidiaAgentSessionFinishInput) => Promise<void>
     }

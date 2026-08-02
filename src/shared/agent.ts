@@ -64,6 +64,17 @@ export interface ComfyPromptPolicySnapshot {
   addedNegative: string[]
 }
 
+export interface ComfyPipelineSnapshot {
+  source: 'aiso-built-in' | 'user-workflow'
+  /** 표시된 결과 이미지의 출력 노드에서 역추적한 경로 노드 수. */
+  nodeCount: number
+  vaeDecode: boolean
+  negativeMode: 'conditioning' | 'positive-constraints' | 'connected-empty' | 'not-connected'
+  /** 확대 여부가 아니라 스케일 처리 노드가 결과 경로에 포함되는지만 나타낸다. */
+  scaleProcess: boolean
+  processingNodes: string[]
+}
+
 export interface ComfyGeneratedImage {
   jobId: string
   filename: string
@@ -88,8 +99,11 @@ export interface ComfyGeneratedImage {
   /** 사용자 요청을 생성 프롬프트로 바꿀 때 적용한 결정론적 정책 기록. */
   promptPolicy?: ComfyPromptPolicySnapshot
   originalPrompt?: string
+  originalNegativePrompt?: string
   effectivePrompt?: string
   effectiveNegativePrompt?: string
+  /** 실제 제출 그래프에서 계산한 파이프라인 기능 요약. */
+  pipeline?: ComfyPipelineSnapshot
 }
 
 export type AgentEvent =

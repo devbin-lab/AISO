@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import type {
   ComfyGeneratedImage,
+  ComfyPipelineSnapshot,
   ComfyPromptPolicySnapshot
 } from '../../../shared/agent'
 import { authHeaders } from '../lib/backend'
@@ -219,6 +220,29 @@ function normalizePolicy(value: unknown): ComfyPromptPolicySnapshot | null {
   }
 }
 
+function normalizePipeline(value: unknown): ComfyPipelineSnapshot | null {
+  const raw = asObject(value)
+  if (!raw) return null
+  if (
+    !['aiso-built-in', 'user-workflow'].includes(String(raw.source)) ||
+    typeof raw.nodeCount !== 'number' || !Number.isInteger(raw.nodeCount) || raw.nodeCount < 1 ||
+    typeof raw.vaeDecode !== 'boolean' ||
+    !['conditioning', 'positive-constraints', 'connected-empty', 'not-connected'].includes(String(raw.negativeMode)) ||
+    typeof raw.scaleProcess !== 'boolean'
+  ) return null
+  const processingNodes = Array.isArray(raw.processingNodes)
+    ? raw.processingNodes.filter((item): item is string => typeof item === 'string').slice(0, 20)
+    : []
+  return {
+    source: raw.source as ComfyPipelineSnapshot['source'],
+    nodeCount: raw.nodeCount,
+    vaeDecode: raw.vaeDecode,
+    negativeMode: raw.negativeMode as ComfyPipelineSnapshot['negativeMode'],
+    scaleProcess: raw.scaleProcess,
+    processingNodes
+  }
+}
+
 function safeJson(value: unknown): string {
   try {
     const rendered = JSON.stringify(value, null, 2)
@@ -272,6 +296,9 @@ function WorkflowInspector({ image }: { image: ComfyGeneratedImage }): React.JSX
   if (!graph && !hasPromptTrace) return null
 
   const originalPrompt = safeText(image.originalPrompt) || image.prompt
+  const originalNegative = image.originalNegativePrompt === undefined
+    ? image.negativePrompt
+    : safeText(image.originalNegativePrompt)
   const effectivePrompt = safeText(image.effectivePrompt) || image.prompt
   const effectiveNegative = image.effectiveNegativePrompt === undefined
     ? image.negativePrompt
@@ -288,6 +315,12 @@ function WorkflowInspector({ image }: { image: ComfyGeneratedImage }): React.JSX
             <div className="prompt-trace__step">
               <span>1 · Agent 작성 원본 프롬프트</span>
               <p>{originalPrompt || '기록되지 않음'}</p>
+              {originalNegative && (
+                <div className="prompt-trace__negative">
+                  <b>요청한 제외 요소</b>
+                  <p>{originalNegative}</p>
+                </div>
+              )}
             </div>
             <div className="prompt-trace__arrow" aria-hidden="true">→</div>
             <div className="prompt-trace__step prompt-trace__policy">
@@ -355,6 +388,16 @@ function GeneratedImage({ image, backendPort }: Props): React.JSX.Element {
   )
   const displayedPrompt = image.effectivePrompt ?? image.prompt
   const displayedNegativePrompt = image.effectiveNegativePrompt ?? image.negativePrompt
+  const pipeline = useMemo(() => normalizePipeline(image.pipeline), [image.pipeline])
+  const negativeModeLabel = pipeline?.negativeMode === 'conditioning'
+    ? pipeline.source === 'user-workflow'
+      ? '네거티브 입력 바인딩'
+      : '네거티브 조건 적용'
+    : pipeline?.negativeMode === 'positive-constraints'
+      ? '제외 요소 긍정 변환'
+      : pipeline?.negativeMode === 'connected-empty'
+        ? '네거티브 입력 연결 · 내용 없음'
+        : '네거티브 입력 미연결'
 
   useEffect(() => {
     if (backendPort == null) {
@@ -421,6 +464,24 @@ function GeneratedImage({ image, backendPort }: Props): React.JSX.Element {
         <span>CFG {image.cfg}</span>
         <span>{image.sampler} · {image.scheduler}</span>
       </div>
+      {pipeline && (
+        <div className="generated-image__pipeline" aria-label="실제 생성 파이프라인 요약">
+          <span>{pipeline.source === 'aiso-built-in' ? 'Aiso 계열별 기본 워크플로' : '사용자 연결 워크플로'}</span>
+          <span>결과 경로 {pipeline.nodeCount}개 노드</span>
+          <span className={pipeline.vaeDecode ? 'is-on' : 'is-off'}>
+            VAE 디코드 {pipeline.vaeDecode ? '경로 포함' : '경로 미포함'}
+          </span>
+          <span>{negativeModeLabel}</span>
+          <span className={pipeline.scaleProcess ? 'is-on' : 'is-off'}>
+            스케일 처리 노드 {pipeline.scaleProcess ? '경로 포함' : '경로 미포함'}
+          </span>
+          {pipeline.processingNodes.length > 0 && (
+            <span title={pipeline.processingNodes.join(', ')}>
+              처리 노드 {pipeline.processingNodes.join(', ')}
+            </span>
+          )}
+        </div>
+      )}
       <details>
         <summary>생성 정보</summary>
         <dl>

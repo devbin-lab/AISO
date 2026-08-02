@@ -435,10 +435,11 @@ def _require_local_ollama_host(value: str) -> str:
 
 def _validate_nvidia_agent_execution_scope(raw: dict[str, Any]) -> dict[str, Any]:
     if set(raw) != {
-        "fingerprint", "workspace", "ragEnabled", "ollamaHost", "ragTopK", "allowedTools", "comfy"
+        "fingerprint", "approvalMode", "workspace", "ragEnabled", "ollamaHost", "ragTopK", "allowedTools", "comfy"
     }:
         raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
     fingerprint = raw.get("fingerprint")
+    approval_mode = raw.get("approvalMode")
     workspace = raw.get("workspace")
     rag_enabled = raw.get("ragEnabled")
     ollama_host = raw.get("ollamaHost")
@@ -446,6 +447,8 @@ def _validate_nvidia_agent_execution_scope(raw: dict[str, Any]) -> dict[str, Any
     allowed_tools = raw.get("allowedTools")
     comfy = raw.get("comfy")
     if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
+    if approval_mode not in ("manual", "read", "auto"):
         raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
     if not isinstance(workspace, str) or len(workspace) > 32768 or "\x00" in workspace:
         raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
@@ -1388,6 +1391,10 @@ async def agent(req: AgentRequest):
         if nvidia_execution_scope is not None
         else None
     )
+    authoritative_approval_mode = (
+        str(nvidia_execution_scope.get("approvalMode"))
+        if nvidia_execution_scope is not None else req.approval_mode
+    )
     global _preview_root
     _preview_root = None
     try:  # 에이전트가 만드는 파일을 우측 미리보기에서 바로 볼 수 있게 루트 설정
@@ -1404,7 +1411,7 @@ async def agent(req: AgentRequest):
             reasoning_effort=req.reasoning_effort,
             temperature=req.temperature,
             context_length=req.context_length,
-            approval_mode=req.approval_mode,
+            approval_mode=authoritative_approval_mode,
             session_id=req.session_id,
             rag_enabled=authoritative_rag,
             rag_top_k=authoritative_rag_top_k,

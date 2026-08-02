@@ -9,10 +9,6 @@ import type {
   NvidiaModelListResult,
   NvidiaAgentPrepareInput,
   NvidiaAgentPrepareResult,
-  NvidiaAgentManifestDescribeInput,
-  NvidiaAgentDataManifest,
-  NvidiaAgentManifestDecisionInput,
-  NvidiaAgentManifestDecisionResult,
   NvidiaAgentSessionFinishInput,
   NvidiaResearchPrepareInput,
   NvidiaResearchPrepareResult
@@ -88,10 +84,6 @@ const api = {
         ipcRenderer.invoke('nvidia:capabilities:clear', target)
     },
     agent: {
-      describeManifest: (input: NvidiaAgentManifestDescribeInput): Promise<NvidiaAgentDataManifest> =>
-        ipcRenderer.invoke('nvidia:agent:manifest:describe', input),
-      decideManifest: (input: NvidiaAgentManifestDecisionInput): Promise<NvidiaAgentManifestDecisionResult> =>
-        ipcRenderer.invoke('nvidia:agent:manifest:decide', input),
       prepare: (input: NvidiaAgentPrepareInput): Promise<NvidiaAgentPrepareResult> =>
         ipcRenderer.invoke('nvidia:agent:prepare', input),
       finish: (input: NvidiaAgentSessionFinishInput): Promise<void> =>

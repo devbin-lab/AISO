@@ -632,7 +632,7 @@ def test_node_contract_rejects_custom_override_missing_input_and_server_seed_lim
         cw.validate_runtime_options(profile, options, infos)
 
 
-def test_prompt_policy_is_neutral_pass_through_for_every_model_profile():
+def test_prompt_policy_applies_sd_negative_and_flux_positive_constraints():
     prompt = "blue hair, masterpiece, 1girl, blue hair, cherry blossoms"
     negative_prompt = "custom artifact, BAD HANDS, bad hands"
     sdxl = cw.normalize_profile(
@@ -640,24 +640,116 @@ def test_prompt_policy_is_neutral_pass_through_for_every_model_profile():
     )
     flux = cw.normalize_profile(flux_profile())
 
-    for profile in (sdxl, flux):
-        applied = cw.apply_prompt_policy(
-            profile,
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-        )
-        assert applied == {
-            "originalPrompt": prompt,
-            "effectivePrompt": prompt,
-            "effectiveNegativePrompt": negative_prompt,
-            "promptPolicy": {
-                "id": "none",
-                "label": "모델 기본 프롬프트",
-                "description": "Aiso는 모델별 프롬프트 태그나 지침을 자동으로 추가하지 않습니다.",
-                "addedPositive": [],
-                "addedNegative": [],
-            },
-        }
+    sd_applied = cw.apply_prompt_policy(sdxl, prompt=prompt, negative_prompt=negative_prompt)
+    assert sd_applied["originalPrompt"] == prompt
+    assert sd_applied["originalNegativePrompt"] == negative_prompt
+    assert sd_applied["effectivePrompt"] == prompt
+    assert sd_applied["promptPolicy"]["id"] == "sd-negative-quality-v1"
+    assert sd_applied["promptPolicy"]["addedPositive"] == []
+    assert "low quality" in sd_applied["promptPolicy"]["addedNegative"]
+    assert "bad anatomy" in sd_applied["promptPolicy"]["addedNegative"]
+    assert sd_applied["effectiveNegativePrompt"].startswith(negative_prompt)
+
+    flux_applied = cw.apply_prompt_policy(flux, prompt=prompt, negative_prompt=negative_prompt)
+    assert flux_applied["originalPrompt"] == prompt
+    assert flux_applied["originalNegativePrompt"] == negative_prompt
+    assert flux_applied["effectiveNegativePrompt"] == ""
+    assert flux_applied["promptPolicy"]["id"] == "flux-positive-constraints-v1"
+    assert flux_applied["promptPolicy"]["addedNegative"] == []
+    assert flux_applied["effectivePrompt"].startswith(prompt)
+    assert "natural hands" in flux_applied["effectivePrompt"]
+
+
+def test_prompt_policy_preserves_deliberate_blur_low_fidelity_and_distortion():
+    sdxl = cw.normalize_profile(sd_profile(name="General SDXL", tags=["general"]))
+    prompt = (
+        "pixel art handbag on a personal desk, intentional motion blur, JPEG aesthetic, "
+        "body horror creature with extra arms"
+    )
+    applied = cw.apply_prompt_policy(
+        sdxl,
+        prompt=prompt,
+        negative_prompt="watermark",
+    )
+
+    additions = applied["promptPolicy"]["addedNegative"]
+    assert "low quality" not in additions
+    assert "low resolution" not in additions
+    assert "blurry" not in additions
+    assert "jpeg artifacts" not in additions
+    assert "bad anatomy" not in additions
+    assert "malformed hands" not in additions
+
+    plain_object = cw.apply_prompt_policy(
+        sdxl,
+        prompt="a handbag on a personal desk",
+        negative_prompt="watermark",
+    )
+    # Whole-token matching prevents handbag/personal from becoming hand/man.
+    assert "bad anatomy" not in plain_object["promptPolicy"]["addedNegative"]
+    assert "malformed hands" not in plain_object["promptPolicy"]["addedNegative"]
+
+    direct_blur = cw.apply_prompt_policy(
+        sdxl,
+        prompt="a blurry portrait in an out of focus photograph",
+        negative_prompt="watermark",
+    )
+    assert "blurry" not in direct_blur["promptPolicy"]["addedNegative"]
+
+    flux = cw.normalize_profile(flux_profile())
+    flux_blur = cw.apply_prompt_policy(
+        flux,
+        prompt="a deliberately blurred scene, out of focus photograph",
+        negative_prompt="blurry",
+    )
+    assert flux_blur["effectivePrompt"] == "a deliberately blurred scene, out of focus photograph"
+    assert flux_blur["promptPolicy"]["id"] == "flux-negative-unconnected-v1"
+
+
+def test_flux_without_convertible_negative_does_not_claim_a_conversion():
+    flux = cw.normalize_profile(flux_profile())
+    applied = cw.apply_prompt_policy(
+        flux,
+        prompt="abstract glitch art with chaotic distortion",
+        negative_prompt="custom private concept",
+    )
+
+    assert applied["effectivePrompt"] == "abstract glitch art with chaotic distortion"
+    assert applied["effectiveNegativePrompt"] == ""
+    assert applied["promptPolicy"]["id"] == "flux-negative-unconnected-v1"
+    assert applied["promptPolicy"]["addedPositive"] == []
+
+
+def test_user_workflow_without_negative_binding_reports_it_as_unconnected():
+    from dataclasses import replace
+
+    profile = cw.normalize_profile(user_api_profile())
+    assert profile.workflow_template is not None
+    bindings = dict(profile.workflow_template.bindings)
+    bindings["negativePrompt"] = ()
+    profile = replace(
+        profile,
+        workflow_template=replace(profile.workflow_template, bindings=bindings),
+    )
+    applied = cw.apply_prompt_policy(
+        profile,
+        prompt="an original character",
+        negative_prompt="watermark",
+    )
+
+    assert applied["effectivePrompt"] == "an original character"
+    assert applied["effectiveNegativePrompt"] == ""
+    assert applied["promptPolicy"]["id"] == "user-workflow-negative-unbound-v1"
+
+
+def test_profile_tag_matching_uses_phrase_boundaries_not_substrings():
+    profiles = cw.normalize_profiles([
+        sd_profile(ident="art", name="Art", tags=["art"], priority=0, checkpoint="art.safetensors"),
+        sd_profile(ident="fallback", name="Fallback", tags=["general"], priority=1, checkpoint="fallback.safetensors"),
+    ])
+    inventory = {"checkpoints": ["art.safetensors", "fallback.safetensors"]}
+    selected, _ = cw.select_profile(profiles, inventory, prompt="a cartoon character")
+    assert selected.id == "fallback"
 
 
 def test_workflow_snapshot_is_independent_and_keeps_safe_connections_only():

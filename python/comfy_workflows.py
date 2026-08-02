@@ -989,16 +989,23 @@ def select_profile(
         return selected, reason
 
     hint = model_hint.strip().casefold()
-    haystack = f"{prompt} {model_hint}".casefold()
+    haystack = re.sub(r"[_-]+", " ", f"{prompt} {model_hint}".casefold())
+
+    def tag_matches_request(tag: str) -> bool:
+        normalized = " ".join(re.sub(r"[_-]+", " ", tag.casefold()).split())
+        if not normalized:
+            return False
+        phrase = r"\s+".join(re.escape(part) for part in normalized.split())
+        return re.search(rf"(?<!\w){phrase}(?!\w)", haystack) is not None
 
     def rank(profile: ModelProfile) -> tuple[int, int, int, str, str]:
         exact_hint = int(bool(hint) and hint in {profile.id.casefold(), profile.name.casefold()})
-        tag_matches = sum(1 for tag in profile.tags if tag and tag in haystack)
+        tag_matches = sum(1 for tag in profile.tags if tag_matches_request(tag))
         return (-exact_hint, -tag_matches, -profile.priority, profile.name.casefold(), profile.id)
 
     selected = sorted(candidates, key=rank)[0]
     exact_hint = bool(hint) and hint in {selected.id.casefold(), selected.name.casefold()}
-    matched_tags = [tag for tag in selected.tags if tag and tag in haystack]
+    matched_tags = [tag for tag in selected.tags if tag_matches_request(tag)]
     if exact_hint:
         reason = f"모델 힌트가 '{selected.name}'과 정확히 일치했습니다."
     elif matched_tags:
@@ -1017,8 +1024,12 @@ def apply_prompt_policy(
     prompt: Any,
     negative_prompt: Any = "",
 ) -> dict[str, Any]:
-    """프롬프트를 검증한 뒤 모델별 자동 변경 없이 결과 계약으로 반환한다."""
-    del profile
+    """모델 실행 계약에 맞는 결정론적 품질 제약을 적용한다.
+
+    SD 계열은 실제 negative conditioning에 보수적인 품질·인체 항목을 합치고,
+    FLUX 계열은 negative 채널을 쓰지 않으므로 알려진 제외 의도를 긍정적인 시각
+    조건으로 바꾼다. 사용자 API 워크플로는 구조를 추측하지 않고 등록된 바인딩만 따른다.
+    """
     original = _required_text(prompt, "프롬프트", max_length=MAX_PROMPT_LENGTH)
     if (
         not isinstance(negative_prompt, str)
@@ -1027,14 +1038,195 @@ def apply_prompt_policy(
     ):
         raise WorkflowValidationError("부정 프롬프트 형식이 올바르지 않습니다.")
     original_negative = negative_prompt.strip()
+    if profile.workflow_template is not None:
+        negative_connected = bool(profile.workflow_template.bindings["negativePrompt"])
+        return {
+            "originalPrompt": original,
+            "originalNegativePrompt": original_negative,
+            "effectivePrompt": original,
+            "effectiveNegativePrompt": original_negative if negative_connected else "",
+            "promptPolicy": {
+                "id": (
+                    "user-workflow-pass-through-v1"
+                    if negative_connected
+                    else "user-workflow-negative-unbound-v1"
+                ),
+                "label": (
+                    "사용자 워크플로 원문 바인딩"
+                    if negative_connected
+                    else "사용자 워크플로 네거티브 미연결"
+                ),
+                "description": (
+                    "사용자가 등록한 API 워크플로의 긍정·네거티브 입력 바인딩에 원문을 그대로 넣습니다. 선택된 결과 경로 포함 여부는 생성 결과에 별도로 표시합니다."
+                    if negative_connected
+                    else "사용자 API 워크플로에 네거티브 입력 바인딩이 없어 긍정 프롬프트만 연결하고, 요청한 제외 요소는 기록으로 남깁니다."
+                ),
+                "addedPositive": [],
+                "addedNegative": [],
+            },
+        }
+    positive_text = original.casefold()
+
+    def contains_any(values: Iterable[str], text: str = positive_text) -> bool:
+        normalized_text = re.sub(r"[_-]+", " ", text.casefold())
+        for value in values:
+            normalized = " ".join(re.sub(r"[_-]+", " ", value.casefold()).split())
+            if not normalized:
+                continue
+            phrase = r"\s+".join(re.escape(part) for part in normalized.split())
+            if re.search(rf"(?<!\w){phrase}(?!\w)", normalized_text):
+                return True
+        return False
+
+    def append_terms(base: str, values: Iterable[str]) -> tuple[str, list[str]]:
+        result = base
+        seen = {" ".join(part.casefold().split()) for part in base.split(",") if part.strip()}
+        added: list[str] = []
+        for value in values:
+            key = " ".join(value.casefold().split())
+            if not key or key in seen:
+                continue
+            candidate = f"{result}, {value}" if result else value
+            if len(candidate) > MAX_PROMPT_LENGTH:
+                continue
+            result = candidate
+            seen.add(key)
+            added.append(value)
+        return result, added
+
+    def append_sentences(base: str, values: Iterable[str]) -> tuple[str, list[str]]:
+        result = base
+        folded = " ".join(base.casefold().split())
+        added: list[str] = []
+        for value in values:
+            key = " ".join(value.casefold().split())
+            if not key or key in folded:
+                continue
+            candidate = f"{result.rstrip()} {value}" if result else value
+            if len(candidate) > MAX_PROMPT_LENGTH:
+                continue
+            result = candidate
+            folded = f"{folded} {key}".strip()
+            added.append(value)
+        return result, added
+
+    character_markers = (
+        "1girl", "1boy", "woman", "man", "girl", "boy", "person", "people",
+        "character", "portrait", "human", "hand", "캐릭터", "인물", "사람", "애니메이션",
+    )
+    character_requested = contains_any(character_markers)
+
+    deliberate_blur = contains_any((
+        "blur", "blurry", "blurred", "out of focus", "motion blur", "soft focus",
+        "dreamy blur", "blurry background", "bokeh", "depth of field", "intentional blur",
+        "의도적인 블러", "흐릿한", "아웃포커싱",
+    ))
+    deliberate_low_resolution = contains_any((
+        "low resolution", "pixel art", "pixelated", "8 bit", "16 bit", "retro sprite",
+        "game sprite", "저해상도", "픽셀 아트", "도트 그래픽",
+    ))
+    deliberate_compression = contains_any((
+        "jpeg aesthetic", "compression artifacts", "vhs", "analog noise", "glitch art",
+        "datamosh", "found footage", "cctv", "surveillance footage", "압축 노이즈", "글리치",
+    ))
+    deliberate_low_quality = contains_any((
+        "low quality", "lo fi", "amateur photo", "disposable camera", "photocopy",
+        "found footage", "cctv", "surveillance footage", "낮은 화질", "로파이",
+    )) or deliberate_low_resolution or deliberate_compression
+    deliberate_anatomy_distortion = contains_any((
+        "body horror", "eldritch", "surreal anatomy", "extra arms", "extra limbs",
+        "extra fingers", "mutated body", "deformed body", "anatomical distortion",
+        "바디 호러", "추가 팔", "기형적인 신체",
+    ))
+
+    if profile.architecture in (ARCH_SD15, ARCH_SDXL):
+        negative_terms: list[str] = []
+        if not deliberate_low_quality:
+            negative_terms.append("low quality")
+        if not deliberate_low_resolution:
+            negative_terms.append("low resolution")
+        if not deliberate_blur:
+            negative_terms.append("blurry")
+        if not deliberate_compression:
+            negative_terms.append("jpeg artifacts")
+        if character_requested and not deliberate_anatomy_distortion:
+            negative_terms.extend((
+                "bad anatomy", "malformed hands", "extra fingers", "missing fingers", "fused fingers",
+            ))
+        effective_negative, added_negative = append_terms(original_negative, negative_terms)
+        return {
+            "originalPrompt": original,
+            "originalNegativePrompt": original_negative,
+            "effectivePrompt": original,
+            "effectiveNegativePrompt": effective_negative,
+            "promptPolicy": {
+                "id": "sd-negative-quality-v1",
+                "label": "SD 품질 네거티브",
+                "description": "SD 계열의 실제 네거티브 조건에 기본 품질 항목을 합치며, 인물 요청일 때만 손·해부학 항목을 추가합니다.",
+                "addedPositive": [],
+                "addedNegative": added_negative,
+            },
+        }
+
+    if profile.architecture in (ARCH_FLUX1_SPLIT, ARCH_FLUX2_KLEIN_4B):
+        requested_negative = original_negative.casefold()
+        positive_constraints: list[str] = []
+        if not deliberate_low_quality and contains_any(
+            ("low quality", "low resolution", "pixelated", "noisy", "compression artifacts", "jpeg artifacts"),
+            requested_negative,
+        ):
+            positive_constraints.append("The image has crisp, high-resolution visual detail and clean tonal transitions.")
+        if not deliberate_blur and contains_any(("blurry", "blur", "out of focus"), requested_negative):
+            positive_constraints.append("The main subject is clearly focused with well-defined details.")
+        if character_requested and not deliberate_anatomy_distortion and contains_any(
+            ("anatomy", "hand", "hands", "finger", "fingers", "deformed", "malformed"),
+            requested_negative,
+        ):
+            positive_constraints.append(
+                "Human anatomy is coherent, with natural hands and clearly separated fingers."
+            )
+        text_requested = contains_any(
+            ("text", "typography", "lettering", "logo", "caption", "title", "sign"),
+            positive_text,
+        )
+        if not text_requested and contains_any(("watermark", "signature", "logo", "text"), requested_negative):
+            positive_constraints.append("Surfaces are clean and unmarked.")
+        effective_prompt, added_positive = append_sentences(original, positive_constraints)
+        if added_positive:
+            policy_id = "flux-positive-constraints-v1"
+            policy_label = "FLUX 제외 요소 긍정 변환"
+            policy_description = "FLUX 내장 워크플로에 네거티브 입력이 없어, 인식 가능한 제외 의도만 사용자 스타일과 충돌하지 않는 긍정 조건으로 바꿉니다."
+        elif original_negative:
+            policy_id = "flux-negative-unconnected-v1"
+            policy_label = "FLUX 네거티브 미연결"
+            policy_description = "FLUX 내장 워크플로에 네거티브 입력이 없습니다. 자동으로 안전하게 바꿀 수 없는 제외 요소는 원문 기록만 남기고 프롬프트에 임의로 추가하지 않습니다."
+        else:
+            policy_id = "flux-positive-only-v1"
+            policy_label = "FLUX 긍정 프롬프트 유지"
+            policy_description = "FLUX 내장 워크플로의 긍정 프롬프트 입력에 사용자 원문을 변경 없이 연결합니다."
+        return {
+            "originalPrompt": original,
+            "originalNegativePrompt": original_negative,
+            "effectivePrompt": effective_prompt,
+            "effectiveNegativePrompt": "",
+            "promptPolicy": {
+                "id": policy_id,
+                "label": policy_label,
+                "description": policy_description,
+                "addedPositive": added_positive,
+                "addedNegative": [],
+            },
+        }
+
     return {
         "originalPrompt": original,
+        "originalNegativePrompt": original_negative,
         "effectivePrompt": original,
         "effectiveNegativePrompt": original_negative,
         "promptPolicy": {
-            "id": "none",
-            "label": "모델 기본 프롬프트",
-            "description": "Aiso는 모델별 프롬프트 태그나 지침을 자동으로 추가하지 않습니다.",
+            "id": "model-prompt-pass-through-v1",
+            "label": "모델 프롬프트 원문 유지",
+            "description": "확인된 모델 입력 계약에 긍정·네거티브 프롬프트 원문을 그대로 연결합니다.",
             "addedPositive": [],
             "addedNegative": [],
         },

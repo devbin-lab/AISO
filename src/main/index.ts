@@ -53,13 +53,14 @@ import {
 import {
   commitNvidiaCapabilityMutation,
   prepareNvidiaAgentAuthorization,
+  validateNvidiaAgentPrepareInput,
   type ExactNvidiaAgentTarget
 } from './nvidia-agent-authorization'
 import {
   NvidiaAgentDataApprovalStore,
+  buildAutomaticNvidiaAgentDataScope,
   buildNvidiaAgentManifestAuthority,
-  validateManifestDecisionInput,
-  validateManifestDescribeInput
+  fenceNvidiaAgentSettingsMutation
 } from './nvidia-agent-data-approval'
 import {
   destroyComfySurface,
@@ -198,13 +199,15 @@ function currentApprovedNvidiaAgentScope(
   consume = false
 ) {
   const request = nvidiaAgentDataApprovals.approvedRequest(sessionId)
+  const approvalMode = nvidiaAgentDataApprovals.approvedApprovalMode(sessionId)
   const settings = loadSettings()
   const registry = listComfyModelProfiles()
   const authority = buildNvidiaAgentManifestAuthority(
     settings,
     sessionId,
     request,
-    registry.profiles
+    registry.profiles,
+    approvalMode
   )
   if (
     authority.target.deploymentMode !== target.deploymentMode ||
@@ -603,7 +606,6 @@ app.whenReady().then(() => {
     )
     const nvidiaAgentProviderChanged = previous.activeLlmProvider !== next.activeLlmProvider
     const nvidiaAgentTrustChanged = nvidiaTargetChanged || nvidiaAgentProviderChanged
-    if (nvidiaTargetChanged) await invalidateDiscordNvidiaRuntime()
     const nvidiaDataScopeChanged = (
       nvidiaAgentTrustChanged ||
       previous.workspace !== next.workspace ||
@@ -614,11 +616,21 @@ app.whenReady().then(() => {
       previous.comfyInstallPath !== next.comfyInstallPath ||
       previous.comfyModelSelectionMode !== next.comfyModelSelectionMode
     )
-    if (nvidiaDataScopeChanged) nvidiaAgentDataApprovals.clearAll()
-    if (
+    const shouldApplyDiscordConfig = (
       'discordEnabled' in patch || 'discordLlmProvider' in patch || nvidiaTargetChanged ||
       'model' in patch || 'ollamaHost' in patch
-    ) await applyTrustedDiscordConfig()
+    )
+    await fenceNvidiaAgentSettingsMutation(
+      nvidiaDataScopeChanged,
+      async () => {
+        if (nvidiaTargetChanged) await invalidateDiscordNvidiaRuntime()
+        if (shouldApplyDiscordConfig) await applyTrustedDiscordConfig()
+      },
+      {
+        clearApprovals: () => nvidiaAgentDataApprovals.clearAll(),
+        revokeAgentGrants: revokeBackendNvidiaAgentTrust
+      }
+    )
     if (
       previous.discordEnabled && !next.discordEnabled &&
       previous.discordLlmProvider === 'nvidia'
@@ -647,8 +659,6 @@ app.whenReady().then(() => {
     } else if (nvidiaAgentProviderChanged) {
       await revokeBackendNvidiaAllToolTrust()
       await clearNvidiaCredentialWithoutDemand(next)
-    } else if (nvidiaDataScopeChanged) {
-      await revokeBackendNvidiaAgentTrust()
     }
     return next
   })
@@ -878,27 +888,6 @@ app.whenReady().then(() => {
       () => capabilityCache().clearTarget({ ...binding, model })
     )
   })
-  ipcMain.handle('nvidia:agent:manifest:describe', async (e, rawInput: unknown) => {
-    requireMainRenderer(e.sender)
-    const input = validateManifestDescribeInput(rawInput)
-    // Invalidate synchronously before yielding to sidecar revocation. Otherwise
-    // an old approval could mint a grant while this expanded scope is pending.
-    nvidiaAgentDataApprovals.clearSession(input.sessionId)
-    await revokeBackendNvidiaAgentTrust()
-    const settings = loadSettings()
-    const registry = listComfyModelProfiles()
-    const authority = buildNvidiaAgentManifestAuthority(
-      settings,
-      input.sessionId,
-      input.scope,
-      registry.profiles
-    )
-    return nvidiaAgentDataApprovals.describe(authority)
-  })
-  ipcMain.handle('nvidia:agent:manifest:decide', (e, rawInput: unknown) => {
-    requireMainRenderer(e.sender)
-    return nvidiaAgentDataApprovals.decide(validateManifestDecisionInput(rawInput))
-  })
   ipcMain.handle('nvidia:agent:finish', async (e, rawInput: NvidiaAgentSessionFinishInput) => {
     requireMainRenderer(e.sender)
     const sessionId = rawInput?.sessionId
@@ -913,22 +902,46 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('nvidia:agent:prepare', async (e, rawInput: unknown) => {
     requireMainRenderer(e.sender)
-    return prepareNvidiaAgentAuthorization(rawInput, {
-      loadSettings,
-      getCapability: (target) => capabilityCache().get(target),
-      revisionSnapshot: () => nvidiaCapabilityRevision.snapshot(),
-      revisionIsCurrent: (revision) => nvidiaCapabilityRevision.isCurrent(revision),
-      prepareExecution: async (binding) => {
-        await prepareNvidiaExecution(binding, nvidiaPreparationDeps())
-      },
-      issueGrant: issueBackendNvidiaAgentGrant,
-      revokeGrants: revokeBackendNvidiaAgentTrust,
-      dataApprovalSnapshot: () => nvidiaAgentDataApprovals.snapshot(),
-      dataApprovalIsCurrent: (revision) => nvidiaAgentDataApprovals.isCurrent(revision),
-      getApprovedScope: (sessionId, target) => currentApprovedNvidiaAgentScope(sessionId, target),
-      consumeApprovedScope: (sessionId, target) => currentApprovedNvidiaAgentScope(sessionId, target, true),
-      now: Date.now
-    })
+    const input = validateNvidiaAgentPrepareInput(rawInput)
+    // 이전 실행의 bearer를 먼저 폐기한 뒤, Renderer가 고른 capability boolean이 아니라
+    // 저장된 설정·private Comfy registry·현재 권한 모드로 exact scope를 새로 만든다.
+    nvidiaAgentDataApprovals.clearSession(input.sessionId)
+    await revokeBackendNvidiaAgentTrust()
+    const settings = loadSettings()
+    const registry = listComfyModelProfiles()
+    const request = buildAutomaticNvidiaAgentDataScope(
+      settings,
+      registry.profiles,
+      input.selectedComfyModelId
+    )
+    nvidiaAgentDataApprovals.authorizePolicy(buildNvidiaAgentManifestAuthority(
+      settings,
+      input.sessionId,
+      request,
+      registry.profiles,
+      input.approvalMode
+    ))
+    try {
+      return await prepareNvidiaAgentAuthorization(input, {
+        loadSettings,
+        getCapability: (target) => capabilityCache().get(target),
+        revisionSnapshot: () => nvidiaCapabilityRevision.snapshot(),
+        revisionIsCurrent: (revision) => nvidiaCapabilityRevision.isCurrent(revision),
+        prepareExecution: async (binding) => {
+          await prepareNvidiaExecution(binding, nvidiaPreparationDeps())
+        },
+        issueGrant: issueBackendNvidiaAgentGrant,
+        revokeGrants: revokeBackendNvidiaAgentTrust,
+        dataApprovalSnapshot: () => nvidiaAgentDataApprovals.snapshot(),
+        dataApprovalIsCurrent: (revision) => nvidiaAgentDataApprovals.isCurrent(revision),
+        getApprovedScope: (sessionId, target) => currentApprovedNvidiaAgentScope(sessionId, target),
+        consumeApprovedScope: (sessionId, target) => currentApprovedNvidiaAgentScope(sessionId, target, true),
+        now: Date.now
+      })
+    } catch (error) {
+      nvidiaAgentDataApprovals.clearSession(input.sessionId)
+      throw error
+    }
   })
   onBackendChange((i) => {
     BrowserWindow.getAllWindows().forEach((w) => w.webContents.send('backend:status', i))

@@ -1295,32 +1295,6 @@
   background: rgba(210, 153, 34, 0.06);
 }
 
-.nvidia-manifest {
-  display: grid;
-  gap: 8px;
-  padding: 12px 14px;
-  border: 1px solid rgba(118, 185, 0, 0.38);
-  border-radius: 10px;
-  background: rgba(118, 185, 0, 0.06);
-  font-size: 12px;
-}
-.nvidia-manifest__title,
-.nvidia-manifest__actions,
-.nvidia-manifest__summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.nvidia-manifest__title { justify-content: space-between; }
-.nvidia-manifest p { margin: 0; color: var(--text-muted); }
-.nvidia-manifest label { display: flex; gap: 7px; align-items: center; }
-.nvidia-manifest__summary {
-  flex-direction: column;
-  align-items: flex-start;
-  color: var(--text-muted);
-}
-
 /* ---------- 실행 중 활동 표시기 (멈춘 것처럼 보이지 않게) ---------- */
 /* 실행 중 표시 — 박스 없이 답변 하단 요약(run-meta)과 같은 작은 회색 한 줄 */
 .activity {
@@ -1962,6 +1936,27 @@
 .generated-image__meta {
   margin-top: 10px;
 }
+.generated-image__pipeline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+.generated-image__pipeline span {
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-input);
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+.generated-image__pipeline .is-on {
+  border-color: rgba(35, 153, 97, 0.3);
+  color: var(--ok);
+}
+.generated-image__pipeline .is-off {
+  color: var(--text-dim);
+}
 .generated-image__loading,
 .generated-image__error {
   display: grid;
@@ -2384,6 +2379,22 @@
   margin-top: 2px;
   word-break: keep-all; /* 한글은 어절(공백) 단위로만 줄바꿈 — 단어 중간 쪼개짐 방지 */
   overflow-wrap: anywhere; /* 단, URL·환경변수 같은 아주 긴 토큰은 넘치지 않게 끊음 */
+}
+.nvidia-data-notice {
+  max-width: 760px;
+}
+.nvidia-data-notice p {
+  margin: 5px 0 0;
+}
+.nvidia-data-notice ul {
+  margin: 7px 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 3px;
+}
+.nvidia-data-notice b {
+  color: var(--text);
+  font-weight: 600;
 }
 /* 디스코드 봇 만들기 안내 패널 */
 .dc-guide {
