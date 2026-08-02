@@ -54,6 +54,11 @@ try {
     Get-VerifiedDownload $getPipUrl $getPip $getPipSha256
     & $py $getPip "pip==$pipVersion" --no-warn-script-location
     if ($LASTEXITCODE -ne 0) { throw "get-pip failed (exit $LASTEXITCODE)" }
+    $installedPipVersion = (& $py -c "import importlib.metadata; print(importlib.metadata.version('pip'))").Trim()
+    if ($LASTEXITCODE -ne 0 -or $installedPipVersion -ne $pipVersion) {
+        throw "Installed pip version does not match lock: expected $pipVersion, got $installedPipVersion"
+    }
+    Write-Host "[pyruntime] pip $installedPipVersion verified"
     Remove-Item -LiteralPath $getPip -Force
 
     Write-Host '[pyruntime] install locked runtime dependencies'

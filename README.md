@@ -8,7 +8,7 @@
 
 파일과 문서를 내 PC에서 다루고, 필요한 작업은 실행 결과로 확인합니다.
 
-[![version](https://img.shields.io/badge/version-0.3.1-F16522?style=flat-square)](https://github.com/devbin-lab/AISO/releases/tag/v0.3.1)
+[![version](https://img.shields.io/badge/version-0.4.0--rc.1-F16522?style=flat-square)](docs/V0.4.0_RC1_RELEASE_NOTES.md)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-47848F?style=flat-square&logo=electron&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama-local%20LLM-black?style=flat-square&logo=ollama)
@@ -21,7 +21,7 @@
 
 ## 프로젝트 소개
 
-Aiso는 Ollama 기반의 소형 언어 모델을 활용하는 Windows 데스크톱 에이전트입니다. 대화만 제공하는 챗봇을 넘어, 사용자가 지정한 작업 폴더를 탐색하고 파일을 정리하며 문서를 분석하고 반복 작업을 자동화합니다. v0.3.1에서는 사용자가 설치한 ComfyUI와 이미지 모델을 연결해 검증된 워크플로로 이미지를 생성하는 기능도 제공합니다.
+Aiso는 로컬 Ollama를 기본으로 사용하고 NVIDIA Build API 또는 사용자가 운영하는 NIM 엔드포인트를 선택적으로 연결할 수 있는 Windows 데스크톱 에이전트입니다. 대화만 제공하는 챗봇을 넘어, 사용자가 지정한 작업 폴더를 탐색하고 파일을 정리하며 문서를 분석하고 반복 작업을 자동화합니다. v0.4.0-rc.1은 기존 v0.3.1 기능을 유지하면서 NVIDIA 연결의 자격 증명·기능 검사·외부 전송 승인 경계를 추가한 사전 검증 버전입니다.
 
 이 프로젝트는 개인용 GPU에서 구동할 수 있는 약 8B~20B급 모델의 장점과 한계를 함께 고려해 설계했습니다. 프론티어 AI를 대체하거나 작은 모델에 대규모 프로그램의 설계와 수정을 맡기는 것이 목표가 아닙니다. 가벼운 작업을 로컬에서 처리해 클라우드 AI 사용량과 외부 정보 노출을 줄이고, 파일 시스템·검색·실행·웹 브라우저 같은 결정적 도구로 결과를 확인하는 보조 에이전트를 지향합니다.
 
@@ -33,6 +33,7 @@ Aiso는 Ollama 기반의 소형 언어 모델을 활용하는 Windows 데스크�
 - 반복 작업을 위한 Python 스킬 생성 및 실행
 - Discord 서버 구성, 메시지 전송 및 예약 브리핑
 - 사용자가 설치한 ComfyUI와 모델을 이용한 선택적 이미지 생성
+- NVIDIA Build API 또는 사용자 운영 NIM을 이용한 선택적 LLM 추론
 - 수동·읽기·자동 권한 모드에 따른 도구 실행 통제
 
 핵심 목표는 모델의 능력을 과장하는 것이 아니라, **로컬 모델이 안정적으로 수행할 수 있는 범위를 제품 수준의 안전장치와 검증 절차로 제공하는 것**입니다.
@@ -41,7 +42,9 @@ Aiso는 Ollama 기반의 소형 언어 모델을 활용하는 Windows 데스크�
 
 ### 로컬 우선
 
-LLM 추론과 임베딩은 사용자가 선택한 Ollama 서버에서 수행합니다. 기본값인 `http://localhost:11434`를 사용하면 프롬프트와 임베딩 처리가 이 PC에서 이루어집니다. 원격 Ollama 주소를 설정하면 대화 내용과 임베딩할 문서 조각이 해당 서버로 전송될 수 있습니다. 대화 기록·설정·사용량은 사용자 PC에, RAG 색인은 각 작업 폴더의 `.aiso/rag`에 저장됩니다.
+기본 LLM 공급자는 Ollama입니다. 기본값인 `http://localhost:11434`를 사용하면 프롬프트와 임베딩 처리가 이 PC에서 이루어집니다. 원격 Ollama 주소를 설정하면 대화 내용과 임베딩할 문서 조각이 해당 서버로 전송될 수 있습니다. 대화 기록·설정·사용량은 사용자 PC에, RAG 색인은 각 작업 폴더의 `.aiso/rag`에 저장됩니다.
+
+NVIDIA 공급자는 사용자가 명시적으로 선택하는 실험 기능입니다. NVIDIA Build를 선택하면 요청이 NVIDIA가 호스팅하는 API로 전송되고, 사용자 NIM을 선택하면 해당 NIM 운영자에게 전송됩니다. Agent·웹 조사·Discord처럼 도구 결과나 로컬 데이터가 추가될 수 있는 경로는 모델의 최신 도구 지원 확인과 기능별 전송 승인 또는 동의를 요구합니다.
 
 채팅 웹 조사, 모델 다운로드, 업데이트 확인, Discord 연동처럼 외부 연결이 필요한 기능은 해당 기능을 사용할 때만 네트워크를 사용합니다. 채팅 웹 조사는 설정에서 비활성화할 수 있고 Discord 연동은 기본적으로 꺼져 있습니다. Discord 예약 브리핑은 실행 시점에 별도로 공개 웹을 조사할 수 있습니다.
 
@@ -69,6 +72,17 @@ Aiso는 범용 코딩 에이전트가 아닙니다. Agent 정책은 사용자의
 파일 변경, 명령 실행, 외부 서비스 변경은 권한 정책을 거칩니다. 특히 Discord 메시지 발신·예약 등록·서버 변경은 자동 모드에서도 최종 승인을 요구합니다.
 
 ## 주요 기능
+
+### NVIDIA Build 및 사용자 NIM
+
+- NVIDIA Build의 고정 엔드포인트와 사용자 운영 NIM의 OpenAI 호환 `/v1/models`, `/v1/chat/completions` 연결
+- 일반 채팅 스트리밍과 사용자가 직접 실행하는 모델 목록·채팅·스트리밍·도구 호출 기능 검사
+- Build API 키와 선택적 NIM Bearer 키를 운영체제 보안 저장소로 암호화하고, 평문 저장 폴백은 거부
+- 원격 사용자 NIM은 HTTPS만, loopback 개발 주소는 HTTP 또는 HTTPS만 허용하며 URL 사용자 정보·query·fragment와 리디렉션은 거부
+- NVIDIA Agent 실행 전에 대화·작업 폴더·RAG·이미지·도구 결과의 전송 범위를 표시하고 세션 단위 승인
+- 웹 조사와 Discord NVIDIA 경로에 별도 일회성 실행 허가 적용
+
+NVIDIA 연동은 NIM을 설치하거나 배포하지 않습니다. 사용자는 NVIDIA Build API 키를 직접 준비하거나, NVIDIA 공식 요구사항에 따라 별도의 NIM 서버를 운영해야 합니다. 사용자 NIM의 TLS·접근 제어·방화벽·로그·모델 라이선스는 해당 서버 운영자의 책임입니다. 자세한 설정과 이용 범위는 [v0.4.0-rc.1 릴리스 노트](docs/V0.4.0_RC1_RELEASE_NOTES.md)를 참고하십시오.
 
 ### 작업 폴더 에이전트
 
@@ -233,10 +247,12 @@ Aiso는 이미지 모델과 워크플로를 배포·판매·추천하거나 해�
 
 ## 다운로드
 
-현재 배포 버전은 [v0.3.1](https://github.com/devbin-lab/AISO/releases/tag/v0.3.1)(2026-07-22)입니다.
+현재 저장소 버전은 **v0.4.0-rc.1**(2026-08-02)이며, NVIDIA 호환 기능을 검증하기 위한 Release Candidate입니다. 현재 안정 배포 버전은 [v0.3.1](https://github.com/devbin-lab/AISO/releases/tag/v0.3.1)(2026-07-22)입니다.
 
 - Windows 설치 파일: [Aiso-0.3.1-Setup.exe](https://github.com/devbin-lab/AISO/releases/download/v0.3.1/Aiso-0.3.1-Setup.exe)
 - 전체 릴리스: [GitHub Releases](https://github.com/devbin-lab/AISO/releases)
+
+RC 설치 파일은 QA 완료 후 별도 사전 릴리스로 게시합니다. 게시 전에는 안정판 다운로드 링크가 v0.3.1을 유지합니다.
 
 ### 시스템 요구사항
 
@@ -244,10 +260,10 @@ Aiso는 이미지 모델과 워크플로를 배포·판매·추천하거나 해�
 |---|---|---|
 | 운영체제 | Windows 10 64-bit | Windows 11 64-bit |
 | 메모리 | 16 GB | 32 GB |
-| GPU | Ollama가 지원하는 GPU | NVIDIA GPU, VRAM 16 GB 이상 |
-| 필수 프로그램 | [Ollama](https://ollama.com/download) | 최신 안정 버전 |
+| GPU | Ollama가 지원하는 GPU | 로컬 Ollama·ComfyUI 사용 시 NVIDIA GPU, VRAM 16 GB 이상 |
+| 기본 LLM | [Ollama](https://ollama.com/download) | 최신 안정 버전 |
 
-프로젝트의 주 대상은 VRAM 16 GB 이상의 개인용 PC입니다. 8 GB 환경에서도 더 작은 모델과 짧은 컨텍스트로 실행할 수 있지만 CPU·시스템 메모리 오프로드가 발생하면 응답 속도가 크게 낮아질 수 있습니다. ComfyUI 이미지 생성에 필요한 VRAM은 사용자가 연결한 모델과 해상도에 따라 별도로 달라집니다.
+프로젝트의 주 대상은 VRAM 16 GB 이상의 개인용 PC입니다. 8 GB 환경에서도 더 작은 모델과 짧은 컨텍스트로 실행할 수 있지만 CPU·시스템 메모리 오프로드가 발생하면 응답 속도가 크게 낮아질 수 있습니다. ComfyUI 이미지 생성에 필요한 VRAM은 사용자가 연결한 모델과 해상도에 따라 별도로 달라집니다. NVIDIA Build 사용에는 로컬 NVIDIA GPU가 필요하지 않지만 인터넷 연결과 NVIDIA 계정·API 키가 필요합니다. 사용자 NIM의 하드웨어·운영체제·컨테이너 요구사항은 Aiso가 아니라 선택한 NIM과 NVIDIA의 최신 지원 표에 따릅니다.
 
 > 현재 설치 파일에는 코드 서명이 적용되어 있지 않습니다. Windows SmartScreen 경고가 표시될 경우 게시자와 파일 출처를 확인한 후 실행하십시오.
 
@@ -298,6 +314,9 @@ ollama pull bge-m3
 - Discord 기능이 필요하면 봇 토큰을 저장하고 연동을 활성화합니다.
 - 예약과 봇을 창을 닫은 뒤에도 유지하려면 트레이 상주를 켭니다.
 - 이미지 생성을 사용하려면 별도로 설치한 ComfyUI의 주소와 Windows Portable 경로를 설정하고, 사용할 모델을 ComfyUI 모델 폴더에 등록합니다. Agent 자동 선택과 이미지 요청별 수동 선택 중 원하는 방식을 설정할 수 있습니다.
+- NVIDIA Build를 사용하려면 `설정 → LLM`에서 공급자를 NVIDIA로 바꾸고 `NVIDIA Build`를 선택한 뒤, Build API 키를 저장하고 모델 목록을 새로고침합니다.
+- 사용자 NIM을 사용하려면 NVIDIA 공식 문서에 따라 NIM을 별도로 배포한 뒤 `설정 → LLM`에서 `사용자 NIM` 주소와 모델을 지정합니다. 인증이 없는 서버 또는 선택적 Bearer 키를 사용할 수 있으며, 다른 인증 방식은 현재 지원하지 않습니다.
+- Agent·웹 조사·Discord에서 NVIDIA 모델을 사용하려면 먼저 `기능 검사`로 현재 모델의 도구 호출 지원을 확인하고, 표시되는 데이터 전송 범위를 검토해 승인합니다.
 
 ## 아키텍처
 
@@ -313,6 +332,8 @@ flowchart LR
     Renderer <-->|"HTTP + NDJSON"| Sidecar
     Main -->|"spawn / lifecycle"| Sidecar
     Sidecar <-->|"chat · embed · pull"| Ollama["Ollama"]
+    Sidecar -->|"chat · models · capability"| Build["NVIDIA Build API"]
+    Sidecar -->|"chat · models · capability"| NIM["User-operated NIM"]
     Sidecar --> Workspace["Selected Workspace"]
     Sidecar --> Web["Public Web"]
     Sidecar --> Discord["Discord API"]
@@ -341,7 +362,7 @@ flowchart LR
 | `pyruntime` | 설치본에 포함되는 Python 런타임 |
 | `tools` | 검증에 사용하는 Windows 도구 체인 |
 
-Electron 메인 프로세스는 실행 시 사용 가능한 로컬 포트를 확보하고 Python FastAPI 사이드카를 시작합니다. 렌더러는 preload 계층을 통한 IPC와 인증 토큰이 포함된 HTTP 요청만 사용합니다. 실제 LLM 추론과 임베딩은 FastAPI 사이드카가 Ollama API를 호출해 수행합니다.
+Electron 메인 프로세스는 실행 시 사용 가능한 로컬 포트를 확보하고 Python FastAPI 사이드카를 시작합니다. 렌더러는 preload 계층을 통한 IPC와 인증 토큰이 포함된 HTTP 요청만 사용합니다. FastAPI 사이드카는 저장된 공급자 설정에 따라 Ollama 또는 승인된 NVIDIA 대상을 호출합니다. 임베딩과 NVIDIA Agent의 선택적 RAG 검색은 로컬 loopback Ollama만 사용합니다.
 
 ## 기술 스택
 
@@ -350,7 +371,7 @@ Electron 메인 프로세스는 실행 시 사용 가능한 로컬 포트를 확
 | 데스크톱 | Electron 43, electron-vite, electron-updater |
 | 프론트엔드 | React 19, TypeScript 6, Vite |
 | 백엔드 | Python 3.12.10, FastAPI, Uvicorn, httpx |
-| 로컬 AI | Ollama, `gemma4`, `gpt-oss`, `bge-m3` |
+| AI 추론 | Ollama, 선택적 NVIDIA Build·사용자 NIM, `gemma4`, `gpt-oss`, `bge-m3` |
 | 문서 처리 | pypdf, openpyxl, python-docx, olefile |
 | 웹 검증 | Playwright |
 | Discord | discord.py |
@@ -385,7 +406,7 @@ python/.venv/Scripts/python.exe -m pip install -r python/requirements-dev.txt
 ```powershell
 npm run dev          # Electron과 Vite 개발 서버 실행
 npm run typecheck    # Main, preload, renderer 타입 검사
-npm test             # ComfyUI 계약 및 렌더러 회귀 테스트
+npm test             # NVIDIA·ComfyUI 계약 및 렌더러 회귀 테스트
 npm run build        # Electron 번들을 out/에 컴파일
 npm run build:win    # 기존 pyruntime으로 Windows 설치본 패키징
 npm run dist:win     # Python 런타임을 다시 구성한 뒤 Windows 설치본 패키징
@@ -399,6 +420,9 @@ python/.venv/Scripts/python.exe -m pytest python/tests -q
 
 - Windows 10/11만 공식 대상으로 합니다.
 - Ollama는 별도로 설치해야 하며 모델 파일은 설치 프로그램에 포함하지 않습니다.
+- NVIDIA 연동은 v0.4.0-rc.1의 실험 기능입니다. 모델별 스트리밍·도구 호출 지원과 실제 Build·사용자 NIM 상호운용성은 대상 환경에서 확인해야 합니다.
+- Aiso는 NIM 컨테이너를 설치·구성·업데이트하지 않습니다. 사용자 NIM의 운영 보안과 지원 가능 하드웨어·소프트웨어 조합은 운영자가 NVIDIA 최신 문서에서 확인해야 합니다.
+- NVIDIA Build의 모델 목록, 사용량 한도, 비용, 데이터 처리 조건과 이용 권한은 NVIDIA 및 모델 제공자의 최신 조건에 따라 변경될 수 있습니다.
 - 결과 품질과 도구 호출 안정성은 선택한 모델에 영향을 받습니다.
 - 코드·명령·브라우저·스킬 실행은 제한된 검증 기능이며, 승인 후 운영체제 사용자 권한으로 동작하는 비샌드박스 기능입니다.
 - 자동 모드에서는 작업 폴더 내부 파일을 사용자 확인 없이 변경할 수 있습니다.
@@ -415,6 +439,7 @@ python/.venv/Scripts/python.exe -m pytest python/tests -q
 ### 로컬에 저장되는 데이터
 
 - 애플리케이션 설정
+- 운영체제 보안 저장소로 암호화한 NVIDIA API 키와 해당 배포 대상 바인딩
 - 채팅 및 에이전트 대화 기록
 - 토큰 사용량 통계
 - 각 작업 폴더의 `.aiso/rag`에 저장되는 RAG 색인
@@ -422,13 +447,15 @@ python/.venv/Scripts/python.exe -m pytest python/tests -q
 - ComfyUI 모델 프로필, 자산 해시, 연결한 사용자 워크플로
 - Discord 설정과 예약 정보
 
-위 데이터는 로컬에 저장되지만 Discord 토큰을 제외하면 Aiso 전용 암호화 저장소를 사용하지 않습니다. 대화와 작업 데이터의 보호는 Windows 사용자 계정 권한과 디스크 보안 설정에 의존합니다. Discord 토큰도 `safeStorage`를 사용할 수 없는 환경에서는 Windows 사용자 파일 권한에 의존합니다.
+NVIDIA API 키는 Electron `safeStorage`를 사용할 수 있을 때만 암호화해 저장하며, 평문 저장으로 대체하지 않습니다. Discord 토큰을 제외한 대화·작업 데이터에는 Aiso 전용 암호화를 적용하지 않으므로 Windows 사용자 계정 권한과 디스크 보안 설정에 의존합니다. Discord 토큰도 `safeStorage`를 사용할 수 없는 환경에서는 Windows 사용자 파일 권한에 의존합니다.
 
 ### 외부 연결이 발생하는 경우
 
 | 기능 | 연결 대상 | 비고 |
 |---|---|---|
 | LLM 추론·임베딩 | 설정된 Ollama 호스트 | 기본값은 localhost. 원격 호스트 사용 시 프롬프트와 임베딩 대상 문서 조각 전송 |
+| NVIDIA Build 추론 | NVIDIA가 호스팅하는 Build API | 사용자가 NVIDIA 공급자와 Build를 선택한 경우. 대화와 승인한 도구 결과 전송 |
+| 사용자 NIM 추론 | 사용자가 설정한 NIM 서버 | loopback HTTP 또는 HTTPS. 대화와 승인한 도구 결과를 해당 서버 운영자에게 전송 |
 | 모델 설치 | Ollama 모델 저장소 | 사용자가 설치를 실행할 때 |
 | 채팅 웹 조사 | DuckDuckGo 및 선택한 공개 웹 페이지 | 채팅 웹 조사가 활성화된 경우 |
 | Discord | Discord API | 연동을 활성화한 경우 |
@@ -436,7 +463,7 @@ python/.venv/Scripts/python.exe -m pytest python/tests -q
 | 이미지 생성 | 사용자가 설정한 로컬 ComfyUI | `127.0.0.1` 또는 `localhost` 주소만 허용 |
 | 업데이트 | GitHub Releases | 사용자가 업데이트 확인·다운로드를 실행할 때 |
 
-Aiso는 공개 웹 페이지를 읽을 때 내부 네트워크 주소와 로컬 서비스를 차단합니다. 다만 외부 서비스 기능을 활성화하면 요청 내용이나 생성된 메시지가 해당 서비스로 전송될 수 있으므로 사용 전에 기능별 동작을 확인해야 합니다.
+Aiso는 공개 웹 페이지를 읽을 때 내부 네트워크 주소와 로컬 서비스를 차단합니다. 다만 외부 서비스 기능을 활성화하면 요청 내용이나 생성된 메시지가 해당 서비스로 전송될 수 있으므로 사용 전에 기능별 동작을 확인해야 합니다. NVIDIA Build에는 기밀·민감·개인 데이터를 보내지 말고 현재 [NVIDIA API Trial Terms](https://assets.ngc.nvidia.com/products/api-catalog/legal/NVIDIA%20API%20Trial%20Terms%20of%20Service.pdf)와 선택한 모델의 별도 라이선스를 확인하십시오.
 
 ## 프로젝트 정보
 
@@ -447,7 +474,22 @@ Aiso는 공개 웹 페이지를 읽을 때 내부 네트워크 주소와 로컬 
 
 ## 버전 변천사
 
-아래 기록은 저장소에 남아 있는 Git 릴리스 태그를 기준으로 정리했습니다.
+아래 기록은 저장소의 현재 Release Candidate와 Git 릴리스 태그를 기준으로 정리했습니다.
+
+### v0.4.0-rc.1 — 2026-08-02
+
+v0.3.1을 안정판 기준선으로 동결하고, NVIDIA Build API와 사용자 운영 NIM 호환성을 제한된 실험 기능으로 추가한 Release Candidate입니다.
+
+- NVIDIA Build 고정 엔드포인트와 사용자 NIM의 OpenAI 호환 모델 조회·채팅 스트리밍 연결
+- 사용자 요청 기반 모델 기능 검사와 Agent·웹 조사·Discord의 최신 도구 지원 확인
+- 운영체제 보안 저장소 기반 API 키 암호화, 배포 대상 바인딩, Renderer 비노출·평문 폴백 거부
+- NVIDIA Agent의 작업 폴더·RAG·이미지 범위를 기본 비활성화하고 세션별 전송 명세·승인 적용
+- 웹 조사와 Discord NVIDIA 경로의 별도 일회성 허가, 실패 시 Ollama 자동 전환 금지
+- 원격 사용자 NIM의 HTTPS 제한과 URL·리디렉션 검증, 로컬 NIM 운영 책임 명시
+- v0.3.1 설정을 Ollama 기본값으로 유지하는 설정 스키마 마이그레이션과 회귀 테스트 추가
+- PyPA `get-pip.py`의 immutable commit·SHA-256 고정과 실제 pip 잠금 버전 검사로 Windows 배포 재현성 강화
+- 개발·패키징 도구의 전이 의존성 보안 권고 반영과 npm 감사 통과
+- 상세 변경·설정·권리·데이터 경계는 [릴리스 노트](docs/V0.4.0_RC1_RELEASE_NOTES.md)에 기록
 
 ### v0.3.1 — 2026-07-22
 
