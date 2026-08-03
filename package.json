@@ -1,6 +1,6 @@
 {
   "name": "aiso",
-  "version": "0.4.0-rc.3",
+  "version": "0.4.0-rc.4",
   "description": "로컬 작업·조사·자동화·검증 에이전트",
   "main": "./out/main/index.js",
   "author": "devbin-lab",

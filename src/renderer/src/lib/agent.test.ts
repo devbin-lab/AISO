@@ -99,6 +99,38 @@ describe('streamAgent ComfyUI model-selection payload', () => {
     expect(body).not.toHaveProperty('selected_comfy_model_id')
   })
 
+  it('sends only the active Ollama tool policy and derives optional local capabilities from it', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamResponse())
+    vi.stubGlobal('fetch', fetchMock)
+    const enabledTools = ['list_dir', 'write_code_file', 'run_code'] as const
+
+    await streamAgent(
+      8123,
+      {
+        ...DEFAULT_SETTINGS,
+        ragEnabled: true,
+        agentToolPolicy: {
+          ollama: [...enabledTools],
+          nvidia: ['read_file', 'run_command']
+        }
+      },
+      'C:/local/workspace',
+      [{ role: 'user', content: '프로젝트 파일을 작성해줘' }],
+      'session-local-tools-0001',
+      'assistant-turn-local-tools-0001',
+      'read',
+      [profile],
+      vi.fn()
+    )
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
+    expect(body.enabled_tools).toEqual(enabledTools)
+    expect(body.rag_enabled).toBe(false)
+    expect(body.comfy_base_url).toBeNull()
+    expect(body.comfy_profiles).toEqual([])
+    expect(JSON.stringify(body)).not.toContain('run_command')
+  })
+
   it('sends only the approval ID to the approval endpoint', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -207,6 +239,39 @@ describe('streamAgent ComfyUI model-selection payload', () => {
     })
     expect(JSON.stringify(body)).not.toContain('C:/private/workspace')
     expect(body).not.toHaveProperty('selected_comfy_model_id')
+    expect(body).not.toHaveProperty('enabled_tools')
+  })
+
+  it('never forwards a renderer-side NVIDIA tool policy to the sidecar', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamResponse())
+    vi.stubGlobal('fetch', fetchMock)
+
+    await streamAgent(
+      8123,
+      {
+        ...DEFAULT_SETTINGS,
+        activeLlmProvider: 'nvidia',
+        nvidiaModel: 'nvidia/test-model',
+        agentToolPolicy: {
+          ollama: ['list_dir'],
+          nvidia: ['run_command', 'write_code_file']
+        }
+      },
+      'C:/private/workspace',
+      [{ role: 'user', content: '코드를 실행해줘' }],
+      'session-nvidia-tools-0001',
+      'assistant-turn-nvidia-tools-0001',
+      'auto',
+      [],
+      vi.fn(),
+      undefined,
+      { nvidiaGrantId: 'main-issued-one-use-grant' }
+    )
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
+    expect(body).not.toHaveProperty('enabled_tools')
+    expect(body.workspace).toBe('')
+    expect(body.nvidia_grant).toBe('main-issued-one-use-grant')
   })
 
   it('does not call the sidecar without a pre-issued Main NVIDIA Agent grant', async () => {

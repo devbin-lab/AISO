@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { isIP } from 'node:net'
 import type { ApprovalMode } from '../shared/agent.ts'
 import type { AppSettings } from '../shared/settings.ts'
+import { NVIDIA_SUPPORTED_AGENT_TOOL_IDS } from '../shared/tool-policy.ts'
 import { getComfyAgentReadiness, type ComfyModelProfile } from '../shared/comfy-model.ts'
 import {
   canonicalizeNvidiaBinding,
@@ -14,11 +15,28 @@ import {
 
 export const NVIDIA_AGENT_BASE_TOOLS = ['update_plan', 'get_system_time'] as const
 export const NVIDIA_AGENT_WORKSPACE_TOOLS = [
-  'list_dir', 'list_tree', 'read_file', 'grep', 'glob'
+  'list_dir', 'list_tree', 'read_file', 'grep', 'glob', 'create_dir', 'move',
+  'write_file', 'edit_file', 'multi_edit',
+  'write_code_file', 'edit_code_file', 'multi_edit_code_file',
+  'delete_file', 'delete_dir', 'run_web', 'run_code', 'run_command'
 ] as const
 export const NVIDIA_AGENT_RAG_TOOLS = ['search_docs'] as const
 export const NVIDIA_AGENT_IMAGE_TOOLS = ['generate_image'] as const
 export const NVIDIA_AGENT_MANIFEST_TTL_MS = 10 * 60 * 1000
+
+const NVIDIA_SUPPORTED_TOOL_SET = new Set<string>(NVIDIA_SUPPORTED_AGENT_TOOL_IDS)
+const DECLARED_NVIDIA_TOOL_SET = new Set<string>([
+  ...NVIDIA_AGENT_BASE_TOOLS,
+  ...NVIDIA_AGENT_WORKSPACE_TOOLS,
+  ...NVIDIA_AGENT_RAG_TOOLS,
+  ...NVIDIA_AGENT_IMAGE_TOOLS
+])
+if (
+  NVIDIA_SUPPORTED_TOOL_SET.size !== DECLARED_NVIDIA_TOOL_SET.size ||
+  [...NVIDIA_SUPPORTED_TOOL_SET].some((name) => !DECLARED_NVIDIA_TOOL_SET.has(name))
+) {
+  throw new Error('NVIDIA Agent 도구 계약이 일치하지 않습니다.')
+}
 
 export interface NvidiaAgentExecutionScope {
   fingerprint: string
@@ -68,21 +86,26 @@ export function buildAutomaticNvidiaAgentDataScope(
   profiles: ComfyModelProfile[],
   selectedComfyModelId?: string
 ): NvidiaAgentDataScopeRequest {
-  const workspace = Boolean(settings.workspace.trim())
-  const rag = workspace && settings.ragEnabled
+  const enabled = new Set(settings.agentToolPolicy.nvidia)
+  const hasWorkspaceTool = NVIDIA_AGENT_WORKSPACE_TOOLS.some(
+    (toolId) => enabled.has(toolId)
+  )
+  const rag = Boolean(settings.workspace.trim()) && settings.ragEnabled && enabled.has('search_docs')
+  const workspace = Boolean(settings.workspace.trim()) && (hasWorkspaceTool || rag)
   const selectionMode = settings.comfyModelSelectionMode === 'manual' ? 'manual' : 'auto'
 
-  if (selectionMode === 'auto' && selectedComfyModelId) {
+  const imageToolEnabled = enabled.has('generate_image')
+  if (imageToolEnabled && selectionMode === 'auto' && selectedComfyModelId) {
     throw new Error('자동 모델 선택에서는 ComfyUI 프로필 ID를 직접 지정할 수 없습니다.')
   }
-  if (selectionMode === 'manual' && selectedComfyModelId) {
+  if (imageToolEnabled && selectionMode === 'manual' && selectedComfyModelId) {
     const selected = profiles.find((profile) => profile.id === selectedComfyModelId)
     if (!selected || !getComfyAgentReadiness(selected).ready) {
       throw new Error('선택한 ComfyUI 모델은 Agent 실행 준비 상태가 아닙니다.')
     }
   }
 
-  const image = Boolean(settings.comfyBaseUrl.trim()) && (
+  const image = imageToolEnabled && Boolean(settings.comfyBaseUrl.trim()) && (
     selectionMode === 'manual'
       ? Boolean(selectedComfyModelId)
       : profiles.some((profile) => profile.agentEnabled && getComfyAgentReadiness(profile).ready)
@@ -256,11 +279,23 @@ export function buildNvidiaAgentManifestAuthority(
   }
 
   const allowedTools = [
-    ...NVIDIA_AGENT_BASE_TOOLS,
-    ...(request.workspace ? NVIDIA_AGENT_WORKSPACE_TOOLS : []),
-    ...(request.rag ? NVIDIA_AGENT_RAG_TOOLS : []),
-    ...(request.image ? NVIDIA_AGENT_IMAGE_TOOLS : [])
-  ]
+    ...NVIDIA_AGENT_BASE_TOOLS.filter((name) => settings.agentToolPolicy.nvidia.includes(name)),
+    ...(request.workspace
+      ? NVIDIA_AGENT_WORKSPACE_TOOLS.filter((name) => settings.agentToolPolicy.nvidia.includes(name))
+      : []),
+    ...(request.rag
+      ? NVIDIA_AGENT_RAG_TOOLS.filter((name) => settings.agentToolPolicy.nvidia.includes(name))
+      : []),
+    ...(request.image
+      ? NVIDIA_AGENT_IMAGE_TOOLS.filter((name) => settings.agentToolPolicy.nvidia.includes(name))
+      : [])
+  ] as string[]
+  const baseToolsSent = allowedTools.some((name) => NVIDIA_AGENT_BASE_TOOLS.includes(
+    name as typeof NVIDIA_AGENT_BASE_TOOLS[number]
+  ))
+  const workspaceToolsSent = allowedTools.some((name) => NVIDIA_AGENT_WORKSPACE_TOOLS.includes(
+    name as typeof NVIDIA_AGENT_WORKSPACE_TOOLS[number]
+  ))
   const privateScope = {
     target,
     approvalMode,
@@ -311,8 +346,8 @@ export function buildNvidiaAgentManifestAuthority(
         imagePrompt: request.image,
         toolResults: [...allowedTools],
         toolResultDetails: [
-          '계획 갱신 내용과 로컬 시스템 시각',
-          ...(request.workspace ? ['승인한 작업 폴더의 읽기 결과'] : []),
+          ...(baseToolsSent ? ['설정에서 허용한 계획·시각 도구 호출과 결과'] : []),
+          ...(workspaceToolsSent ? ['설정에서 허용한 작업 폴더·코드 도구 호출과 결과'] : []),
           ...(request.rag ? ['로컬 Ollama RAG 검색 결과'] : []),
           ...(request.image ? ['이미지 생성 성공 여부와 크기 정보'] : [])
         ]

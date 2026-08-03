@@ -225,7 +225,7 @@
     "type": "function",
     "function": {
       "name": "write_file",
-      "description": "파일을 생성하거나 전체 내용을 덮어쓴다. 새 파일 작성 또는 전면 재작성에 사용.",
+      "description": "마크다운(.md) 문서를 생성하거나 전체 내용을 덮어쓴다. 프로젝트 코드는 write_code_file을 사용한다.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -249,7 +249,7 @@
     "type": "function",
     "function": {
       "name": "edit_file",
-      "description": "파일에서 old_string을 찾아 new_string으로 정확히 1곳 치환한다. 부분 수정에 사용.",
+      "description": "마크다운(.md) 문서에서 old_string을 찾아 new_string으로 정확히 1곳 치환한다.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -278,7 +278,7 @@
     "type": "function",
     "function": {
       "name": "multi_edit",
-      "description": "한 파일에 여러 개의 찾기·바꾸기 편집을 순서대로 원자적으로(전부 성공 또는 전부 취소) 적용한다. 같은 파일을 여러 번 edit_file 하는 대신 이걸 한 번 호출하라. 편집은 위에서부터 차례로 적용되고, 하나라도 실패하면 파일은 전혀 바뀌지 않는다. old_string은 유일해야 하며, 여러 곳을 바꾸려면 replace_all=true.",
+      "description": "마크다운(.md) 문서 하나에 여러 찾기·바꾸기를 순서대로 검증한 뒤 한 번에 적용한다. 프로젝트 코드는 multi_edit_code_file을 사용한다.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -303,6 +303,104 @@
                 "replace_all": {
                   "type": "boolean",
                   "description": "일치하는 모든 곳을 바꿀지(기본 false)."
+                }
+              },
+              "required": [
+                "old_string",
+                "new_string"
+              ]
+            }
+          }
+        },
+        "required": [
+          "path",
+          "edits"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "write_code_file",
+      "description": "프로젝트의 UTF-8 소스 코드·스크립트·설정 파일을 새로 만들거나 전체 내용을 덮어쓴다. .git·의존성·가상환경·비밀값 경로와 바이너리 파일은 거부한다.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "작업 폴더 기준 프로젝트 파일 상대경로."
+          },
+          "content": {
+            "type": "string",
+            "description": "파일에 쓸 UTF-8 전체 내용."
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "edit_code_file",
+      "description": "기존 UTF-8 프로젝트 파일에서 유일한 old_string 한 곳을 new_string으로 치환한다. 코드의 국소 수정에 사용한다.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "작업 폴더 기준 프로젝트 파일 상대경로."
+          },
+          "old_string": {
+            "type": "string",
+            "description": "파일 안에서 유일해야 하는 기존 내용."
+          },
+          "new_string": {
+            "type": "string",
+            "description": "대체할 새 내용."
+          }
+        },
+        "required": [
+          "path",
+          "old_string",
+          "new_string"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "multi_edit_code_file",
+      "description": "UTF-8 프로젝트 파일 하나에 여러 찾기·바꾸기를 순서대로 검증한 뒤 한 번에 적용한다. 하나라도 실패하면 파일을 쓰지 않는다.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "작업 폴더 기준 프로젝트 파일 상대경로."
+          },
+          "edits": {
+            "type": "array",
+            "description": "순서대로 적용할 편집 목록.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "old_string": {
+                  "type": "string",
+                  "description": "바꿀 기존 내용."
+                },
+                "new_string": {
+                  "type": "string",
+                  "description": "새 내용."
+                },
+                "replace_all": {
+                  "type": "boolean",
+                  "description": "모든 일치 항목을 바꿀지 여부."
                 }
               },
               "required": [

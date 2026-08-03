@@ -25,7 +25,12 @@ from pydantic import BaseModel, Field
 
 from agent import MAX_GEN_TOKENS, _chat_turn, resolve_approval, run_agent, run_research_chat
 from agent_ledger import AgentExecutionLedger, LedgerError
-from toolspec import get_builtin_tool_catalog
+from toolspec import (
+    BUILTIN_TOOL_NAMES,
+    NVIDIA_AGENT_SUPPORTED_TOOLS,
+    get_builtin_tool_catalog,
+    normalize_enabled_tool_names,
+)
 from comfy_client import (
     ComfyAPIError,
     DEFAULT_COMFY_BASE_URL,
@@ -400,10 +405,12 @@ class NvidiaDiscordGrantRequest(NvidiaResearchGrantRequest):
     pass
 
 
-_NVIDIA_AGENT_SCOPE_TOOLS = frozenset({
-    "update_plan", "get_system_time",
-    "list_dir", "list_tree", "read_file", "grep", "glob",
-    "search_docs", "generate_image",
+_NVIDIA_AGENT_SCOPE_TOOLS = NVIDIA_AGENT_SUPPORTED_TOOLS
+_NVIDIA_AGENT_WORKSPACE_TOOLS = frozenset({
+    "list_dir", "list_tree", "read_file", "grep", "glob", "create_dir", "move",
+    "write_file", "edit_file", "multi_edit",
+    "write_code_file", "edit_code_file", "multi_edit_code_file",
+    "delete_file", "delete_dir", "run_web", "run_code", "run_command",
 })
 
 
@@ -473,11 +480,9 @@ def _validate_nvidia_agent_execution_scope(raw: dict[str, Any]) -> dict[str, Any
         or len(set(allowed_tools)) != len(allowed_tools)
     ):
         raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
-    required = {"update_plan", "get_system_time"}
-    if not required.issubset(allowed_tools):
-        raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
-    workspace_tools = {"list_dir", "list_tree", "read_file", "grep", "glob"}
-    if not workspace and any(name in workspace_tools or name == "search_docs" for name in allowed_tools):
+    if not workspace and any(
+        name in _NVIDIA_AGENT_WORKSPACE_TOOLS or name == "search_docs" for name in allowed_tools
+    ):
         raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
     if ("search_docs" in allowed_tools) != rag_enabled:
         raise HTTPException(status_code=400, detail="invalid NVIDIA Agent data scope")
@@ -1327,6 +1332,9 @@ class AgentRequest(BaseModel):
         max_length=128,
         pattern=r"^[A-Za-z0-9._-]+$",
     )
+    # Ollama 실행 정책은 Renderer가 저장 설정의 provider별 스냅샷을 전달한다.
+    # NVIDIA 실행은 이 값을 무시하고 Main-issued exact scope의 allowedTools만 신뢰한다.
+    enabled_tools: list[str] | None = Field(default=None, max_length=len(BUILTIN_TOOL_NAMES))
 
 
 class ApprovalRequest(BaseModel):
@@ -1341,6 +1349,7 @@ async def agent(req: AgentRequest):
     runtime: LlmRuntime | None = None
     ledger: AgentExecutionLedger | None = None
     nvidia_execution_scope: dict[str, Any] | None = None
+    local_enabled_tools: list[str] | None = None
     if req.provider == "nvidia":
         if not req.deployment_mode or not req.endpoint or not req.model.strip():
             raise HTTPException(status_code=400, detail="NVIDIA Agent target is incomplete")
@@ -1363,6 +1372,11 @@ async def agent(req: AgentRequest):
         runtime = _nvidia_runtime_for_target(
             NvidiaTargetRequest(deployment_mode=req.deployment_mode, endpoint=binding["endpoint"])
         )
+    else:
+        try:
+            local_enabled_tools = list(normalize_enabled_tool_names(req.enabled_tools))
+        except ToolError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
     host = (
         _require_local_ollama_host(str(nvidia_execution_scope.get("ollamaHost") or DEFAULT_OLLAMA))
         if nvidia_execution_scope is not None and nvidia_execution_scope.get("ragEnabled")
@@ -1380,7 +1394,7 @@ async def agent(req: AgentRequest):
     authoritative_rag = (
         bool(nvidia_execution_scope.get("ragEnabled"))
         if nvidia_execution_scope is not None
-        else req.rag_enabled
+        else req.rag_enabled and "search_docs" in (local_enabled_tools or [])
     )
     authoritative_rag_top_k = (
         int(nvidia_execution_scope.get("ragTopK") or 0)
@@ -1442,6 +1456,7 @@ async def agent(req: AgentRequest):
                 list(nvidia_execution_scope.get("allowedTools") or [])
                 if nvidia_execution_scope is not None else None
             ),
+            enabled_tools=local_enabled_tools,
         )
         agent_completed = False
         try:

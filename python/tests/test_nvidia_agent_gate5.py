@@ -60,6 +60,8 @@ async def collect(
     base="assistant-request-0001",
     workspace="",
     approval_mode="read",
+    allowed_tools=("update_plan", "get_system_time"),
+    renderer_enabled_tools=None,
 ):
     return [
         event
@@ -74,6 +76,8 @@ async def collect(
             runtime=runtime,
             assistant_turn_id=base,
             execution_ledger=ledger,
+            nvidia_allowed_tools=list(allowed_tools),
+            enabled_tools=renderer_enabled_tools,
             rag_enabled=True,
             comfy_base_url="http://127.0.0.1:8188",
             comfy_profiles=[{"id": "private-model"}],
@@ -336,6 +340,52 @@ def test_nvidia_model_payload_never_contains_workspace_rag_or_file_metadata(tmp_
     assert "private-model" not in serialized
     tool_names = {tool["function"]["name"] for tool in request.tools or []}
     assert tool_names == {"update_plan", "get_system_time"}
+
+
+def test_nvidia_model_receives_exact_main_scope_and_ignores_renderer_tool_list(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = FakeNvidiaRuntime([final_turn()])
+    with AgentExecutionLedger(tmp_path / "ledger.sqlite3") as ledger:
+        asyncio.run(collect(
+            runtime,
+            ledger,
+            workspace=str(workspace),
+            allowed_tools=("read_file", "write_code_file"),
+            renderer_enabled_tools=["run_command"],
+        ))
+
+    tool_names = {tool["function"]["name"] for tool in runtime.requests[0].tools or []}
+    assert tool_names == {"read_file", "write_code_file"}
+
+
+def test_nvidia_mixed_in_scope_and_out_of_scope_batch_executes_nothing(tmp_path, monkeypatch):
+    executions: list[str] = []
+
+    async def fake_execute(spec, root, host, args):
+        executions.append(spec.name)
+        return "unexpected", None
+
+    monkeypatch.setattr(agent, "execute", fake_execute)
+    runtime = FakeNvidiaRuntime([[
+        delta(0, call_id="allowed", name="get_system_time", arguments="{}"),
+        delta(
+            1,
+            call_id="disabled",
+            name="write_code_file",
+            arguments='{"path":"blocked.py","content":"print(1)\\n"}',
+        ),
+        LlmEvent(kind="done", done_reason="tool_calls"),
+    ]])
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with AgentExecutionLedger(tmp_path / "ledger.sqlite3") as ledger:
+        events = asyncio.run(collect(runtime, ledger, workspace=str(workspace)))
+
+    assert executions == []
+    assert not (workspace / "blocked.py").exists()
+    assert not any(event["type"] in {"tool_call", "tool_result"} for event in events)
+    assert any("write_code_file" in event.get("error", "") for event in events)
 
 
 def test_update_plan_arguments_are_hashed_not_persisted_in_the_ledger(tmp_path):

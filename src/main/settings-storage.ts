@@ -14,6 +14,10 @@ import {
   type SettingsRecoveryStatus
 } from '../shared/settings.ts'
 import { canonicalizeNvidiaNimEndpoint } from '../shared/nvidia.ts'
+import {
+  canonicalizeAgentToolPolicy,
+  createDefaultAgentToolPolicy
+} from '../shared/tool-policy.ts'
 
 export interface SettingsFileOps {
   exists(path: string): boolean
@@ -48,6 +52,7 @@ export const APP_SETTING_KEYS = new Set<keyof AppSettings>([
   'contextLength',
   'theme',
   'workspace',
+  'agentToolPolicy',
   'embeddingModel',
   'ragEnabled',
   'ragMaxFiles',
@@ -115,8 +120,17 @@ function enumValue<T extends string>(
   return value as T
 }
 
-/** Convert a validated v3/v4 record into the single v4 settings contract. */
-export function normalizeSettingsRecord(rawValue: unknown, legacy: boolean): AppSettings {
+function agentToolPolicyValue(raw: Record<string, unknown>): AppSettings['agentToolPolicy'] {
+  const value = raw.agentToolPolicy
+  return value === undefined ? createDefaultAgentToolPolicy() : canonicalizeAgentToolPolicy(value)
+}
+
+/** Convert a validated v3/v4/v5 record into the single v5 settings contract. */
+export function normalizeSettingsRecord(
+  rawValue: unknown,
+  legacy: boolean,
+  resetToolPolicy = false
+): AppSettings {
   const raw = record(rawValue)
   for (const key of Object.keys(raw)) {
     if (!APP_SETTING_KEYS.has(key as keyof AppSettings) && !(legacy && key === 'version')) {
@@ -146,7 +160,7 @@ export function normalizeSettingsRecord(rawValue: unknown, legacy: boolean): App
   }
 
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     activeLlmProvider,
     model: textValue(raw, 'model', DEFAULT_SETTINGS.model),
     ollamaHost: textValue(raw, 'ollamaHost', DEFAULT_SETTINGS.ollamaHost),
@@ -159,6 +173,7 @@ export function normalizeSettingsRecord(rawValue: unknown, legacy: boolean): App
     contextLength: numberValue(raw, 'contextLength', DEFAULT_SETTINGS.contextLength),
     theme: enumValue(raw, 'theme', ['dark', 'light', 'system'] as const, DEFAULT_SETTINGS.theme),
     workspace: textValue(raw, 'workspace', DEFAULT_SETTINGS.workspace),
+    agentToolPolicy: resetToolPolicy ? createDefaultAgentToolPolicy() : agentToolPolicyValue(raw),
     embeddingModel: textValue(raw, 'embeddingModel', DEFAULT_SETTINGS.embeddingModel),
     ragEnabled: boolValue(raw, 'ragEnabled', DEFAULT_SETTINGS.ragEnabled),
     ragMaxFiles: numberValue(raw, 'ragMaxFiles', DEFAULT_SETTINGS.ragMaxFiles),
@@ -186,10 +201,10 @@ export function applySettingsPatch(current: AppSettings, patchValue: unknown): A
       throw new Error(`허용되지 않은 설정 항목입니다: ${key}`)
     }
   }
-  if (patch.schemaVersion !== undefined && patch.schemaVersion !== 4) {
+  if (patch.schemaVersion !== undefined && patch.schemaVersion !== 5) {
     throw new Error('설정 스키마 버전은 변경할 수 없습니다.')
   }
-  return normalizeSettingsRecord({ ...current, ...patch, schemaVersion: 4 }, false)
+  return normalizeSettingsRecord({ ...current, ...patch, schemaVersion: 5 }, false)
 }
 
 export function atomicWriteSettings(
@@ -226,7 +241,11 @@ export function loadSettingsFile(
   ops: SettingsFileOps = nodeFileOps
 ): SettingsLoadResult {
   const none: SettingsRecoveryStatus = { kind: 'none' }
-  if (!ops.exists(file)) return { settings: { ...DEFAULT_SETTINGS }, recovery: none, writeBlocked: false }
+  const freshDefaults = (): AppSettings => ({
+    ...DEFAULT_SETTINGS,
+    agentToolPolicy: createDefaultAgentToolPolicy()
+  })
+  if (!ops.exists(file)) return { settings: freshDefaults(), recovery: none, writeBlocked: false }
 
   let raw: unknown
   try {
@@ -234,7 +253,7 @@ export function loadSettingsFile(
   } catch {
     const result = quarantine(file, 'corrupt', ops)
     return {
-      settings: { ...DEFAULT_SETTINGS },
+      settings: freshDefaults(),
       recovery: {
         kind: result.blocked ? 'blocked' : 'quarantined',
         message: result.blocked
@@ -250,10 +269,10 @@ export function loadSettingsFile(
     const obj = record(raw)
     const schema = obj.schemaVersion
     const legacyVersion = obj.version
-    if (typeof schema === 'number' && schema > 4) {
+    if (typeof schema === 'number' && schema > 5) {
       const result = quarantine(file, 'future', ops)
       return {
-        settings: { ...DEFAULT_SETTINGS },
+        settings: freshDefaults(),
         recovery: {
           kind: result.blocked ? 'blocked' : 'quarantined',
           message: result.blocked
@@ -268,16 +287,20 @@ export function loadSettingsFile(
     const legacy = schema === 3 || (
       schema === undefined && (legacyVersion === undefined || legacyVersion === '0.3.1')
     )
-    if (!legacy && schema !== 4) throw new Error('지원하지 않는 설정 스키마입니다.')
+    const previousSchema = schema === 4
+    if (!legacy && !previousSchema && schema !== 5) throw new Error('지원하지 않는 설정 스키마입니다.')
 
-    const settings = normalizeSettingsRecord(obj, legacy)
-    if (!legacy) return { settings, recovery: none, writeBlocked: false }
+    const settings = normalizeSettingsRecord(obj, legacy, legacy || previousSchema)
+    if (!legacy && !previousSchema) return { settings, recovery: none, writeBlocked: false }
 
     try {
       atomicWriteSettings(file, settings, ops)
       return {
         settings,
-        recovery: { kind: 'migrated', message: 'v3 설정을 v4 형식으로 안전하게 변환했습니다.' },
+        recovery: {
+          kind: 'migrated',
+          message: `${legacy ? 'v3' : 'v4'} 설정을 v5 형식으로 안전하게 변환했습니다.`
+        },
         writeBlocked: false
       }
     } catch {
@@ -285,7 +308,7 @@ export function loadSettingsFile(
         settings,
         recovery: {
           kind: 'blocked',
-          message: 'v3 설정 변환본을 원자적으로 저장하지 못했습니다. 원본을 보존하고 설정 저장을 차단했습니다.'
+          message: `${legacy ? 'v3' : 'v4'} 설정 변환본을 원자적으로 저장하지 못했습니다. 원본을 보존하고 설정 저장을 차단했습니다.`
         },
         writeBlocked: true
       }
@@ -293,7 +316,7 @@ export function loadSettingsFile(
   } catch {
     const result = quarantine(file, 'corrupt', ops)
     return {
-      settings: { ...DEFAULT_SETTINGS },
+      settings: freshDefaults(),
       recovery: {
         kind: result.blocked ? 'blocked' : 'quarantined',
         message: result.blocked

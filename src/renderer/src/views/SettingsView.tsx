@@ -684,6 +684,13 @@ function SettingsView({
         </nav>
 
         <div className="settings-content">
+          <div className="settings-savebar">
+            {saved && <span className="saved">저장됨</span>}
+            {saveError && <span className="form-error" role="alert">{saveError}</span>}
+            <button className="btn" disabled={!dirty} onClick={submit}>
+              저장
+            </button>
+          </div>
         {activeSection === 'llm' && (
         <section>
           <div className="group__title">엔진</div>
@@ -932,6 +939,10 @@ function SettingsView({
                       <p>
                         NVIDIA 모델로 메시지를 보내면 대화는 NVIDIA Build 또는 사용자가 지정한 NIM 운영자에게 전송됩니다.
                         반복 확인창은 표시하지 않습니다.
+                      </p>
+                      <p>
+                        설정의 <b>도구</b> 탭에서 NVIDIA에 허용할 항목을 선택합니다. 허용한 파일·코드 도구를 사용하면
+                        파일 내용, 도구 입력, 코드·명령·테스트 결과가 NVIDIA 대화에 전달될 수 있습니다.
                       </p>
                       <ul>
                         <li><b>수동</b>: 읽기와 변경 작업을 실행하기 전에 확인합니다.</li>
@@ -1223,7 +1234,13 @@ function SettingsView({
         )}
         {activeSection === 'tools' && (
         <section>
-          <AgentToolCatalog backend={backend} active={active} />
+          <AgentToolCatalog
+            backend={backend}
+            active={active}
+            activeProvider={form.activeLlmProvider}
+            policy={form.agentToolPolicy}
+            onPolicyChange={(policy) => set('agentToolPolicy', policy)}
+          />
         </section>
         )}
         {activeSection === 'appearance' && (
@@ -1557,13 +1574,6 @@ function SettingsView({
           </section>
         )}
 
-          <div className="actions">
-            {saved && <span className="saved">저장됨</span>}
-            {saveError && <span className="form-error" role="alert">{saveError}</span>}
-            <button className="btn" disabled={!dirty} onClick={submit}>
-              저장
-            </button>
-          </div>
         </div>
       </div>
       {devToast && <div className="dev-toast">{devToast}</div>}

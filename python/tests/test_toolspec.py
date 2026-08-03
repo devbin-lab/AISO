@@ -10,8 +10,18 @@ import json
 from pathlib import Path
 
 import agent
+import pytest
 from comfy_generation import GENERATE_IMAGE_SCHEMA
-from toolspec import FORCE_APPROVAL_IN_AUTO, REGISTRY, get_builtin_tool_catalog, needs_approval
+from tools import ToolError
+from toolspec import (
+    DEFAULT_ENABLED_TOOLS,
+    FORCE_APPROVAL_IN_AUTO,
+    PROGRAMMING_TOOLS,
+    REGISTRY,
+    get_builtin_tool_catalog,
+    needs_approval,
+    normalize_enabled_tool_names,
+)
 
 _SNAPSHOT = Path(__file__).parent / "_agent_tools_snapshot.json"
 
@@ -29,6 +39,7 @@ _AUTO_APPROVAL_REQUIRED = {
 _ALL_TOOLS = [
     "update_plan", "get_system_time", "list_dir", "list_tree", "read_file", "grep", "glob",
     "create_dir", "move", "write_file", "edit_file", "multi_edit",
+    "write_code_file", "edit_code_file", "multi_edit_code_file",
     "delete_file", "delete_dir", "run_web", "run_code", "run_command",
     "web_fetch", "web_search", "create_skill", "run_skill", "search_docs",
 ]
@@ -70,6 +81,29 @@ def test_auto_keeps_execution_and_deletion_behind_approval():
         assert agent.needs_approval(name, "auto") is True, name
 
 
+def test_programming_policy_defaults_off_and_code_writes_keep_approval_semantics():
+    """새·마이그레이션 기본값은 프로그래밍 전체 OFF, 명시적으로 켜도 기존 승인 축은 유지한다."""
+    assert PROGRAMMING_TOOLS == {
+        "write_code_file", "edit_code_file", "multi_edit_code_file",
+        "run_web", "run_code", "run_command",
+    }
+    assert PROGRAMMING_TOOLS.isdisjoint(DEFAULT_ENABLED_TOOLS)
+    for name in ("write_code_file", "edit_code_file", "multi_edit_code_file"):
+        assert agent.needs_approval(name, "manual") is True
+        assert agent.needs_approval(name, "read") is True
+        assert agent.needs_approval(name, "auto") is False
+    for name in ("run_web", "run_code", "run_command"):
+        assert agent.needs_approval(name, "auto") is True
+
+
+def test_enabled_tool_policy_rejects_unknowns_and_duplicates_fail_closed():
+    assert normalize_enabled_tool_names(None) == frozenset(DEFAULT_ENABLED_TOOLS)
+    with pytest.raises(ToolError, match="지원하지 않는"):
+        normalize_enabled_tool_names(["read_file", "invented_tool"])
+    with pytest.raises(ToolError, match="중복"):
+        normalize_enabled_tool_names(["read_file", "read_file"])
+
+
 def test_builtin_tool_catalog_tracks_registry_and_conditional_tools():
     """설정의 툴 목록은 실제 레지스트리·이미지 스키마와 반드시 함께 변한다."""
     catalog = get_builtin_tool_catalog()
@@ -99,3 +133,7 @@ def test_builtin_tool_catalog_tracks_registry_and_conditional_tools():
     assert "색인 완료" in by_name["search_docs"]["requirements"]
     assert by_name["discord_send"]["availability"] == "discord"
     assert by_name["discord_send"]["approval"]["auto"] is True
+    for name in PROGRAMMING_TOOLS:
+        assert by_name[name]["category"] == "programming"
+        assert by_name[name]["availability"] == "workspace"
+        assert "설정에서 프로그래밍 도구 사용" in by_name[name]["requirements"]

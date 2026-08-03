@@ -123,7 +123,11 @@ async def get_system_time() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 # 파일 툴의 성질 — 쓰기/삭제 판정 (테스트가 승인 매트릭스로 고정)
-_FILE_MUTATES = {"write_file", "edit_file", "multi_edit", "delete_file", "delete_dir", "move"}
+_FILE_MUTATES = {
+    "write_file", "edit_file", "multi_edit",
+    "write_code_file", "edit_code_file", "multi_edit_code_file",
+    "delete_file", "delete_dir", "move",
+}
 _FILE_DELETE = {"delete_file", "delete_dir"}
 
 
@@ -163,7 +167,7 @@ def _build_registry() -> dict[str, ToolSpec]:
                                   approval=Approval.ALWAYS, mutates=True, handler=run_command)
     reg["web_fetch"] = ToolSpec("web_fetch", WEB_FETCH_SCHEMA, CallKind.ASYNC_PLAIN, handler=web_fetch)
     reg["web_search"] = ToolSpec("web_search", WEB_SEARCH_SCHEMA, CallKind.ASYNC_PLAIN, handler=web_search)
-    # 3b) 스킬 — create_skill(코드 산출의 유일한 경로, 쓰기 등급) / run_skill(임의 실행, 명령 등급)
+    # 3b) 스킬 — create_skill(재사용 자동화 저장, 쓰기 등급) / run_skill(임의 실행, 명령 등급)
     #     스킬은 workspace 밖(앱 skills 폴더)에 저장되므로 mutates=False(재색인 불필요).
     # Skills persist executable code outside the selected workspace.  Treat creation
     # and execution alike so a prompt-injected repository cannot plant a future
@@ -199,6 +203,34 @@ def _build_registry() -> dict[str, ToolSpec]:
 
 
 REGISTRY: dict[str, ToolSpec] = _build_registry()
+
+PROGRAMMING_TOOLS = frozenset({
+    "write_code_file", "edit_code_file", "multi_edit_code_file",
+    "run_web", "run_code", "run_command",
+})
+BUILTIN_TOOL_NAMES = tuple([*REGISTRY, "generate_image"])
+DEFAULT_ENABLED_TOOLS = tuple(name for name in BUILTIN_TOOL_NAMES if name not in PROGRAMMING_TOOLS)
+NVIDIA_AGENT_SUPPORTED_TOOLS = frozenset({
+    "update_plan", "get_system_time",
+    "list_dir", "list_tree", "read_file", "grep", "glob", "create_dir", "move",
+    "write_file", "edit_file", "multi_edit",
+    "write_code_file", "edit_code_file", "multi_edit_code_file",
+    "delete_file", "delete_dir", "run_web", "run_code", "run_command",
+    "search_docs", "generate_image",
+})
+
+
+def normalize_enabled_tool_names(names: list[str] | tuple[str, ...] | None) -> frozenset[str]:
+    """저장 정책의 명시적 허용 목록을 카탈로그 순서와 무관한 실행 집합으로 검증한다."""
+    from tools import ToolError
+
+    values = list(DEFAULT_ENABLED_TOOLS if names is None else names)
+    unknown = [name for name in values if not isinstance(name, str) or name not in BUILTIN_TOOL_NAMES]
+    if unknown:
+        raise ToolError(f"지원하지 않는 Agent 도구입니다: {unknown[0]}")
+    if len(values) > len(BUILTIN_TOOL_NAMES) or len(values) != len(set(values)):
+        raise ToolError("Agent 활성 도구 목록이 중복되었거나 허용 크기를 넘었습니다.")
+    return frozenset(values)
 
 # 조건부 노출 툴 — 상황이 갖춰졌을 때만 agent 루프가 tools에 얹는다(KV 프리픽스 스냅샷 불변).
 _CONDITIONAL_TOOLS = {
@@ -256,8 +288,10 @@ def _catalog_classification(name: str, spec: ToolSpec) -> tuple[str, str, tuple[
         return "rag", "rag", ("작업 폴더 선택", "RAG 사용", "색인 완료")
     if name.startswith("discord_"):
         return "discord", "discord", ("디스코드 봇 연결",)
-    if spec.kind is CallKind.FILE or name in {"run_web", "run_code", "run_command"}:
-        category = "files" if spec.kind is CallKind.FILE else "execution"
+    if name in PROGRAMMING_TOOLS:
+        return "programming", "workspace", ("작업 폴더 선택", "설정에서 프로그래밍 도구 사용",)
+    if spec.kind is CallKind.FILE:
+        category = "files"
         return category, "workspace", ("작업 폴더 선택",)
     if name in {"web_search", "web_fetch"}:
         return "research", "always", (

@@ -8,6 +8,7 @@ import {
   canonicalizeNvidiaNimEndpoint,
   type NvidiaDeploymentMode
 } from './nvidia.ts'
+import { createDefaultAgentToolPolicy, type AgentToolPolicy } from './tool-policy.ts'
 /** ComfyUI 이미지 생성에서 모델을 고르는 주체. */
 export type ComfyModelSelectionMode = 'auto' | 'manual'
 /** 생성 온도 모드 (드롭다운으로 선택):
@@ -23,8 +24,8 @@ export interface SettingsRecoveryStatus {
 }
 
 export interface AppSettings {
-  /** Persisted settings contract. v0.4.x uses schema 4. */
-  schemaVersion: 4
+  /** Persisted settings contract. v0.4.x uses schema 5. */
+  schemaVersion: 5
   /** Explicit LLM provider. Migration always starts existing users on Ollama. */
   activeLlmProvider: ActiveLlmProvider
   /** Ollama 모델 이름 */
@@ -50,6 +51,8 @@ export interface AppSettings {
   theme: ThemeMode
   /** 에이전트 작업 폴더 (파일 툴이 이 안으로 confine) */
   workspace: string
+  /** 공급자별 Agent 도구 명시적 허용 목록. 도구 OFF는 권한 모드보다 먼저 적용된다. */
+  agentToolPolicy: AgentToolPolicy
   /** RAG 임베딩 모델 — 채팅 모델과 독립. 이 모델로 색인/검색한다. */
   embeddingModel: string
   /** RAG(검색 증강) 사용 — 에이전트가 색인된 작업 폴더에서 관련 조각을 자동 참고 */
@@ -159,7 +162,7 @@ export const RAG_MAX_FILES_OPTIONS: { value: number; label: string }[] = [
 ]
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  schemaVersion: 4,
+  schemaVersion: 5,
   activeLlmProvider: 'ollama',
   model: 'gemma4:12b',
   ollamaHost: 'http://localhost:11434',
@@ -172,6 +175,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   contextLength: 16384,
   theme: 'dark',
   workspace: '',
+  agentToolPolicy: createDefaultAgentToolPolicy(),
   embeddingModel: 'bge-m3',
   ragEnabled: true,
   ragMaxFiles: 300,

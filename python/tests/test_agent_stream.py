@@ -23,8 +23,129 @@ def test_normal_completion(env):
     assert tr["ok"] is True and "rejected" not in tr
 
 
-# ── 작업 폴더 없이 실행: 로컬 도구 차단, 스킬은 허용 ───────────
-def test_no_workspace_restricts_tools_and_blocks_file_ops(env, monkeypatch, tmp_path):
+# ── 설정 기반 도구 ON/OFF 실행 경계 ─────────────────────────
+def test_programming_tools_are_hidden_by_default_and_prompt_matches_policy(env):
+    fake = FakeChat([{"content": "분석만 수행했습니다."}])
+    events = env.run(fake)
+
+    tool_names = {tool["function"]["name"] for tool in fake.payloads[0]["tools"]}
+    assert {
+        "write_code_file", "edit_code_file", "multi_edit_code_file",
+        "run_web", "run_code", "run_command",
+    }.isdisjoint(tool_names)
+    system_prompt = fake.payloads[0]["messages"][0]["content"]
+    assert "프로젝트 코드 작성·편집은 꺼져 있다" in system_prompt
+    assert "코드·명령·웹 실행 검증은 꺼져 있다" in system_prompt
+    assert types(events)[-1] == "done"
+
+
+def test_prompt_describes_only_individually_exposed_file_tools(env):
+    fake = FakeChat([{"content": "읽었습니다."}])
+    env.run(fake, enabled_tools=["read_file"], approval_mode="auto")
+
+    system_prompt = fake.payloads[0]["messages"][0]["content"]
+    assert "read_file" in system_prompt
+    for hidden in ("list_tree", "list_dir", "grep", "glob", "move", "web_search", "web_fetch"):
+        assert hidden not in system_prompt
+
+
+def test_no_workspace_prompt_uses_actual_scope_not_saved_programming_toggle(env):
+    fake = FakeChat([{"content": "작업 폴더가 필요합니다."}])
+    env.run(
+        fake,
+        workspace="",
+        enabled_tools=["write_code_file", "run_code"],
+        approval_mode="auto",
+    )
+
+    assert fake.payloads[0]["tools"] == []
+    system_prompt = fake.payloads[0]["messages"][0]["content"]
+    assert "프로젝트 코드 작성·편집은 꺼져 있다" in system_prompt
+    assert "프로젝트 코드 작성·편집을 허용했다" not in system_prompt
+    assert "write_code_file" not in system_prompt
+    assert "run_code" not in system_prompt
+
+
+def test_enabled_programming_tool_is_exposed_and_can_write_code(env):
+    enabled = [
+        "write_code_file", "edit_code_file", "multi_edit_code_file",
+        "run_web", "run_code", "run_command",
+    ]
+    fake = FakeChat([
+        {"calls": [("write_code_file", {"path": "src/app.py", "content": "print('ok')\n"})]},
+        {"content": "작성과 검증을 마쳤습니다."},
+    ])
+    events = env.run(fake, enabled_tools=enabled, approval_mode="auto")
+
+    tool_names = {tool["function"]["name"] for tool in fake.payloads[0]["tools"]}
+    assert set(enabled) == tool_names
+    system_prompt = fake.payloads[0]["messages"][0]["content"]
+    assert "프로젝트 코드 작성·편집을 허용했다" in system_prompt
+    assert "write_code_file" in system_prompt and "run_code" in system_prompt
+    assert (env.ws / "src" / "app.py").read_text(encoding="utf-8") == "print('ok')\n"
+    result = next(event for event in events if event["type"] == "tool_result")
+    assert result["ok"] is True
+
+
+def test_forced_disabled_programming_call_is_blocked_before_execution(env):
+    fake = FakeChat([{
+        "calls": [("write_code_file", {"path": "blocked.py", "content": "print('no')\n"})],
+    }])
+    events = env.run(fake, enabled_tools=["read_file"], approval_mode="auto")
+
+    assert not (env.ws / "blocked.py").exists()
+    assert not any(event["type"] in {"tool_call", "tool_result"} for event in events)
+    error = next(event["error"] for event in events if event["type"] == "error")
+    assert "설정에서 꺼진 도구" in error and "write_code_file" in error
+    assert types(events)[-1] == "done"
+
+
+def test_mixed_allowed_and_disabled_batch_executes_nothing(env):
+    fake = FakeChat([{
+        "calls": [
+            ("write_file", {"path": "allowed.md", "content": "must not be written"}),
+            ("write_code_file", {"path": "disabled.py", "content": "print('no')\n"}),
+        ],
+    }])
+    events = env.run(fake, enabled_tools=["write_file"], approval_mode="auto")
+
+    assert not (env.ws / "allowed.md").exists()
+    assert not (env.ws / "disabled.py").exists()
+    assert not any(event["type"] in {"tool_call", "tool_result"} for event in events)
+    assert any("이번 도구 호출 묶음을 실행하지 않았습니다" in event.get("error", "") for event in events)
+
+
+def test_disabling_run_skill_hides_dynamic_skills_and_blocks_name_call(env, monkeypatch, tmp_path):
+    marker = tmp_path / "skill-ran.txt"
+    listed = False
+
+    def fake_list_skills():
+        nonlocal listed
+        listed = True
+        return [{"name": "hidden_skill", "description": "should remain hidden"}]
+
+    async def forbidden_run_skill(**_kwargs):
+        marker.write_text("ran", encoding="utf-8")
+        return "unexpected"
+
+    monkeypatch.setattr(agent, "list_skills", fake_list_skills)
+    monkeypatch.setattr(agent, "run_skill", forbidden_run_skill)
+    fake = FakeChat([{"calls": [("hidden_skill", {})]}])
+    events = env.run(fake, enabled_tools=["create_skill"], approval_mode="auto")
+
+    tool_names = {tool["function"]["name"] for tool in fake.payloads[0]["tools"]}
+    assert "run_skill" not in tool_names and "hidden_skill" not in tool_names
+    system_prompt = fake.payloads[0]["messages"][0]["content"]
+    assert "스킬 실행은 꺼져 있다" in system_prompt
+    assert "만든 스킬은 run_skill로 실행해 정상 동작을 확인" not in system_prompt
+    assert listed is False
+    assert not marker.exists()
+    assert not any(event["type"] in {"tool_call", "tool_result"} for event in events)
+    assert any("현재 실행 범위 밖" in event.get("error", "") for event in events)
+
+
+# ── 작업 폴더 없이 실행: 노출 범위 밖 호출은 묶음 전체 차단 ─────
+def test_no_workspace_rejects_mixed_exposed_and_hidden_tool_batch(env, monkeypatch, tmp_path):
     monkeypatch.setenv("AISO_SKILLS_DIR", str(tmp_path))
     fc = FakeChat([
         {"calls": [
@@ -38,28 +159,24 @@ def test_no_workspace_restricts_tools_and_blocks_file_ops(env, monkeypatch, tmp_
     tool_names = {t["function"]["name"] for t in fc.payloads[0]["tools"]}
     assert "write_file" not in tool_names and "run_command" not in tool_names
     assert "create_skill" in tool_names and "web_search" in tool_names
-    # (2) 모델이 로컬 도구를 억지로 불러도 차단되고, 스킬은 실제로 만들어진다
-    id2name = {e["id"]: e["name"] for e in evs if e.get("type") == "tool_call"}
-    results = {id2name[e["id"]]: e for e in evs if e.get("type") == "tool_result"}
-    assert results["write_file"]["ok"] is False
-    assert "작업 폴더" in results["write_file"]["output"]
-    assert results["create_skill"]["ok"] is True
-    assert (tmp_path / "greet" / "main.py").exists()
+    # (2) 목록에서 빠진 로컬 도구를 끼워 호출하면 노출된 스킬까지 포함해 아무것도 실행하지 않는다.
+    assert not any(e.get("type") in {"tool_call", "tool_result"} for e in evs)
+    assert not (tmp_path / "greet" / "main.py").exists()
+    assert any("write_file" in e.get("error", "") for e in evs)
     assert types(evs)[-1] == "done"
 
 
-def test_no_workspace_unknown_tool_is_proper_error(env, monkeypatch, tmp_path):
-    """무폴더 모드에서 등록도 스킬도 아닌 이름을 부르면 '작업 폴더 필요'가 아니라 '알 수 없는 툴'로 답한다."""
+def test_no_workspace_unknown_tool_is_rejected_before_execution(env, monkeypatch, tmp_path):
+    """모델이 노출되지 않은 이름을 지어내도 개별 실행 이벤트 없이 묶음 전체를 닫는다."""
     monkeypatch.setenv("AISO_SKILLS_DIR", str(tmp_path))  # 스킬 없음
     fc = FakeChat([
         {"calls": [("nonexistent_tool", {})]},
         {"content": "완료"},
     ])
     evs = env.drive(fc, approve=True, workspace="", approval_mode="auto")
-    id2name = {e["id"]: e["name"] for e in evs if e.get("type") == "tool_call"}
-    results = {id2name[e["id"]]: e for e in evs if e.get("type") == "tool_result"}
-    out = results["nonexistent_tool"]["output"]
-    assert "알 수 없는" in out and "작업 폴더" not in out
+    assert not any(e.get("type") in {"tool_call", "tool_result"} for e in evs)
+    error = next(e["error"] for e in evs if e.get("type") == "error")
+    assert "현재 실행 범위 밖" in error and "nonexistent_tool" in error
 
 
 def test_created_skill_callable_by_name_without_workspace(env, monkeypatch, tmp_path):
@@ -236,7 +353,7 @@ def test_screenshot_after_tool_result(env):
     evs = env.drive(FakeChat([
         {"calls": [("run_web", {"path": "x.html"})]},
         {"content": "검증 완료."},
-    ]), approve=True)
+    ]), approve=True, enabled_tools=["run_web"])
     t = types(evs)
     i_tr = t.index("tool_result")
     i_shot = t.index("screenshot")

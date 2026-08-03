@@ -612,6 +612,7 @@ app.whenReady().then(() => {
       previous.ragEnabled !== next.ragEnabled ||
       previous.ragTopK !== next.ragTopK ||
       previous.ollamaHost !== next.ollamaHost ||
+      previous.agentToolPolicy.nvidia.join('\u0000') !== next.agentToolPolicy.nvidia.join('\u0000') ||
       previous.comfyBaseUrl !== next.comfyBaseUrl ||
       previous.comfyInstallPath !== next.comfyInstallPath ||
       previous.comfyModelSelectionMode !== next.comfyModelSelectionMode

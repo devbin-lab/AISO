@@ -7,7 +7,9 @@ _run_web_sync를 '느린' 함수로 대역화하고 RUN_WEB_TIMEOUT을 짧게 �
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
+import types
 
 import webcheck
 
@@ -44,3 +46,39 @@ def test_run_web_returns_normally_when_fast(monkeypatch, tmp_path):
     report, shot = asyncio.run(webcheck.run_web(tmp_path, "index.html"))
     assert report == "✅ 정상 실행"
     assert shot == "SHOTDATA"
+
+
+def test_headless_browser_receives_sanitized_environment(monkeypatch, tmp_path):
+    """웹 검증용 Edge 프로세스도 sidecar/NVIDIA 키를 상속하지 않는다."""
+    html = tmp_path / "index.html"
+    html.write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setenv("AISO_AUTH_TOKEN", "sidecar-canary")
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvidia-canary")
+    monkeypatch.setenv("AISO_VISIBLE_LOCALE", "ko-KR")
+    captured: dict[str, object] = {}
+
+    def launch(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop after launch options")
+
+    class FakePlaywrightContext:
+        def __enter__(self):
+            chromium = types.SimpleNamespace(launch=launch)
+            return types.SimpleNamespace(chromium=chromium)
+
+        def __exit__(self, *_args):
+            return False
+
+    sync_api = types.ModuleType("playwright.sync_api")
+    sync_api.sync_playwright = lambda: FakePlaywrightContext()
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+
+    report, shot = webcheck._run_web_sync(html, "index.html")
+
+    child_env = captured["env"]
+    assert isinstance(child_env, dict)
+    assert "AISO_AUTH_TOKEN" not in child_env
+    assert "NVIDIA_API_KEY" not in child_env
+    assert child_env["AISO_VISIBLE_LOCALE"] == "ko-KR"
+    assert "검증 불가" in report
+    assert shot is None

@@ -338,6 +338,21 @@ def test_tools_exposed_when_bot_online(env, monkeypatch):
     assert "디스코드 서버 구성" in fc.payloads[0]["messages"][0]["content"]
 
 
+def test_partial_discord_policy_only_describes_exposed_tools(env, monkeypatch):
+    """개별 토글을 끈 도구를 프롬프트가 다시 요구하지 않는다."""
+    fc = FakeChat([{"content": "완료"}])
+    monkeypatch.setattr(agent.discordops, "available", lambda: True)
+    env.run(fc, enabled_tools=["discord_send"], approval_mode="auto")
+
+    tool_names = {t["function"]["name"] for t in fc.payloads[0]["tools"]}
+    assert tool_names == {"discord_send"}
+    sys_text = fc.payloads[0]["messages"][0]["content"]
+    assert "discord_send(channel, message)" in sys_text
+    assert "discord_server_map" not in sys_text
+    assert "discord_server_apply" not in sys_text
+    assert "discord_schedule_add" not in sys_text
+
+
 def test_apply_forces_approval_even_in_auto_mode(env, monkeypatch):
     """서버 변경(apply)은 자동 모드에서도 반드시 승인 — 거부하면 실행되지 않는다."""
     monkeypatch.setattr(agent.discordops, "available", lambda: True)

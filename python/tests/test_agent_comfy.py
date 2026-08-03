@@ -842,9 +842,11 @@ def test_generate_image_is_hidden_and_blocked_without_explicit_user_intent(env, 
     assert "generate_image" not in exposed
     assert attempts == 0
     assert "image_result" not in types(events)
-    blocked = next(event for event in events if event.get("type") == "tool_result")
-    assert blocked["ok"] is False
-    assert "명확한 이미지 생성 지시가 없어" in blocked["output"]
+    # 의도 조건 때문에 스키마에서 빠진 도구는 개별 호출 이벤트조차 만들지 않고
+    # 턴 전체를 fail-closed 한다. 모델이 이름을 지어 호출해도 실행 경계를 우회할 수 없다.
+    assert not any(event.get("type") in {"tool_call", "tool_result"} for event in events)
+    blocked = next(event["error"] for event in events if event.get("type") == "error")
+    assert "현재 실행 범위 밖" in blocked and "generate_image" in blocked
 
 
 def test_generate_image_is_not_exposed_without_registered_profile(env):

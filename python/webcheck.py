@@ -14,6 +14,7 @@ import asyncio
 import base64
 from pathlib import Path
 
+from process_env import sanitized_child_environment
 from tools import ToolError, _resolve
 
 # 캔버스가 실제로 그려졌는지 검사 (모든 픽셀이 같으면 = 빈 화면 = 렌더링 안 됨)
@@ -253,7 +254,11 @@ def _run_web_sync(target: Path, rel: str, actions: list | None = None) -> tuple[
     action_section = ""
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(channel="msedge", headless=True)
+            browser = p.chromium.launch(
+                channel="msedge",
+                headless=True,
+                env=sanitized_child_environment(),
+            )
             try:
                 page = browser.new_page(viewport={"width": 900, "height": 620})
                 page.set_default_timeout(PAGE_OP_TIMEOUT_MS)  # 조작·스크린샷이 무한 대기하지 않도록

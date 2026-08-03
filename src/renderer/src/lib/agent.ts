@@ -66,6 +66,8 @@ export async function streamAgent(
     throw new Error('NVIDIA Agent 실행 승인이 준비되지 않았습니다.')
   }
   const lastUserText = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
+  const enabledTools = settings.agentToolPolicy[target.provider]
+  const enabledToolSet = new Set(enabledTools)
   const comfySelectionMode = settings.comfyModelSelectionMode === 'manual' ? 'manual' : 'auto'
   const selectedComfyModelId =
     comfySelectionMode === 'manual' && typeof comfySelection?.selectedComfyModelId === 'string'
@@ -89,15 +91,22 @@ export async function streamAgent(
       approval_mode: approvalMode,
       session_id: sessionId,
       ollama_host: settings.ollamaHost,
-      rag_enabled: target.provider === 'nvidia' ? false : settings.ragEnabled,
+      rag_enabled: target.provider === 'nvidia'
+        ? false
+        : settings.ragEnabled && enabledToolSet.has('search_docs'),
       rag_top_k: settings.ragTopK,
       keep_alive: settings.keepAlive,
-      comfy_base_url: target.provider === 'nvidia' ? null : settings.comfyBaseUrl,
-      comfy_profiles: target.provider === 'nvidia' ? [] : comfyProfiles,
+      comfy_base_url: target.provider === 'nvidia' || !enabledToolSet.has('generate_image')
+        ? null
+        : settings.comfyBaseUrl,
+      comfy_profiles: target.provider === 'nvidia' || !enabledToolSet.has('generate_image')
+        ? []
+        : comfyProfiles,
       comfy_selection_mode: target.provider === 'nvidia' ? 'auto' : comfySelectionMode,
       ...(target.provider !== 'nvidia' && selectedComfyModelId
         ? { selected_comfy_model_id: selectedComfyModelId }
-        : {})
+        : {}),
+      ...(target.provider === 'ollama' ? { enabled_tools: enabledTools } : {})
     }),
     signal
   })

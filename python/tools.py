@@ -24,6 +24,26 @@ MAX_GREP_FILES = 5000             # 스캔 파일 수 상한
 MAX_GREP_FILE_BYTES = 5 * 1024 * 1024  # 이보다 큰 파일은 스캔 제외
 MAX_MATCH_LINE_LEN = 300          # 매치 라인 표시 길이
 MAX_GLOB_RESULTS = 300            # glob 결과 파일 수 상한
+MAX_CODE_FILE_BYTES = 2 * 1024 * 1024
+
+_CODE_FILE_SUFFIXES = frozenset({
+    ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
+    ".html", ".htm", ".css", ".scss", ".sass", ".less", ".vue", ".svelte",
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".cs", ".java", ".kt", ".kts",
+    ".go", ".rs", ".swift", ".dart", ".lua", ".rb", ".php", ".sh", ".ps1", ".bat", ".cmd",
+    ".gd", ".shader", ".hlsl", ".glsl", ".compute", ".usf", ".ush",
+    ".json", ".jsonc", ".yaml", ".yml", ".toml", ".xml", ".ini", ".cfg", ".conf",
+    ".sql", ".graphql", ".proto", ".txt", ".csv",
+    ".sln", ".csproj", ".fsproj", ".vbproj", ".vcxproj", ".props", ".targets",
+    ".uproject", ".uplugin", ".unity", ".asmdef",
+})
+_CODE_FILE_NAMES = frozenset({
+    "dockerfile", "makefile", "cmakelists.txt", "meson.build", "justfile",
+    "requirements.txt", "pyproject.toml", "package.json", "tsconfig.json",
+    ".gitignore", ".gitattributes", ".editorconfig",
+})
+_CODE_BLOCKED_PARTS = frozenset({".git", ".aiso", "node_modules", ".venv", "venv", "__pycache__"})
+_CODE_SECRET_SUFFIXES = frozenset({".pem", ".key", ".pfx", ".p12", ".cer", ".crt"})
 
 
 class ToolError(Exception):
@@ -63,14 +83,82 @@ def _resolve(root: Path, rel: str) -> Path:
 
 
 def _require_doc(target: Path, path: str) -> None:
-    """문서 쓰기는 마크다운(.md)만 허용 — 이 에이전트는 사용자의 프로그램 코드를 대신
-    작성·편집하지 않는다. 자동화가 필요하면 create_skill로 스킬을 만든다(별도 경로)."""
+    """Keep Markdown authoring separate from the optional project-code tools."""
     if target.suffix.lower() != ".md":
         raise ToolError(
             f"문서는 마크다운(.md)만 작성·편집할 수 있습니다. '{path}'는 허용되지 않습니다. "
-            "이 에이전트는 프로그램 코드를 직접 작성하지 않습니다 — 반복 자동화가 필요하면 "
-            "create_skill로 스킬을 만드세요."
+            "프로젝트 코드는 설정 > 도구에서 별도로 허용한 코드 작성·편집 도구를 사용하세요."
         )
+
+
+def _require_code_file(root: Path, target: Path, path: str) -> None:
+    """프로젝트 코드 도구가 다룰 수 있는 UTF-8 텍스트 소스·설정 경로인지 확인한다."""
+    try:
+        relative_parts = tuple(part.lower() for part in target.relative_to(root).parts)
+    except ValueError as error:
+        raise ToolError(f"작업 폴더 밖 경로 접근이 거부되었습니다: {path}") from error
+    if any(part in _CODE_BLOCKED_PARTS for part in relative_parts[:-1]):
+        raise ToolError("저장소 제어·의존성·가상환경 폴더의 파일은 코드 도구로 편집할 수 없습니다.")
+    lower_name = target.name.lower()
+    if lower_name == ".env" or lower_name.startswith(".env.") or target.suffix.lower() in _CODE_SECRET_SUFFIXES:
+        raise ToolError("비밀값이나 인증서 파일은 코드 도구로 작성·편집할 수 없습니다.")
+    if lower_name not in _CODE_FILE_NAMES and target.suffix.lower() not in _CODE_FILE_SUFFIXES:
+        raise ToolError(
+            f"지원하지 않는 프로젝트 텍스트 파일 형식입니다: {path}. "
+            "소스 코드·스크립트·일반 프로젝트 설정 파일만 허용됩니다."
+        )
+
+
+def _read_utf8_code_file(target: Path, path: str) -> str:
+    if not target.is_file():
+        raise ToolError(f"파일이 없습니다: {path}")
+    data = target.read_bytes()
+    if len(data) > MAX_CODE_FILE_BYTES:
+        raise ToolError(f"코드 파일이 {MAX_CODE_FILE_BYTES // (1024 * 1024)}MB 상한을 넘습니다: {path}")
+    if b"\x00" in data:
+        raise ToolError(f"바이너리 파일은 코드 도구로 편집할 수 없습니다: {path}")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ToolError(f"UTF-8이 아닌 파일은 손상 방지를 위해 편집하지 않습니다: {path}") from error
+
+
+def _validate_code_content(content: str) -> None:
+    if not isinstance(content, str):
+        raise ToolError("파일 내용은 문자열이어야 합니다.")
+    if "\x00" in content:
+        raise ToolError("NUL 문자가 포함된 바이너리 내용은 코드 파일로 저장할 수 없습니다.")
+    if len(content.encode("utf-8")) > MAX_CODE_FILE_BYTES:
+        raise ToolError(f"작성할 코드가 {MAX_CODE_FILE_BYTES // (1024 * 1024)}MB 상한을 넘습니다.")
+
+
+def _dominant_newline(text: str) -> str | None:
+    """Return the existing file's dominant newline without rewriting untouched text."""
+    crlf_count = text.count("\r\n")
+    lf_count = text.count("\n") - crlf_count
+    cr_count = text.count("\r") - crlf_count
+    if crlf_count == lf_count == cr_count == 0:
+        return None
+    if crlf_count >= lf_count and crlf_count >= cr_count:
+        return "\r\n"
+    if lf_count >= cr_count:
+        return "\n"
+    return "\r"
+
+
+def _normalize_edit_newlines(value: str, newline: str | None) -> str:
+    if newline is None or not any(marker in value for marker in ("\r", "\n")):
+        return value
+    canonical = value.replace("\r\n", "\n").replace("\r", "\n")
+    return canonical if newline == "\n" else canonical.replace("\n", newline)
+
+
+def _prepare_code_edit(text: str, old_string: str, new_string: str) -> tuple[str, str]:
+    """Match model-supplied LF snippets to the file while preserving its newline style."""
+    newline = _dominant_newline(text)
+    old = old_string if old_string in text else _normalize_edit_newlines(old_string, newline)
+    new = _normalize_edit_newlines(new_string, newline)
+    return old, new
 
 
 def _rel(root: Path, target: Path) -> str:
@@ -463,6 +551,84 @@ def multi_edit(root: Path, path: str, edits: list) -> str:
     return f"{_rel(root, target)} 파일을 편집함 ({len(edits)}개 편집, {applied}곳 치환)."
 
 
+def write_code_file(root: Path, path: str, content: str = "") -> str:
+    target = _resolve(root, path)
+    _require_code_file(root, target, path)
+    _validate_code_content(content)
+    if target.is_dir():
+        raise ToolError(f"폴더에는 쓸 수 없습니다: {path}")
+    existed = target.is_file()
+    if existed:
+        _read_utf8_code_file(target, path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Write exact UTF-8 bytes so an existing/model-supplied CRLF is not translated
+    # into CRCRLF by Windows text-mode newline conversion.
+    target.write_bytes(content.encode("utf-8"))
+    verb = "덮어씀" if existed else "생성함"
+    return f"{_rel(root, target)} 코드 파일을 {verb} ({len(content)}자)."
+
+
+def edit_code_file(root: Path, path: str, old_string: str, new_string: str) -> str:
+    target = _resolve(root, path)
+    _require_code_file(root, target, path)
+    text = _read_utf8_code_file(target, path)
+    _validate_code_content(new_string)
+    if not isinstance(old_string, str):
+        raise ToolError("old_string은 문자열이어야 합니다.")
+    if old_string == "":
+        raise ToolError("old_string이 비어 있습니다.")
+    old_string, new_string = _prepare_code_edit(text, old_string, new_string)
+    if old_string == new_string:
+        raise ToolError("old_string과 new_string이 같습니다.")
+    count = text.count(old_string)
+    if count == 0:
+        raise ToolError("old_string과 일치하는 내용을 찾지 못했습니다.")
+    if count > 1:
+        raise ToolError(f"old_string이 {count}곳에서 발견되었습니다. 더 긴 맥락으로 유일하게 지정하세요.")
+    updated = text.replace(old_string, new_string, 1)
+    _validate_code_content(updated)
+    target.write_bytes(updated.encode("utf-8"))
+    return f"{_rel(root, target)} 코드 파일을 편집함 (1곳 치환)."
+
+
+def multi_edit_code_file(root: Path, path: str, edits: list) -> str:
+    """UTF-8 프로젝트 파일에 여러 편집을 검증한 뒤 한 번에 적용한다."""
+    target = _resolve(root, path)
+    _require_code_file(root, target, path)
+    text = _read_utf8_code_file(target, path)
+    if not isinstance(edits, list) or not edits:
+        raise ToolError("적용할 편집(edits)이 없습니다.")
+    applied = 0
+    for index, edit in enumerate(edits, 1):
+        if not isinstance(edit, dict):
+            raise ToolError(f"{index}번째 편집 형식이 올바르지 않습니다.")
+        old = edit.get("old_string", "")
+        new = edit.get("new_string", "")
+        replace_all = edit.get("replace_all", False)
+        if not isinstance(old, str) or not isinstance(new, str):
+            raise ToolError(f"{index}번째 편집 내용은 문자열이어야 합니다.")
+        if not isinstance(replace_all, bool):
+            raise ToolError(f"{index}번째 편집의 replace_all은 boolean이어야 합니다.")
+        if old == "":
+            raise ToolError(f"{index}번째 편집의 old_string이 비어 있습니다.")
+        old, new = _prepare_code_edit(text, old, new)
+        if old == new:
+            raise ToolError(f"{index}번째 편집: old_string과 new_string이 같습니다.")
+        count = text.count(old)
+        if count == 0:
+            raise ToolError(f"{index}번째 편집: old_string과 일치하는 내용을 찾지 못했습니다.")
+        if count > 1 and not replace_all:
+            raise ToolError(
+                f"{index}번째 편집: old_string이 {count}곳에서 발견되었습니다. "
+                "replace_all=true로 지정하거나 더 긴 맥락으로 유일하게 지정하세요."
+            )
+        text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+        applied += count if replace_all else 1
+    _validate_code_content(text)
+    target.write_bytes(text.encode("utf-8"))
+    return f"{_rel(root, target)} 코드 파일을 편집함 ({len(edits)}개 편집, {applied}곳 치환)."
+
+
 def _trash_or_remove(target: Path, is_dir: bool) -> str:
     """Move to the recycle bin, or fail without deleting anything.
 
@@ -545,6 +711,9 @@ _DISPATCH = {
     "write_file": write_file,
     "edit_file": edit_file,
     "multi_edit": multi_edit,
+    "write_code_file": write_code_file,
+    "edit_code_file": edit_code_file,
+    "multi_edit_code_file": multi_edit_code_file,
     "delete_file": delete_file,
     "delete_dir": delete_dir,
     "move": move,
@@ -678,7 +847,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "파일을 생성하거나 전체 내용을 덮어쓴다. 새 파일 작성 또는 전면 재작성에 사용.",
+            "description": "마크다운(.md) 문서를 생성하거나 전체 내용을 덮어쓴다. 프로젝트 코드는 write_code_file을 사용한다.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -693,7 +862,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "파일에서 old_string을 찾아 new_string으로 정확히 1곳 치환한다. 부분 수정에 사용.",
+            "description": "마크다운(.md) 문서에서 old_string을 찾아 new_string으로 정확히 1곳 치환한다.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -709,7 +878,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "multi_edit",
-            "description": "한 파일에 여러 개의 찾기·바꾸기 편집을 순서대로 원자적으로(전부 성공 또는 전부 취소) 적용한다. 같은 파일을 여러 번 edit_file 하는 대신 이걸 한 번 호출하라. 편집은 위에서부터 차례로 적용되고, 하나라도 실패하면 파일은 전혀 바뀌지 않는다. old_string은 유일해야 하며, 여러 곳을 바꾸려면 replace_all=true.",
+            "description": "마크다운(.md) 문서 하나에 여러 찾기·바꾸기를 순서대로 검증한 뒤 한 번에 적용한다. 프로젝트 코드는 multi_edit_code_file을 사용한다.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -723,6 +892,64 @@ TOOL_SCHEMAS = [
                                 "old_string": {"type": "string", "description": "바꿀 기존 내용."},
                                 "new_string": {"type": "string", "description": "새 내용."},
                                 "replace_all": {"type": "boolean", "description": "일치하는 모든 곳을 바꿀지(기본 false)."},
+                            },
+                            "required": ["old_string", "new_string"],
+                        },
+                    },
+                },
+                "required": ["path", "edits"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_code_file",
+            "description": "프로젝트의 UTF-8 소스 코드·스크립트·설정 파일을 새로 만들거나 전체 내용을 덮어쓴다. .git·의존성·가상환경·비밀값 경로와 바이너리 파일은 거부한다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "작업 폴더 기준 프로젝트 파일 상대경로."},
+                    "content": {"type": "string", "description": "파일에 쓸 UTF-8 전체 내용."},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_code_file",
+            "description": "기존 UTF-8 프로젝트 파일에서 유일한 old_string 한 곳을 new_string으로 치환한다. 코드의 국소 수정에 사용한다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "작업 폴더 기준 프로젝트 파일 상대경로."},
+                    "old_string": {"type": "string", "description": "파일 안에서 유일해야 하는 기존 내용."},
+                    "new_string": {"type": "string", "description": "대체할 새 내용."},
+                },
+                "required": ["path", "old_string", "new_string"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "multi_edit_code_file",
+            "description": "UTF-8 프로젝트 파일 하나에 여러 찾기·바꾸기를 순서대로 검증한 뒤 한 번에 적용한다. 하나라도 실패하면 파일을 쓰지 않는다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "작업 폴더 기준 프로젝트 파일 상대경로."},
+                    "edits": {
+                        "type": "array",
+                        "description": "순서대로 적용할 편집 목록.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_string": {"type": "string", "description": "바꿀 기존 내용."},
+                                "new_string": {"type": "string", "description": "새 내용."},
+                                "replace_all": {"type": "boolean", "description": "모든 일치 항목을 바꿀지 여부."},
                             },
                             "required": ["old_string", "new_string"],
                         },

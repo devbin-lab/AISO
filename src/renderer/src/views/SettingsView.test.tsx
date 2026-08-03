@@ -275,6 +275,94 @@ describe('SettingsView', () => {
     expect(details?.open).toBe(true)
   })
 
+  it('keeps provider tool policies independent and disables unsupported NVIDIA tools', async () => {
+    const user = userEvent.setup()
+    const onSave = vi.fn().mockResolvedValue(true)
+    const programmingTools = [
+      ['write_code_file', '프로젝트 코드 파일을 작성합니다.'],
+      ['edit_code_file', '프로젝트 코드 파일을 편집합니다.'],
+      ['multi_edit_code_file', '여러 코드 파일을 편집합니다.'],
+      ['run_web', '웹 프로젝트를 실행해 검증합니다.'],
+      ['run_code', '코드를 실행해 검증합니다.'],
+      ['run_command', '허용된 명령을 실행합니다.']
+    ].map(([name, description]) => ({
+      name,
+      description,
+      category: 'programming',
+      parameters: [],
+      mutates: true,
+      approval: { manual: true, read: true, auto: true },
+      availability: 'workspace',
+      requirements: ['작업 폴더 선택']
+    }))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        tools: [
+          ...programmingTools,
+          {
+            name: 'web_search',
+            description: '인터넷 검색 결과를 조회합니다.',
+            category: 'research',
+            parameters: [],
+            mutates: false,
+            approval: { manual: false, read: false, auto: false },
+            availability: 'always',
+            requirements: []
+          }
+        ]
+      })
+    }))
+
+    render(
+      <SettingsView
+        settings={DEFAULT_SETTINGS}
+        backend={READY_BACKEND}
+        health={null}
+        onSave={onSave}
+        active
+      />
+    )
+    await user.click(screen.getByRole('button', { name: '도구' }))
+    expect(await screen.findByText('코드 파일 작성')).not.toBeNull()
+
+    const localProgramming = screen.getByRole('checkbox', {
+      name: '로컬 모델 프로젝트 프로그래밍'
+    }) as HTMLInputElement
+    expect(localProgramming.checked).toBe(false)
+    await user.click(localProgramming)
+    expect(localProgramming.checked).toBe(true)
+
+    await user.click(screen.getByRole('button', { name: 'NVIDIA' }))
+    const nvidiaProgramming = screen.getByRole('checkbox', {
+      name: 'NVIDIA 프로젝트 프로그래밍'
+    }) as HTMLInputElement
+    expect(nvidiaProgramming.checked).toBe(false)
+
+    const nvidiaCommand = screen.getByRole('checkbox', { name: '명령 실행 사용' }) as HTMLInputElement
+    await user.click(nvidiaCommand)
+    expect(nvidiaCommand.checked).toBe(true)
+
+    const unsupportedSearch = screen.getByRole('checkbox', { name: '웹 검색 사용' }) as HTMLInputElement
+    expect(unsupportedSearch.disabled).toBe(true)
+    expect(screen.getByText('현재 NVIDIA Agent 미지원')).not.toBeNull()
+
+    await user.click(screen.getByRole('button', { name: '저장' }))
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1))
+    const saved = onSave.mock.calls[0]?.[0]
+    expect(saved.agentToolPolicy.ollama).toEqual(expect.arrayContaining([
+      'write_code_file',
+      'edit_code_file',
+      'multi_edit_code_file',
+      'run_web',
+      'run_code',
+      'run_command'
+    ]))
+    expect(saved.agentToolPolicy.nvidia).toContain('run_command')
+    expect(saved.agentToolPolicy.nvidia).not.toContain('write_code_file')
+    expect(saved.agentToolPolicy.nvidia).not.toContain('web_search')
+  })
+
   it('preserves an unsaved ComfyUI value when unrelated external settings change', async () => {
     const user = userEvent.setup()
     const onSave = vi.fn().mockResolvedValue(true)

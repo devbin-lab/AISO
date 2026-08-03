@@ -4,6 +4,7 @@ export type ApprovalMode = 'manual' | 'read' | 'auto'
 export type AgentToolCategory =
   | 'plan'
   | 'files'
+  | 'programming'
   | 'execution'
   | 'research'
   | 'automation'
@@ -140,6 +141,9 @@ export const TOOL_LABEL: Record<string, string> = {
   write_file: '파일 쓰기',
   edit_file: '파일 편집',
   multi_edit: '다중 편집',
+  write_code_file: '코드 파일 작성',
+  edit_code_file: '코드 파일 편집',
+  multi_edit_code_file: '코드 일괄 편집',
   delete_file: '파일 삭제',
   delete_dir: '폴더 삭제',
   move: '이동·이름변경',

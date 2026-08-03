@@ -106,6 +106,76 @@ test('automatic scope comes only from saved workspace RAG and private Comfy read
   )
 })
 
+test('automatic scope is derived only from the saved NVIDIA tool policy', () => {
+  const base = settings()
+  const localOnlyPolicy: ReturnType<typeof settings> = {
+    ...base,
+    agentToolPolicy: {
+      ollama: ['list_dir', 'search_docs', 'generate_image'],
+      nvidia: []
+    }
+  }
+
+  assert.deepEqual(buildAutomaticNvidiaAgentDataScope(
+    localOnlyPolicy,
+    [readyProfile('enabled-ready', true)]
+  ), { workspace: false, rag: false, image: false })
+})
+
+test('allowed tools and fingerprint bind the exact saved NVIDIA policy', () => {
+  const base = settings()
+  const scopedSettings: ReturnType<typeof settings> = {
+    ...base,
+    agentToolPolicy: {
+      ollama: ['delete_dir'],
+      nvidia: [
+        'update_plan',
+        'list_dir',
+        'write_code_file',
+        'run_command',
+        'search_docs',
+        'generate_image'
+      ]
+    }
+  }
+  const request = { workspace: true, rag: true, image: true }
+  const authority = buildNvidiaAgentManifestAuthority(
+    scopedSettings,
+    session,
+    request,
+    [readyProfile('enabled-ready', true)]
+  )
+
+  assert.deepEqual(authority.executionScope.allowedTools, [
+    'update_plan',
+    'list_dir',
+    'write_code_file',
+    'run_command',
+    'search_docs',
+    'generate_image'
+  ])
+  assert.deepEqual(authority.manifest.allowedTools, authority.executionScope.allowedTools)
+  assert.equal(authority.executionScope.allowedTools.includes('delete_dir'), false)
+
+  const changedPolicy = buildNvidiaAgentManifestAuthority(
+    {
+      ...scopedSettings,
+      agentToolPolicy: {
+        ...scopedSettings.agentToolPolicy,
+        nvidia: scopedSettings.agentToolPolicy.nvidia.filter((tool) => tool !== 'run_command')
+      }
+    },
+    session,
+    request,
+    [readyProfile('enabled-ready', true)]
+  )
+  assert.notEqual(authority.executionScope.fingerprint, changedPolicy.executionScope.fingerprint)
+
+  const store = new NvidiaAgentDataApprovalStore()
+  store.authorizePolicy(authority)
+  assert.throws(() => store.requireExact(session, changedPolicy), /다시 승인이 필요/)
+})
+
 test('policy authorization binds the permission mode into the exact fingerprint', () => {
   const store = new NvidiaAgentDataApprovalStore()
   const read = buildNvidiaAgentManifestAuthority(
