@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { AppSettings } from '../shared/settings'
 import type {
   NvidiaCredentialBindingInput,
@@ -20,11 +20,18 @@ import type {
   Conversation,
   ConversationKind,
   ConversationMeta,
-  ConversationSave
+  ConversationSave,
+  AgentProject
 } from '../shared/conversation'
 import type { SkillMeta } from '../shared/skill'
 import type { DiscordStatus, DiscordSchedule } from '../shared/discord'
 import type { ComfyLaunchResult, ComfySurfaceRequest } from '../shared/comfy'
+import type { AttachmentDropEvent, AttachmentRef } from '../shared/attachments'
+import type {
+  MyDbDropEvent,
+  MyDbImportResult,
+  MyDbRelation
+} from '../shared/mydb'
 import type {
   ComfyModelImportProgress,
   ComfyModelImportRequest,
@@ -43,6 +50,106 @@ try {
 } catch {
   backendTokenCache = ''
 }
+
+// A DOM File must be resolved in the preload's own world. Passing it through
+// contextBridge first turns it into a cloned object and webUtils can no longer
+// recover the Explorer path reliably.
+const attachmentDropListeners = new Set<(event: AttachmentDropEvent) => void>()
+const myDbDropListeners = new Set<(event: MyDbDropEvent) => void>()
+
+function attachmentDropTarget(event: DragEvent): string {
+  for (const node of event.composedPath()) {
+    if (node instanceof HTMLElement) {
+      const targetId = node.dataset.aisoAttachmentDropTarget
+      if (targetId) return targetId
+      if (node.classList.contains('composer')) {
+        const picker = node.querySelector<HTMLElement>('[data-aiso-attachment-drop-target]')
+        if (picker?.dataset.aisoAttachmentDropTarget) {
+          return picker.dataset.aisoAttachmentDropTarget
+        }
+      }
+    }
+  }
+  return ''
+}
+
+function myDbDropTarget(event: DragEvent): string {
+  for (const node of event.composedPath()) {
+    if (node instanceof HTMLElement) {
+      const targetId = node.dataset.aisoMydbDropTarget
+      if (targetId) return targetId
+    }
+  }
+  return ''
+}
+
+function myDbDropParentId(targetId: string): string | undefined {
+  const prefix = 'mydb:'
+  if (!targetId.startsWith(prefix)) return undefined
+  const id = targetId.slice(prefix.length).trim()
+  return id || undefined
+}
+
+window.addEventListener('dragover', (event) => {
+  if (myDbDropTarget(event) || attachmentDropTarget(event)) event.preventDefault()
+}, true)
+
+window.addEventListener('drop', (event) => {
+  const myDbTargetId = myDbDropTarget(event)
+  if (myDbTargetId) {
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    const paths = Array.from(event.dataTransfer?.files ?? [])
+      .map((file) => webUtils.getPathForFile(file))
+      .filter((path) => path.length > 0)
+    if (paths.length === 0) {
+      for (const listener of myDbDropListeners) {
+        listener({ targetId: myDbTargetId, status: 'error', error: '파일 또는 폴더를 탐색기에서 끌어 놓아 주세요.' })
+      }
+      return
+    }
+    for (const listener of myDbDropListeners) listener({ targetId: myDbTargetId, status: 'start' })
+    void ipcRenderer.invoke('mydb:import-dropped', paths, myDbDropParentId(myDbTargetId))
+      .then((result: MyDbImportResult) => {
+        for (const listener of myDbDropListeners) {
+          listener({ targetId: myDbTargetId, status: 'done', result })
+        }
+      })
+      .catch((reason: unknown) => {
+        const error = reason instanceof Error ? reason.message : 'My DB에 파일을 추가하지 못했습니다.'
+        for (const listener of myDbDropListeners) {
+          listener({ targetId: myDbTargetId, status: 'error', error })
+        }
+      })
+    return
+  }
+  const targetId = attachmentDropTarget(event)
+  if (!targetId) return
+  event.preventDefault()
+  event.stopImmediatePropagation()
+  const paths = Array.from(event.dataTransfer?.files ?? [])
+    .map((file) => webUtils.getPathForFile(file))
+    .filter((path) => path.length > 0)
+  if (paths.length === 0) {
+    for (const listener of attachmentDropListeners) {
+      listener({ targetId, status: 'error', error: 'Explorer에서 파일 또는 폴더를 끌어 놓아 주세요.' })
+    }
+    return
+  }
+  for (const listener of attachmentDropListeners) listener({ targetId, status: 'start' })
+  void ipcRenderer.invoke('attachments:import-dropped', paths)
+    .then((attachments: AttachmentRef[]) => {
+      for (const listener of attachmentDropListeners) {
+        listener({ targetId, status: 'done', attachments })
+      }
+    })
+    .catch((reason: unknown) => {
+      const error = reason instanceof Error ? reason.message : '드롭한 자료를 첨부하지 못했습니다.'
+      for (const listener of attachmentDropListeners) {
+        listener({ targetId, status: 'error', error })
+      }
+    })
+}, true)
 
 // 렌더러에 노출할 Aiso 전용 API (여기에 점점 기능을 추가한다)
 // sandbox: true 환경이라 preload는 'electron' 모듈만 사용한다 (외부 npm require 불가)
@@ -103,6 +210,50 @@ const api = {
     }
   },
   pickWorkspace: (): Promise<string | null> => ipcRenderer.invoke('workspace:pick'),
+  attachments: {
+    pickFiles: (): Promise<AttachmentRef[]> => ipcRenderer.invoke('attachments:pick-files'),
+    pickFolder: (): Promise<AttachmentRef[]> => ipcRenderer.invoke('attachments:pick-folder'),
+    onDrop: (cb: (event: AttachmentDropEvent) => void): (() => void) => {
+      attachmentDropListeners.add(cb)
+      return () => attachmentDropListeners.delete(cb)
+    }
+  },
+  myDb: {
+    state: () => ipcRenderer.invoke('mydb:state'),
+    history: () => ipcRenderer.invoke('mydb:history'),
+    restoreGraphCheckpoint: (checkpointId: string) => ipcRenderer.invoke('mydb:restore-graph-checkpoint', checkpointId),
+    pickSourceForFile: (itemId: string) => ipcRenderer.invoke('mydb:pick-source-for-file', itemId),
+    exportCore: (coreId: string) => ipcRenderer.invoke('mydb:export-core', coreId),
+    fileHistory: (itemId: string) => ipcRenderer.invoke('mydb:file-history', itemId),
+    compareRevisions: (itemId: string, beforeRevisionId: string, afterRevisionId: string) =>
+      ipcRenderer.invoke('mydb:compare-revisions', itemId, beforeRevisionId, afterRevisionId),
+    restoreRevision: (itemId: string, revisionId: string) =>
+      ipcRenderer.invoke('mydb:restore-revision', itemId, revisionId),
+    storageRoot: () => ipcRenderer.invoke('mydb:storage-root'),
+    pickStorageRoot: () => ipcRenderer.invoke('mydb:pick-storage-root'),
+    clearAll: () => ipcRenderer.invoke('mydb:clear-all'),
+    trash: () => ipcRenderer.invoke('mydb:trash'),
+    createCore: (title: string, parentCoreId?: string | null) =>
+      ipcRenderer.invoke('mydb:create-core', title, parentCoreId),
+    renameNode: (id: string, title: string) => ipcRenderer.invoke('mydb:rename-node', { id }, title),
+    deleteNode: (id: string, options?: { cascade?: boolean }) =>
+      ipcRenderer.invoke('mydb:delete-node', { id }, options),
+    restoreNode: (id: string) => ipcRenderer.invoke('mydb:restore-node', { id }),
+    link: (sourceId: string, targetId: string, relation?: MyDbRelation) =>
+      ipcRenderer.invoke('mydb:link', { id: sourceId }, { id: targetId }, relation),
+    unlink: (edgeId: string) => ipcRenderer.invoke('mydb:unlink-edge', edgeId),
+    pickFiles: (parentCoreId?: string | null) => ipcRenderer.invoke('mydb:pick-files', parentCoreId),
+    pickFolder: (parentCoreId?: string | null) => ipcRenderer.invoke('mydb:pick-folder', parentCoreId),
+    importDropped: (paths: string[], parentCoreId?: string | null) =>
+      ipcRenderer.invoke('mydb:import-dropped', paths, parentCoreId),
+    onDrop: (callback: (event: MyDbDropEvent) => void): (() => void) => {
+      myDbDropListeners.add(callback)
+      return () => myDbDropListeners.delete(callback)
+    },
+    openFolder: () => ipcRenderer.invoke('mydb:open-folder'),
+    openFile: (id: string) => ipcRenderer.invoke('mydb:open-file', id),
+    showInFolder: (id: string) => ipcRenderer.invoke('mydb:show-in-folder', id)
+  },
   comfy: {
     pickInstall: (): Promise<string | null> => ipcRenderer.invoke('comfy:pick-install'),
     start: (): Promise<ComfyLaunchResult> => ipcRenderer.invoke('comfy:start'),
@@ -146,7 +297,16 @@ const api = {
     save: (c: ConversationSave): Promise<Conversation> => ipcRenderer.invoke('conv:save', c),
     setPinned: (id: string, pinned: boolean): Promise<ConversationMeta | null> =>
       ipcRenderer.invoke('conv:pin', id, pinned),
+    rename: (id: string, title: string): Promise<ConversationMeta | null> =>
+      ipcRenderer.invoke('conv:rename', id, title),
     remove: (id: string): Promise<void> => ipcRenderer.invoke('conv:delete', id)
+  },
+  projects: {
+    list: (): Promise<AgentProject[]> => ipcRenderer.invoke('project:list'),
+    create: (title: string): Promise<AgentProject> => ipcRenderer.invoke('project:create', title),
+    createConversation: (projectId: string, title?: string): Promise<ConversationMeta | null> =>
+      ipcRenderer.invoke('project:create-conversation', projectId, title),
+    start: (id: string): Promise<AgentProject | null> => ipcRenderer.invoke('project:start', id)
   },
   skills: {
     list: (): Promise<SkillMeta[]> => ipcRenderer.invoke('skills:list'),

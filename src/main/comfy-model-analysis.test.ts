@@ -9,8 +9,10 @@ import {
   parseSafeTensorsHeader
 } from './comfy-model-analysis.ts'
 import {
+  getEffectiveComfyQualityMode,
   getComfyAgentReadiness,
   getComfyGenerationDefaults,
+  supportsComfyQualityRefinement,
   type ComfyAssetSlot,
   type ComfyModelProfile
 } from '../shared/comfy-model.ts'
@@ -21,6 +23,23 @@ function headerBuffer(value: Record<string, unknown>): Buffer {
   prefix.writeBigUInt64LE(BigInt(header.length), 0)
   return Buffer.concat([prefix, header])
 }
+
+test('quality refinement is limited to the automatic SDXL workflow', () => {
+  const automaticSdxl = { family: 'sdxl' as const, qualityMode: 'refine' as const }
+  const flux = { family: 'flux2' as const, qualityMode: 'refine' as const }
+  const userWorkflow = {
+    family: 'sdxl' as const,
+    qualityMode: 'refine' as const,
+    workflowTemplate: {} as NonNullable<ComfyModelProfile['workflowTemplate']>
+  }
+
+  assert.equal(supportsComfyQualityRefinement(automaticSdxl), true)
+  assert.equal(getEffectiveComfyQualityMode(automaticSdxl), 'refine')
+  assert.equal(supportsComfyQualityRefinement(flux), false)
+  assert.equal(getEffectiveComfyQualityMode(flux), 'base')
+  assert.equal(supportsComfyQualityRefinement(userWorkflow), false)
+  assert.equal(getEffectiveComfyQualityMode(userWorkflow), 'base')
+})
 
 test('모델 메타데이터에서 SDXL을 내부적으로 판별한다', () => {
   const header = parseSafeTensorsHeader(headerBuffer({
@@ -194,6 +213,7 @@ test('FLUX Agent는 연결된 VAE가 있어도 호환 구조가 확인되지 않
     })),
     workflowTemplateId: 'flux1.txt2img.v1',
     defaults: getComfyGenerationDefaults('flux1'),
+    qualityMode: 'base',
     agentEnabled: false,
     priority: 0,
     createdAt: 1,
@@ -227,6 +247,7 @@ test('FLUX.2 Agent는 확산 모델·Qwen 3·FLUX.2 VAE 구성이 완성돼야 �
     })),
     workflowTemplateId: 'flux2.txt2img.v1',
     defaults: getComfyGenerationDefaults('flux2'),
+    qualityMode: 'base',
     agentEnabled: false,
     priority: 0,
     createdAt: 1,
@@ -287,6 +308,7 @@ test('직접 연결 파일은 표시 이름과 무관하게 등록되지만 Agen
     }],
     workflowTemplateId: 'custom.txt2img.v1',
     defaults: getComfyGenerationDefaults('custom'),
+    qualityMode: 'base',
     // 저장 파일이 잘못된 값이어도 readiness가 Agent 경로를 막아야 한다.
     agentEnabled: true,
     priority: 0,

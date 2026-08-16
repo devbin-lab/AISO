@@ -29,6 +29,21 @@ class ChunkStream(httpx.AsyncByteStream):
         self.closed = True
 
 
+class BlockingStream(httpx.AsyncByteStream):
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        self.started.set()
+        await asyncio.Event().wait()
+        if False:  # pragma: no cover - keeps this an async byte iterator
+            yield b""
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 def sse(data: object | str, *, crlf: bool = False) -> bytes:
     value = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     newline = "\r\n" if crlf else "\n"
@@ -229,6 +244,60 @@ def test_api_key_is_only_in_authorization_header_not_url_or_payload():
     assert asyncio.run(collect(adapter))[-1].kind == "done"
 
 
+def test_nvidia_request_allows_only_supported_reasoning_and_template_options():
+    payload = NvidiaAdapter.serialize_request(LlmRequest(
+        model="nvidia/test-model",
+        messages=[{"role": "user", "content": "안녕"}],
+        provider_options={
+            "reasoning_effort": "high",
+            "chat_template_kwargs": {"enable_thinking": False, "unsafe": "ignored"},
+        },
+    ))
+    assert payload["reasoning_effort"] == "high"
+    assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+    ignored = NvidiaAdapter.serialize_request(LlmRequest(
+        model="nvidia/test-model",
+        messages=[],
+        provider_options={"reasoning_effort": "very-high", "chat_template_kwargs": {"other": True}},
+    ))
+    assert "reasoning_effort" not in ignored
+    assert "chat_template_kwargs" not in ignored
+
+
+def test_chat_stream_has_no_response_read_timeout_but_keeps_connection_guards():
+    complete = sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}) + sse("[DONE]")
+
+    def handler(request: httpx.Request):
+        assert request.extensions["timeout"] == {
+            "connect": 10.0,
+            "read": None,
+            "write": 10.0,
+            "pool": 10.0,
+        }
+        return response_for(complete)[0]
+
+    assert asyncio.run(collect(build_adapter(handler)))[-1].kind == "done"
+
+
+def test_explicit_background_response_timeout_preserves_a_finite_guard():
+    complete = sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}) + sse("[DONE]")
+
+    def handler(request: httpx.Request):
+        assert request.extensions["timeout"]["read"] == 240.0
+        return response_for(complete)[0]
+
+    async def run():
+        request = LlmRequest(
+            model="nvidia/test-model",
+            messages=[{"role": "user", "content": "안녕"}],
+            provider_options={"response_read_timeout": 240.0},
+        )
+        return [event async for event in build_adapter(handler).chat_stream(request)]
+
+    assert asyncio.run(run())[-1].kind == "done"
+
+
 def test_user_nim_may_omit_bearer_key_but_stays_on_canonical_endpoint():
     complete = sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}) + sse("[DONE]")
 
@@ -271,6 +340,23 @@ def test_cancellation_closes_http_stream_context_immediately():
         generator = adapter.chat_stream(LlmRequest(model="m", messages=[]))
         event = await generator.__anext__()
         assert event.kind == "content"
+        await generator.aclose()
+
+    asyncio.run(run())
+    assert stream.closed is True
+
+
+def test_cancellation_before_first_response_byte_closes_unbounded_stream():
+    stream = BlockingStream()
+
+    async def run():
+        adapter = build_adapter(lambda _request: httpx.Response(200, stream=stream))
+        generator = adapter.chat_stream(LlmRequest(model="m", messages=[]))
+        pending = asyncio.create_task(generator.__anext__())
+        await asyncio.wait_for(stream.started.wait(), timeout=1.0)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
         await generator.aclose()
 
     asyncio.run(run())

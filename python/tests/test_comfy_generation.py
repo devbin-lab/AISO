@@ -25,8 +25,9 @@ def raw_profile(
     tag: str = "anime",
     priority: int = 10,
     checkpoint: str = "user-anime.safetensors",
+    quality_mode: str | None = None,
 ) -> dict:
-    return {
+    profile = {
         "id": ident,
         "name": name,
         "family": "sdxl",
@@ -59,6 +60,9 @@ def raw_profile(
         "createdAt": 1,
         "updatedAt": 1,
     }
+    if quality_mode is not None:
+        profile["qualityMode"] = quality_mode
+    return profile
 
 
 def raw_flux2_klein_profile() -> dict:
@@ -187,6 +191,22 @@ def sd_node_info(profile: cw.ModelProfile, node_class: str) -> dict:
     return info
 
 
+def latent_upscale_node_info() -> dict:
+    return {
+        "name": "LatentUpscale",
+        "python_module": "nodes",
+        "input": {
+            "required": {
+                "samples": ["LATENT", {}],
+                "upscale_method": [["bislerp"], {}],
+                "width": ["INT", {"min": 64, "max": 2048}],
+                "height": ["INT", {"min": 64, "max": 2048}],
+                "crop": [["disabled"], {}],
+            }
+        },
+    }
+
+
 def flux2_node_info(profile: cw.ModelProfile, node_class: str) -> dict:
     contract = cw.node_contracts_for_architecture(profile.architecture)[node_class]
     required = {name: ["MODEL", {}] for name in contract.required_inputs}
@@ -248,6 +268,8 @@ def install_success_fakes(
         return inventory
 
     async def get_node_info(_base_url, node_class):
+        if node_class == "LatentUpscale":
+            return latent_upscale_node_info()
         info = sd_node_info(normalized[0], node_class)
         if node_class == "CheckpointLoaderSimple":
             info["input"]["required"]["ckpt_name"] = [
@@ -473,6 +495,50 @@ def test_generate_image_uses_typescript_profile_defaults_and_returns_reference_o
     assert image["workflow"] == captured["workflow"]
     assert set(image["workflow"]["2"]) == {"class_type", "inputs"}
     assert "작업 ID" in generation.result_to_tool_text(result)
+
+
+def test_generate_image_uses_optional_builtin_refinement_when_live_contract_is_available(monkeypatch):
+    profile = raw_profile(quality_mode="refine")
+    captured = install_success_fakes(monkeypatch, [profile])
+    result = run(
+        generation.generate_image(
+            base_url="http://127.0.0.1:8188",
+            profiles=[profile],
+            prompt="1girl, pink hair, blue eyes",
+        )
+    )
+
+    assert captured["workflow"]["8"]["class_type"] == "LatentUpscale"
+    assert captured["workflow"]["6"]["inputs"]["samples"] == ["9", 0]
+    assert (result["image"]["baseWidth"], result["image"]["baseHeight"]) == (832, 1216)
+    assert (result["image"]["width"], result["image"]["height"]) == (1216, 1792)
+    assert result["image"]["pipeline"]["nodeCount"] == 9
+    assert result["image"]["pipeline"]["scaleProcess"] is True
+    assert result["image"]["pipeline"]["processingNodes"] == ["LatentUpscale"]
+
+
+def test_generate_image_refine_mode_falls_back_when_optional_node_is_not_available(monkeypatch):
+    profile = raw_profile(quality_mode="refine")
+    captured = install_success_fakes(monkeypatch, [profile])
+    original = comfy_client.get_node_info
+
+    async def missing_optional(base_url, node_class):
+        if node_class == "LatentUpscale":
+            raise comfy_client.ComfyAPIError("required node unavailable")
+        return await original(base_url, node_class)
+
+    monkeypatch.setattr(comfy_client, "get_node_info", missing_optional)
+    result = run(
+        generation.generate_image(
+            base_url="http://127.0.0.1:8188",
+            profiles=[profile],
+            prompt="1girl, pink hair, blue eyes",
+        )
+    )
+
+    assert set(captured["workflow"]) == {"1", "2", "3", "4", "5", "6", "7"}
+    assert result["image"]["pipeline"]["nodeCount"] == 7
+    assert result["image"]["pipeline"]["scaleProcess"] is False
 
 
 def test_generate_image_manual_profile_id_overrides_prompt_and_model_hint(monkeypatch):
@@ -906,3 +972,45 @@ def test_prompt_policy_records_effective_sd_negative_and_safe_workflow(monkeypat
         ],
     }
     assert "프롬프트 정책: SD 품질 네거티브 (sd-negative-quality-v1)" in generation.result_to_tool_text(result)
+
+
+def test_animagine_generation_metadata_matches_submitted_workflow(monkeypatch):
+    profile = raw_profile(
+        ident="animagine-xl-4-opt",
+        name="Animagine XL 4.0 Opt",
+        checkpoint="animagine-xl-4.0-opt.safetensors",
+    )
+    profile["assets"][0]["sha256"] = "6327eca98bfb6538dd7a4edce22484a1bbc57a8cff6b11d075d40da1afb847ac"
+    captured = install_success_fakes(monkeypatch, [profile])
+
+    result = run(generation.generate_image(
+        base_url="http://127.0.0.1:8188",
+        profiles=[profile],
+        prompt="Hatsune Miku; blue hair, no weapon, masterpiece",
+        negative_prompt="custom artifact",
+        seed="17",
+    ))
+
+    image = result["image"]
+    assert image["promptPolicy"]["id"] == cw.ANIMAGINE_XL_4_POLICY_ID
+    assert image["promptPolicy"]["contract"]["variant"] == "4.0 Opt"
+    assert image["effectivePrompt"] == (
+        "1girl, Hatsune Miku, blue hair, masterpiece, high score, great score, absurdres"
+    )
+    assert image["effectiveNegativePrompt"].startswith("custom artifact, weapon, lowres")
+    assert captured["workflow"]["2"]["inputs"]["text"] == image["effectivePrompt"]
+    assert captured["workflow"]["3"]["inputs"]["text"] == image["effectiveNegativePrompt"]
+    assert image["promptNormalization"] == {
+        "positiveChanged": True,
+        "negativeChanged": True,
+        "positiveLength": len(image["effectivePrompt"]),
+        "negativeLength": len(image["effectiveNegativePrompt"]),
+        "maxPromptLength": cw.MAX_PROMPT_LENGTH,
+    }
+    assert cw.ANIMAGINE_XL_4_POLICY_LABEL in result["summary"]
+    assert (
+        f"프롬프트 정책: {cw.ANIMAGINE_XL_4_POLICY_LABEL} ({cw.ANIMAGINE_XL_4_POLICY_ID})"
+        in generation.result_to_tool_text(result)
+    )
+    assert "6327eca98b" not in repr(image["workflow"])
+    assert "X-Aiso-Token" not in repr(image["workflow"])

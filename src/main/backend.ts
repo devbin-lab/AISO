@@ -3,8 +3,11 @@ import { createServer } from 'net'
 import { randomBytes } from 'crypto'
 import { app } from 'electron'
 import { join } from 'path'
-import { existsSync } from 'fs'
+import { existsSync, rmSync } from 'fs'
 import { ensureSkillsDir } from './skills'
+import { attachmentStorePath } from './attachments'
+import { listSavedAgentWorkspaces } from './conversations'
+import { startMyDbAgentBridge, stopMyDbAgentBridge } from './mydb-agent-bridge'
 import type { BackendInfo } from '../shared/backend'
 import type { LlmModelCapabilities, LlmCapabilityState } from '../shared/llm'
 import type {
@@ -30,6 +33,19 @@ let credentialChannelToken = ''
 /** 렌더러(preload)에 노출할 사이드카 인증 토큰. */
 export function backendToken(): string {
   return AUTH_TOKEN
+}
+
+/** Remove Aiso's private ToDo database and the legacy migration index on reset. */
+export function clearBackendTodoWorkspaceRegistry(): void {
+  try {
+    const userData = app.getPath('userData')
+    for (const file of [
+      'document-todos.sqlite3', 'document-todos.sqlite3-wal', 'document-todos.sqlite3-shm',
+      'document-todo-workspaces.json'
+    ]) rmSync(join(userData, file), { force: true })
+  } catch (error) {
+    console.warn('[backend] ToDo data reset failed:', error)
+  }
 }
 
 let proc: ChildProcess | null = null
@@ -241,13 +257,14 @@ export async function clearBackendNvidiaDiscordGrants(): Promise<void> {
 
 async function nvidiaRuntimeRequest(
   path: '/nvidia/models' | '/nvidia/capabilities/probe',
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  timeoutMs = 70_000
 ): Promise<Record<string, unknown>> {
   if (info.state !== 'ready' || info.port === null) throw new Error('사이드카가 준비되지 않았습니다.')
   const response = await fetch(`http://127.0.0.1:${info.port}${path}`, {
     method: 'POST',
     redirect: 'error',
-    signal: AbortSignal.timeout(70_000),
+    signal: AbortSignal.timeout(timeoutMs),
     headers: {
       'Content-Type': 'application/json',
       'X-Aiso-Token': AUTH_TOKEN
@@ -289,7 +306,10 @@ export async function probeBackendNvidiaCapabilities(
     deployment_mode: deploymentMode,
     endpoint,
     model
-  })
+  // The sidecar enforces one ten-minute total model budget across its basic
+  // stream and tool-protocol checks. Leave a small transport margin so Electron
+  // does not turn that completed result into an unrelated local proxy timeout.
+  }, 610_000)
   const capabilities = result.capabilities
   if (!capabilities || typeof capabilities !== 'object') {
     throw new Error('NVIDIA capability 응답 형식이 올바르지 않습니다.')
@@ -406,6 +426,10 @@ export async function startBackend(ollamaHost: string): Promise<void> {
   const toolsDir = app.isPackaged ? process.resourcesPath : app.getAppPath()
   // 스킬 저장소 — 사이드카(create_skill/run_skill)와 설정탭이 공유하는 앱 영속 폴더.
   const skillsDirPath = ensureSkillsDir()
+  // The Python Agent talks to My DB only through this capability-limited
+  // loopback bridge.  It cannot discover the private storage path or call
+  // arbitrary My DB mutations.
+  const myDbAgentBridge = await startMyDbAgentBridge()
 
   let stderrTail = ''
   credentialChannelToken = randomBytes(32).toString('hex')
@@ -418,7 +442,13 @@ export async function startBackend(ollamaHost: string): Promise<void> {
       AISO_SKILLS_DIR: skillsDirPath,
       AISO_AUTH_TOKEN: AUTH_TOKEN,
       AISO_CREDENTIAL_CHANNEL_TOKEN: credentialChannelToken,
-      AISO_AGENT_LEDGER_PATH: join(app.getPath('userData'), 'agent-tool-ledger.sqlite3')
+      AISO_AGENT_LEDGER_PATH: join(app.getPath('userData'), 'agent-tool-ledger.sqlite3'),
+      AISO_ATTACHMENTS_DIR: attachmentStorePath(),
+      AISO_DOCUMENT_TODO_DB_PATH: join(app.getPath('userData'), 'document-todos.sqlite3'),
+      AISO_DOCUMENT_TODO_REGISTRY_PATH: join(app.getPath('userData'), 'document-todo-workspaces.json'),
+      AISO_DOCUMENT_TODO_BOOTSTRAP_WORKSPACES: JSON.stringify(listSavedAgentWorkspaces()),
+      AISO_MYDB_AGENT_BRIDGE_URL: myDbAgentBridge.url,
+      AISO_MYDB_AGENT_BRIDGE_TOKEN: myDbAgentBridge.token
     },
     windowsHide: true
   })
@@ -474,6 +504,7 @@ export async function startBackend(ollamaHost: string): Promise<void> {
 
 export function stopBackend(): void {
   credentialChannelToken = ''
+  stopMyDbAgentBridge()
   if (restartTimer) {
     clearTimeout(restartTimer)
     restartTimer = null

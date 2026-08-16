@@ -9,6 +9,8 @@
     "jsx": "react-jsx",
     "types": ["vite/client"],
     "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
     "paths": {

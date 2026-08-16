@@ -55,6 +55,37 @@
   {
     "type": "function",
     "function": {
+      "name": "list_calendar_events",
+      "description": "Aiso에 저장된 일정을 작업 폴더 선택 없이 모두 조회한다. 현재 해야 할 일, 저장된 일정, 캘린더 목록을 물으면 먼저 사용한다.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_change_history",
+      "description": "성공한 실제 Aiso 도구 실행으로만 기록된 변경 이력을 조회합니다. 모델 응답이나 실패한 호출은 포함하지 않습니다.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 40,
+            "description": "조회할 변경 이력 항목 수."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "list_dir",
       "description": "작업 폴더 내 디렉터리의 파일·하위폴더 목록을 본다.",
       "parameters": {
@@ -92,7 +123,7 @@
     "type": "function",
     "function": {
       "name": "read_file",
-      "description": "작업 폴더 내 파일의 내용을 읽는다. 코드·md·csv 등 텍스트는 물론, PDF·엑셀(xlsx)·워드(docx)·한글(hwp/hwpx) 문서도 자동으로 텍스트를 추출한다. 큰 텍스트 파일은 offset·limit으로 특정 줄 범위만 읽을 수 있고(줄번호가 함께 표시됨), 문서에는 줄 범위가 적용되지 않는다.",
+      "description": "작업 폴더 내 파일의 내용을 읽는다. 코드·md·csv 등 텍스트는 물론, PDF·PowerPoint(pptx/pptm)·엑셀(xlsx)·워드(docx)·한글(hwp/hwpx) 문서도 자동으로 텍스트를 추출한다. 큰 텍스트 파일은 offset·limit으로 특정 줄 범위만 읽을 수 있고(줄번호가 함께 표시됨), 문서에는 줄 범위가 적용되지 않는다.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -111,6 +142,52 @@
         },
         "required": [
           "path"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "convert_document",
+      "description": "Convert a PowerPoint (.pptx or .pptm) into a new, text-first HTML reading copy inside the workspace. Use only when a browser-readable copy is needed; the original file is never changed.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Workspace-relative PowerPoint file path."
+          },
+          "output_path": {
+            "type": "string",
+            "description": "New workspace-relative .html result path. Existing files cannot be overwritten."
+          }
+        },
+        "required": [
+          "path",
+          "output_path"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "analyze_document_calendar",
+      "description": "선택한 작업 폴더 문서에서 원문 근거(파일·쪽/슬라이드/문단·인용문)가 있는 일정을 만든다. 기획서는 구현 가능한 기능 단위로 재구성하고, 제목·목차·설명문은 제외한다. 같은 문서를 다시 분석하면 기존 일정은 새 결과로 교체해 중앙 캘린더에 저장한다. 단순 파일 구조 조회에는 절대 사용하지 않는다.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "분석할 작업 폴더 기준 상대 문서 경로 목록."
+          }
+        },
+        "required": [
+          "paths"
         ]
       }
     }
@@ -459,7 +536,7 @@
     "type": "function",
     "function": {
       "name": "run_web",
-      "description": "작성한 HTML 파일을 헤드리스 브라우저로 실제 실행해 콘솔/런타임 에러를 검사한다. 웹 산출물(HTML/JS)을 만들거나 고친 뒤에는 반드시 이 툴로 검증하고, 에러가 있으면 고쳐서 다시 검증하라. **게임처럼 키보드로 조작하는 페이지는 에러 0건·화면 렌더링만으로는 부족하다 — actions로 실제 방향키를 눌러보고 화면이 그 방향에 맞게 반응하는지까지 검증하라.** actions를 주면 키보드 리스너 등록 여부와, 눌린 방향 쪽으로 실제 변화가 쏠리는지(방향성)를 좌/우·상/하 화면 변화 비율로 알려준다 — 좌우를 다 눌러봤는데 변화가 비슷하면 이동이 실제로는 반영되지 않는 버그일 가능성이 높다.",
+      "description": "작성한 HTML 파일을 격리된 로컬 Edge에서 실행해 콘솔·런타임 오류와 명시한 상호작용을 검사한다. 단순 로드 통과는 기능 정상의 증거가 아니다. 버튼·키보드·게임 상태가 있는 페이지는 steps 한 번에 click/press/wait와 기대 조건을 묶어 실행하고, 실패한 조건만 고친 뒤 같은 시나리오를 재검증한다. 여러 동작을 각각 run_web으로 호출하지 마라. 조작 후 마지막 화면이 스크린샷으로 반환된다. 게임 내부 상태 검증이 필요하면 읽기 전용 window.__AISO_TEST__ 값을 만들고 state 단언으로 읽는다. steps 없이 통과한 결과는 기본 실행 검사일 뿐이며 전체 기능이 검증됐다고 주장하지 마라.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -469,7 +546,8 @@
           },
           "actions": {
             "type": "array",
-            "description": "선택. 로드 후 실제로 눌러볼 키 입력 순서. 게임 조작 검증에 사용. 예: [{\"key\":\"ArrowLeft\",\"times\":10},{\"key\":\"ArrowRight\",\"times\":10},{\"key\":\"ArrowUp\",\"times\":3}]. key는 'ArrowLeft/Right/Up/Down', 'Space', 'Enter', 'KeyA' 같은 표준 키 이름(또는 'left'/'right' 등 방향 단어)도 된다.",
+            "maxItems": 12,
+            "description": "이전 버전 호환용 키 입력 목록. 새 검증은 steps 사용을 권장한다. 예: [{\"key\":\"ArrowLeft\",\"times\":10},{\"key\":\"ArrowRight\",\"times\":10},{\"key\":\"ArrowUp\",\"times\":3}]. key는 'ArrowLeft/Right/Up/Down', 'Space', 'Enter', 'KeyA' 같은 표준 키 이름(또는 'left'/'right' 등 방향 단어)도 된다.",
             "items": {
               "type": "object",
               "properties": {
@@ -479,12 +557,107 @@
                 },
                 "times": {
                   "type": "integer",
+                  "minimum": 1,
+                  "maximum": 40,
                   "description": "누를 횟수(기본 1, 최대 40)."
                 }
               },
               "required": [
                 "key"
               ]
+            }
+          },
+          "steps": {
+            "type": "array",
+            "maxItems": 24,
+            "description": "선택. 한 번의 로컬 브라우저 실행에서 순서대로 수행할 조작·단언(최대 24단계). click은 by=role(role+name), testid(value), css(selector), text(value)를 사용하며 대상 내부 좌표는 x_ratio/y_ratio(0~1)로 지정한다. press는 key/times, wait는 ms를 사용한다. assert는 visible, text, state, canvas_changed, canvas_unchanged, no_console_errors를 지원한다. state.path는 window.__AISO_TEST__.state 같은 안전한 점 표기 경로만 허용한다.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "click",
+                    "press",
+                    "wait"
+                  ]
+                },
+                "assert": {
+                  "type": "string",
+                  "enum": [
+                    "visible",
+                    "text",
+                    "state",
+                    "canvas_changed",
+                    "canvas_unchanged",
+                    "no_console_errors"
+                  ]
+                },
+                "by": {
+                  "type": "string",
+                  "enum": [
+                    "role",
+                    "testid",
+                    "css",
+                    "text"
+                  ]
+                },
+                "role": {
+                  "type": "string",
+                  "description": "접근성 역할(예: button)."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "접근성 표시 이름."
+                },
+                "value": {
+                  "type": "string",
+                  "description": "testid 또는 표시 텍스트."
+                },
+                "selector": {
+                  "type": "string",
+                  "description": "작업 페이지 내부 CSS 선택자."
+                },
+                "x_ratio": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "description": "클릭 대상 내부 가로 상대 좌표(0~1). y_ratio와 함께 사용."
+                },
+                "y_ratio": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "description": "클릭 대상 내부 세로 상대 좌표(0~1). x_ratio와 함께 사용."
+                },
+                "key": {
+                  "type": "string",
+                  "description": "Playwright 표준 키 이름."
+                },
+                "times": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 40,
+                  "description": "키 입력 횟수(기본 1, 최대 40)."
+                },
+                "ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 3000,
+                  "description": "대기 시간(ms, 단계당 최대 3000)."
+                },
+                "path": {
+                  "type": "string",
+                  "description": "읽기 전용 상태의 안전한 점 표기 경로."
+                },
+                "equals": {
+                  "description": "정확히 같아야 하는 JSON 값 또는 텍스트."
+                },
+                "contains": {
+                  "type": "string",
+                  "description": "포함해야 하는 텍스트."
+                }
+              }
             }
           }
         },

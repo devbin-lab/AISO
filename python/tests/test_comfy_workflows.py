@@ -47,9 +47,10 @@ def sd_profile(
     enabled: bool = True,
     checkpoint: str = "anime-xl.safetensors",
     extras: list[dict] | None = None,
+    quality_mode: str | None = None,
 ) -> dict:
     # 실제 src/shared/comfy-model.ts의 ComfyModelProfile 모양을 그대로 사용한다.
-    return {
+    profile = {
         "id": ident,
         "name": name,
         "family": "sdxl",
@@ -70,6 +71,9 @@ def sd_profile(
         "createdAt": 1_753_000_000_000,
         "updatedAt": 1_753_000_000_000,
     }
+    if quality_mode is not None:
+        profile["qualityMode"] = quality_mode
+    return profile
 
 
 def flux_profile(*, extras: list[dict] | None = None) -> dict:
@@ -319,6 +323,22 @@ def node_infos(profile: cw.ModelProfile) -> dict[str, dict]:
     return infos
 
 
+def refinement_node_info() -> dict:
+    return {
+        "name": "LatentUpscale",
+        "python_module": "nodes",
+        "input": {
+            "required": {
+                "samples": ["LATENT", {}],
+                "upscale_method": [["bislerp", "bicubic"], {}],
+                "width": ["INT", {"min": 64, "max": 2048}],
+                "height": ["INT", {"min": 64, "max": 2048}],
+                "crop": [["disabled"], {}],
+            }
+        },
+    }
+
+
 def test_real_typescript_profile_shape_and_defaults_are_preserved():
     profile = cw.normalize_profile(sd_profile())
     assert profile.architecture == cw.ARCH_SDXL
@@ -501,6 +521,70 @@ def test_sdxl_workflow_uses_profile_defaults_and_trusted_api_nodes_only():
     assert {node["class_type"] for node in workflow.values()} <= set(cw.SD_NODE_CONTRACTS)
 
 
+def test_sdxl_refine_mode_uses_verified_builtin_latent_second_pass():
+    profile = cw.normalize_profile(sd_profile(quality_mode="refine"))
+    options = cw.resolve_generation_options(profile, prompt="1girl", seed=12)
+    infos = {**node_infos(profile), "LatentUpscale": refinement_node_info()}
+    workflow = cw.build_workflow(
+        profile,
+        options,
+        prompt_id="12121212-1212-4121-8121-121212121212",
+        node_infos=infos,
+    )
+
+    assert profile.quality_mode == cw.QUALITY_MODE_REFINE
+    assert cw.refinement_node_classes_for_profile(profile) == frozenset({"LatentUpscale"})
+    assert workflow["8"] == {
+        "class_type": "LatentUpscale",
+        "inputs": {
+            "samples": ["5", 0],
+            "upscale_method": "bislerp",
+            "width": 1152,
+            "height": 1536,
+            "crop": "disabled",
+        },
+    }
+    assert workflow["9"]["class_type"] == "KSampler"
+    assert workflow["9"]["inputs"]["steps"] == 14
+    assert workflow["9"]["inputs"]["denoise"] == 0.35
+    assert workflow["6"]["inputs"]["samples"] == ["9", 0]
+    assert cw.snapshot_workflow(workflow) == workflow
+
+
+@pytest.mark.parametrize("broken", ["missing", "custom", "unsupported"])
+def test_sdxl_refine_mode_safely_falls_back_to_base_when_optional_contract_is_not_trusted(broken):
+    profile = cw.normalize_profile(sd_profile(quality_mode="refine"))
+    options = cw.resolve_generation_options(profile, prompt="1girl", seed=12)
+    optional = refinement_node_info()
+    if broken == "missing":
+        infos = node_infos(profile)
+    else:
+        if broken == "custom":
+            optional["python_module"] = "custom_nodes.upscale"
+        else:
+            optional["input"]["required"]["crop"] = [["center"], {}]
+        infos = {**node_infos(profile), "LatentUpscale": optional}
+
+    workflow = cw.build_workflow(
+        profile,
+        options,
+        prompt_id="13131313-1313-4131-8131-131313131313",
+        node_infos=infos,
+    )
+    assert set(workflow) == {"1", "2", "3", "4", "5", "6", "7"}
+    assert workflow["6"]["inputs"]["samples"] == ["5", 0]
+
+
+def test_refine_mode_is_normalized_to_base_for_non_sdxl_and_user_workflows():
+    flux = flux_profile()
+    flux["qualityMode"] = "refine"
+    assert cw.normalize_profile(flux).quality_mode == cw.QUALITY_MODE_BASE
+
+    custom = user_api_profile()
+    custom["qualityMode"] = "refine"
+    assert cw.normalize_profile(custom).quality_mode == cw.QUALITY_MODE_BASE
+
+
 def test_flux_workflow_is_split_and_does_not_inject_negative_prompt():
     profile = cw.normalize_profile(flux_profile())
     options = cw.resolve_generation_options(
@@ -658,6 +742,114 @@ def test_prompt_policy_applies_sd_negative_and_flux_positive_constraints():
     assert flux_applied["promptPolicy"]["addedNegative"] == []
     assert flux_applied["effectivePrompt"].startswith(prompt)
     assert "natural hands" in flux_applied["effectivePrompt"]
+
+
+def test_animagine_official_sha_structures_tags_exclusions_and_quality_suffix():
+    raw = sd_profile(
+        ident="animagine-xl-4-opt",
+        name="Animagine XL 4.0 Opt",
+        tags=["anime", "character"],
+        checkpoint="animagine-xl-4.0-opt.safetensors",
+    )
+    raw["assets"][0]["sha256"] = "6327eca98bfb6538dd7a4edce22484a1bbc57a8cff6b11d075d40da1afb847ac"
+    profile = cw.normalize_profile(raw)
+
+    applied = cw.apply_prompt_policy(
+        profile,
+        prompt=(
+            "masterpiece; Hatsune Miku, blue hair\nno weapon, no props, "
+            "1girl, blue hair, futuristic jacket"
+        ),
+        negative_prompt="BAD HANDS, no logo, custom artifact, bad hands",
+    )
+
+    assert applied["originalPrompt"].startswith("masterpiece;")
+    assert applied["effectivePrompt"] == (
+        "1girl, Hatsune Miku, blue hair, futuristic jacket, "
+        "masterpiece, high score, great score, absurdres"
+    )
+    assert applied["effectiveNegativePrompt"].startswith(
+        "logo, custom artifact, weapon, props, lowres, bad anatomy, bad hands"
+    )
+    assert applied["effectiveNegativePrompt"].casefold().count("bad hands") == 1
+    assert "no weapon" not in applied["effectivePrompt"].casefold()
+    assert "no props" not in applied["effectivePrompt"].casefold()
+    assert not any(
+        style in applied["effectivePrompt"].casefold()
+        for style in ("anime style", "cinematic", "photorealistic")
+    )
+    policy = applied["promptPolicy"]
+    assert policy["id"] == cw.ANIMAGINE_XL_4_POLICY_ID
+    assert policy["addedPositive"] == ["high score", "great score", "absurdres"]
+    assert policy["contract"] == {
+        "format": "ordered-comma-tags",
+        "variant": "4.0 Opt",
+        "subjectPrefix": ["1girl"],
+        "qualitySuffix": ["masterpiece", "high score", "great score", "absurdres"],
+        "explicitExclusions": ["weapon", "props", "logo"],
+        "maxPromptLength": cw.MAX_PROMPT_LENGTH,
+    }
+    assert "weapon" in policy["addedNegative"]
+    assert "props" in policy["addedNegative"]
+    assert "logo" not in policy["addedNegative"]
+    assert len(applied["effectivePrompt"]) <= cw.MAX_PROMPT_LENGTH
+    assert len(applied["effectiveNegativePrompt"]) <= cw.MAX_PROMPT_LENGTH
+
+
+def test_animagine_policy_uses_hash_not_profile_name_tag_or_filename():
+    impostor = cw.normalize_profile(sd_profile(
+        ident="animagine-xl-4-opt",
+        name="Animagine XL 4.0 Opt",
+        tags=["animagine", "anime"],
+        checkpoint="animagine-xl-4.0-opt.safetensors",
+    ))
+    prompt = "masterpiece, 1girl, blue hair"
+
+    applied = cw.apply_prompt_policy(impostor, prompt=prompt, negative_prompt="custom")
+
+    assert applied["effectivePrompt"] == prompt
+    assert applied["promptPolicy"]["id"] == "sd-negative-quality-v1"
+    assert "high score" not in applied["effectivePrompt"]
+    assert "absurdres" not in applied["effectivePrompt"]
+
+
+def test_animagine_automatic_defaults_do_not_override_explicit_visual_intent():
+    raw = sd_profile(checkpoint="animagine-xl-4.0.safetensors")
+    raw["assets"][0]["sha256"] = "1d5b43ff75b6ab598502d4c779d2fbfa3dceca51c60c3b609640a60772333916"
+    profile = cw.normalize_profile(raw)
+
+    applied = cw.apply_prompt_policy(
+        profile,
+        prompt=(
+            "1girl, readable text, intentional blur, cropped, pixel art, "
+            "body horror with extra arms"
+        ),
+        # A user-supplied conflict is preserved; only Aiso's automatic defaults
+        # yield to the explicit positive intent.
+        negative_prompt="blurry, custom concept",
+    )
+
+    additions = applied["promptPolicy"]["addedNegative"]
+    assert not ({
+        "lowres", "worst quality", "low quality", "low score", "bad score",
+        "average score", "text", "cropped", "bad anatomy", "bad hands",
+        "missing finger", "extra digits", "fewer digits", "blurry",
+    } & set(additions))
+    assert applied["effectiveNegativePrompt"].startswith("blurry, custom concept")
+    assert applied["promptPolicy"]["contract"]["qualitySuffix"] == []
+    assert not any(
+        tag in applied["promptPolicy"]["addedPositive"]
+        for tag in cw.ANIMAGINE_XL_4_POSITIVE_TAGS
+    )
+
+
+def test_animagine_policy_rejects_expansion_beyond_prompt_limit():
+    raw = sd_profile(checkpoint="animagine-xl-4.0.safetensors")
+    raw["assets"][0]["sha256"] = "1d5b43ff75b6ab598502d4c779d2fbfa3dceca51c60c3b609640a60772333916"
+    profile = cw.normalize_profile(raw)
+
+    with pytest.raises(cw.WorkflowValidationError, match="4,000자 제한"):
+        cw.apply_prompt_policy(profile, prompt="x" * cw.MAX_PROMPT_LENGTH)
 
 
 def test_prompt_policy_preserves_deliberate_blur_low_fidelity_and_distortion():

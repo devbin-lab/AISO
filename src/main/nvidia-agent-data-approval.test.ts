@@ -32,6 +32,7 @@ function readyProfile(id: string, agentEnabled: boolean): ComfyModelProfile {
     }],
     workflowTemplateId: 'PRIVATE_WORKFLOW_CANARY',
     defaults: { width: 1024, height: 1024, steps: 20, cfg: 7 },
+    qualityMode: 'base',
     agentEnabled,
     priority: 0,
     createdAt: 1,
@@ -89,17 +90,19 @@ test('automatic scope comes only from saved workspace RAG and private Comfy read
   assert.deepEqual(buildAutomaticNvidiaAgentDataScope(settings(), profiles), {
     workspace: true,
     rag: true,
-    image: true
+    image: true,
+    todos: true,
+    myDb: true
   })
   assert.deepEqual(buildAutomaticNvidiaAgentDataScope(
     { ...settings(), workspace: '' }, profiles
-  ), { workspace: false, rag: false, image: true })
+  ), { workspace: false, rag: false, image: true, todos: true, myDb: true })
   assert.deepEqual(buildAutomaticNvidiaAgentDataScope(
     { ...settings(), comfyModelSelectionMode: 'manual' }, profiles
-  ), { workspace: true, rag: true, image: false })
+  ), { workspace: true, rag: true, image: false, todos: true, myDb: true })
   assert.deepEqual(buildAutomaticNvidiaAgentDataScope(
     { ...settings(), comfyModelSelectionMode: 'manual' }, profiles, 'disabled-ready'
-  ), { workspace: true, rag: true, image: true, selectedComfyModelId: 'disabled-ready' })
+  ), { workspace: true, rag: true, image: true, todos: true, myDb: true, selectedComfyModelId: 'disabled-ready' })
   assert.throws(
     () => buildAutomaticNvidiaAgentDataScope(settings(), profiles, 'enabled-ready'),
     /자동 모델 선택/
@@ -119,7 +122,19 @@ test('automatic scope is derived only from the saved NVIDIA tool policy', () => 
   assert.deepEqual(buildAutomaticNvidiaAgentDataScope(
     localOnlyPolicy,
     [readyProfile('enabled-ready', true)]
-  ), { workspace: false, rag: false, image: false })
+  ), { workspace: false, rag: false, image: false, todos: false, myDb: false })
+
+  const calendarOnlyPolicy: ReturnType<typeof settings> = {
+    ...base,
+    agentToolPolicy: {
+      ollama: [],
+      nvidia: ['create_calendar_event']
+    }
+  }
+  assert.deepEqual(buildAutomaticNvidiaAgentDataScope(
+    calendarOnlyPolicy,
+    [readyProfile('enabled-ready', true)]
+  ), { workspace: false, rag: false, image: false, todos: true, myDb: false })
 })
 
 test('allowed tools and fingerprint bind the exact saved NVIDIA policy', () => {

@@ -62,6 +62,10 @@ function installApiStub(): void {
           onImportProgress: vi.fn(() => () => {})
         }
       },
+      myDb: {
+        storageRoot: vi.fn().mockResolvedValue('C:\\Users\\tester\\Documents\\Aiso My DB'),
+        pickStorageRoot: vi.fn().mockResolvedValue(null)
+      },
       skills: {
         list: vi.fn().mockResolvedValue([]),
         remove: vi.fn().mockResolvedValue(undefined)
@@ -77,6 +81,10 @@ function installApiStub(): void {
   })
 }
 
+function openLlmTab(): void {
+  fireEvent.click(screen.getByRole('button', { name: 'LLM' }))
+}
+
 describe('SettingsView', () => {
   beforeEach(() => installApiStub())
   afterEach(() => vi.unstubAllGlobals())
@@ -89,10 +97,29 @@ describe('SettingsView', () => {
     expect(screen.queryByRole('button', { name: '생성' })).toBeNull()
     expect(screen.queryByRole('button', { name: '검색·RAG' })).toBeNull()
     expect(screen.queryByRole('button', { name: '리소스' })).toBeNull()
+    expect(screen.getByRole('button', { name: '진단 센터' })).not.toBeNull()
+    openLlmTab()
     expect(screen.getByText('Ollama 호스트')).not.toBeNull()
     expect(screen.getByText('생성 온도')).not.toBeNull()
     expect(screen.getByText('RAG 사용')).not.toBeNull()
     expect(screen.getByText('AI 즉시 정지 (GPU 비우기)')).not.toBeNull()
+  })
+
+  it('lets the user choose and save a separate My DB storage location', async () => {
+    const user = userEvent.setup()
+    const onSave = vi.fn().mockResolvedValue(true)
+    window.api.myDb!.pickStorageRoot = vi.fn().mockResolvedValue('D:\\Library\\My DB')
+    render(<SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={onSave} active />)
+
+    await user.click(screen.getByRole('button', { name: 'DB' }))
+    expect(await screen.findByText('저장소 위치')).not.toBeNull()
+    expect(screen.getByLabelText('전날 변경 보고 확인 간격')).not.toBeNull()
+    await user.click(screen.getByRole('button', { name: '폴더 선택' }))
+    expect(screen.getByDisplayValue('D:\\Library\\My DB')).not.toBeNull()
+    await user.click(screen.getByRole('button', { name: '저장' }))
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      myDbStoragePath: 'D:\\Library\\My DB'
+    })))
   })
 
   it('keeps NVIDIA key lifecycle separate from persisted settings', async () => {
@@ -100,11 +127,14 @@ describe('SettingsView', () => {
     const onSave = vi.fn().mockResolvedValue(true)
     render(<SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={onSave} active />)
 
+    openLlmTab()
     await user.click(screen.getByRole('button', { name: 'NVIDIA' }))
     expect(screen.getByDisplayValue('https://integrate.api.nvidia.com/v1')).toHaveProperty('readOnly', true)
     expect(screen.getByText('NVIDIA 데이터 전송 및 Agent 권한')).not.toBeNull()
     expect(screen.getByText(/반복 확인창은 표시하지 않습니다/)).not.toBeNull()
     expect(screen.getByText(/선택한 작업 폴더·로컬 RAG의 읽기 결과가 모델에 자동 전달/)).not.toBeNull()
+    expect(screen.getByText(/로컬 문맥 뒤의 외부 웹 요청은 확인합니다/)).not.toBeNull()
+    expect(screen.getByText(/사용자가 켠 모든 도구를 승인 없이 실행합니다/)).not.toBeNull()
     expect(screen.getByText(/API 키와 Discord 토큰은 모델 입력에 포함하지 않고/)).not.toBeNull()
     expect(screen.getByText(/원본 워크플로·모델 경로·생성 이미지 바이트를 NVIDIA 대화에 자동 첨부하지 않습니다/)).not.toBeNull()
     expect(screen.getByText(/이미지 생성 프롬프트와 성공·실패 여부·크기 정보/)).not.toBeNull()
@@ -134,6 +164,7 @@ describe('SettingsView', () => {
 
     expect(window.api.nvidia.models.refresh).not.toHaveBeenCalled()
     expect(window.api.nvidia.capabilities.probe).not.toHaveBeenCalled()
+    openLlmTab()
     await user.click(screen.getByRole('button', { name: 'NVIDIA' }))
     await Promise.resolve()
     expect(window.api.nvidia.models.refresh).not.toHaveBeenCalled()
@@ -158,6 +189,7 @@ describe('SettingsView', () => {
       />
     )
 
+    openLlmTab()
     expect(await screen.findByText(/저장된 키를 해독할 수 없습니다/)).toBeTruthy()
     expect(screen.getByText(/같은 키를 다시 입력해 교체하세요/)).toBeTruthy()
     expect(screen.getByRole('button', { name: '모델 목록 새로고침' })).toHaveProperty('disabled', true)
@@ -180,6 +212,7 @@ describe('SettingsView', () => {
     }
     render(<SettingsView settings={nvidiaSettings} backend={READY_BACKEND} health={null} onSave={vi.fn().mockResolvedValue(true)} active />)
 
+    openLlmTab()
     expect(window.api.nvidia.models.refresh).not.toHaveBeenCalled()
     await waitFor(() => expect(
       (screen.getByRole('button', { name: '모델 목록 새로고침' }) as HTMLButtonElement).disabled
@@ -210,12 +243,13 @@ describe('SettingsView', () => {
       <ConfirmHost />
     </>)
 
+    openLlmTab()
     await waitFor(() => expect(
       (screen.getByRole('button', { name: '기능 검사' }) as HTMLButtonElement).disabled
     ).toBe(false))
     await user.click(screen.getByRole('button', { name: '기능 검사' }))
     expect(window.api.nvidia.capabilities.probe).not.toHaveBeenCalled()
-    expect(screen.getByText(/토큰·할당량 또는 비용이 발생할 수 있습니다/)).not.toBeNull()
+    expect(screen.getByText(/최대 3개의 작은 API 요청/)).not.toBeNull()
     expect(screen.getByText(/실제 도구는 실행하지 않습니다/)).not.toBeNull()
     await user.click(screen.getByRole('button', { name: '검사 실행' }))
     await waitFor(() => expect(window.api.nvidia.capabilities.probe).toHaveBeenCalledTimes(1))
@@ -463,6 +497,7 @@ describe('SettingsView', () => {
     const onSave = vi.fn().mockResolvedValue(false)
     render(<SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={onSave} active={false} />)
 
+    openLlmTab()
     const model = screen.getByDisplayValue(DEFAULT_SETTINGS.model)
     fireEvent.change(model, { target: { value: 'other-model:latest' } })
     fireEvent.click(screen.getByRole('button', { name: '저장' }))

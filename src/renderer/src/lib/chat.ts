@@ -4,6 +4,7 @@ import {
   snapshotLlmSettings
 } from '../../../shared/settings'
 import { authHeaders } from './backend'
+import type { AttachmentRef } from '../../../shared/attachments'
 
 export interface ChatChunk {
   type:
@@ -35,6 +36,7 @@ export interface ChatChunk {
 export interface ChatPayloadMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
+  attachments?: AttachmentRef[]
 }
 
 /** FastAPI 사이드카의 NDJSON 스트림을 읽어 청크 단위로 콜백한다. */
@@ -67,7 +69,11 @@ export async function streamChat(
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({
-      messages,
+      messages: messages.map((message) => ({
+        role: message.role,
+        content: message.content,
+        attachments: message.attachments?.map((attachment) => attachment.id) ?? []
+      })),
       provider: snapshot.provider,
       deployment_mode: snapshot.deploymentMode,
       endpoint: snapshot.endpoint,

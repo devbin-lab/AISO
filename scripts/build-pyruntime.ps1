@@ -21,7 +21,16 @@ $pipVersion = [string]$runtimeLock.getPip.pipVersion
 
 function Get-VerifiedDownload([string]$uri, [string]$destination, [string]$expectedSha256) {
     Invoke-WebRequest -Uri $uri -OutFile $destination -UseBasicParsing
-    $actual = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+    # Use the .NET runtime directly so the build also works in stripped-down
+    # PowerShell environments where the Get-FileHash cmdlet is unavailable.
+    $stream = [System.IO.File]::OpenRead($destination)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $actual = ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
     if ($actual -ne $expectedSha256.ToLowerInvariant()) {
         Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
         throw "Downloaded SHA-256 does not match lock: $uri"

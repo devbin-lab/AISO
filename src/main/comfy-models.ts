@@ -38,8 +38,10 @@ import {
   COMFY_ASSET_SLOT_LABELS,
   COMFY_MODEL_CAPABILITIES,
   COMFY_MODEL_FAMILIES,
+  COMFY_QUALITY_MODES,
   DEFAULT_COMFY_GENERATION,
   getComfyAgentReadiness,
+  supportsComfyQualityRefinement,
   getComfyWorkflowAssetBindingStatus,
   getComfyGenerationDefaults,
   getComfyRequiredSlots,
@@ -55,7 +57,8 @@ import {
   type ComfyModelImportResult,
   type ComfyModelProfile,
   type ComfyModelProfilePatch,
-  type ComfyModelRegistry
+  type ComfyModelRegistry,
+  type ComfyQualityMode
 } from '../shared/comfy-model'
 
 const REGISTRY_VERSION = 1 as const
@@ -65,6 +68,7 @@ const KIND_SET = new Set<string>(COMFY_ASSET_KINDS)
 const SLOT_SET = new Set<string>(COMFY_ASSET_SLOTS)
 const FAMILY_SET = new Set<string>(COMFY_MODEL_FAMILIES)
 const CAPABILITY_SET = new Set<string>(COMFY_MODEL_CAPABILITIES)
+const QUALITY_MODE_SET = new Set<string>(COMFY_QUALITY_MODES)
 const MAX_REGISTRY_BACKUP_BYTES = 16 * 1024 * 1024
 const STALE_PARTIAL_AGE_MS = 24 * 60 * 60 * 1000
 const MAX_PARTIAL_SCAN_ENTRIES = 10_000
@@ -277,6 +281,27 @@ function cleanPriority(value: unknown, fallback = 0): number {
   return positiveInteger(value, fallback, -100, 100)
 }
 
+/**
+ * Refinement is deliberately not portable across arbitrary model families or
+ * user-provided graphs.  Keep unsupported and stale registry records on the
+ * base path instead of implying that their workflow has been changed.
+ */
+function cleanQualityMode(
+  value: unknown,
+  target: Pick<ComfyModelProfile, 'family' | 'workflowTemplate'>,
+  fallback: ComfyQualityMode = 'base',
+  strict = false
+): ComfyQualityMode {
+  const requested = value === undefined ? fallback : value
+  if (typeof requested !== 'string' || !QUALITY_MODE_SET.has(requested)) {
+    if (strict) throw new Error('생성 품질 모드 형식이 올바르지 않습니다.')
+    return 'base'
+  }
+  return requested === 'refine' && supportsComfyQualityRefinement(target)
+    ? 'refine'
+    : 'base'
+}
+
 function cleanWorkflowTemplate(value: unknown, family: ComfyModelFamily): string {
   if (value === undefined || value === '') return `${family}.txt2img.v1`
   if (typeof value !== 'string') throw new Error('워크플로 템플릿 형식이 올바르지 않습니다.')
@@ -413,6 +438,7 @@ function parseStoredProfile(value: unknown): ComfyModelProfile | null {
       workflowTemplateId: workflowTemplate?.id ?? (hasDirectAsset ? 'custom.txt2img.v1' : storedTemplateId),
       ...(workflowTemplate ? { workflowTemplate } : {}),
       defaults: cleanDefaults(raw.defaults),
+      qualityMode: cleanQualityMode(raw.qualityMode, { family: effectiveFamily, workflowTemplate }),
       agentEnabled: false,
       priority: cleanPriority(raw.priority),
       createdAt,
@@ -892,6 +918,7 @@ function profileFromRequest(request: ComfyModelImportRequest, previous?: ComfyMo
     workflowTemplateId: previous?.workflowTemplateId ?? `${family}.txt2img.v1`,
     ...(previous?.workflowTemplate ? { workflowTemplate: previous.workflowTemplate } : {}),
     defaults: previous?.defaults ?? getComfyGenerationDefaults(family),
+    qualityMode: previous?.qualityMode ?? 'base',
     agentEnabled: previous?.agentEnabled ?? false,
     priority: previous?.priority ?? 0,
     createdAt: previous?.createdAt ?? now,
@@ -931,6 +958,7 @@ function applyAutomaticProfileAnalysis(
     family,
     workflowTemplateId: usesDefaultTemplate ? `${family}.txt2img.v1` : profile.workflowTemplateId,
     defaults: getComfyGenerationDefaults(family),
+    qualityMode: 'base',
     // 새 파일 분석 결과만으로 Agent 자동 선택을 켜지 않는다.
     agentEnabled: false,
     updatedAt: Date.now()
@@ -1212,7 +1240,8 @@ export async function pickAndImportComfyModelAssets(
       profile = {
         ...profile,
         workflowTemplateId: workflowTemplate.id,
-        workflowTemplate
+        workflowTemplate,
+        qualityMode: 'base'
       }
     }
     profile = includesDirectAsset
@@ -1221,6 +1250,7 @@ export async function pickAndImportComfyModelAssets(
           family: 'custom',
           workflowTemplateId: profile.workflowTemplate?.id ?? 'custom.txt2img.v1',
           defaults: profile.workflowTemplate ? profile.defaults : getComfyGenerationDefaults('custom'),
+          qualityMode: 'base',
           agentEnabled: false,
           updatedAt: Date.now()
         }
@@ -1281,6 +1311,7 @@ export async function pickAndImportComfyWorkflowTemplate(
     workflowTemplateId: workflowTemplate.id,
     workflowTemplate,
     defaults,
+    qualityMode: 'base',
     // 새 워크플로는 사용자가 내용을 확인한 뒤 명시적으로 Agent 사용을 켠다.
     agentEnabled: false,
     updatedAt: Date.now()
@@ -1303,6 +1334,7 @@ export function removeComfyWorkflowTemplate(id: unknown): ComfyModelProfile {
     workflowTemplateId: `${current.family}.txt2img.v1`,
     workflowTemplate: undefined,
     defaults: getComfyGenerationDefaults(current.family),
+    qualityMode: 'base',
     agentEnabled: false,
     updatedAt: Date.now()
   }
@@ -1322,6 +1354,9 @@ function normalizePatch(value: unknown, current: ComfyModelProfile): ComfyModelP
     ...(raw.capabilities === undefined ? {} : { capabilities: cleanCapabilities(raw.capabilities) }),
     ...(raw.tags === undefined ? {} : { tags: cleanTags(raw.tags) }),
     ...(raw.defaults === undefined ? {} : { defaults: cleanDefaults(raw.defaults, current.defaults) }),
+    ...(raw.qualityMode === undefined
+      ? {}
+      : { qualityMode: cleanQualityMode(raw.qualityMode, current, current.qualityMode, true) }),
     ...(raw.agentEnabled === undefined ? {} : { agentEnabled: raw.agentEnabled === true }),
     ...(raw.priority === undefined ? {} : { priority: cleanPriority(raw.priority, current.priority) })
   }
@@ -1346,6 +1381,7 @@ export async function updateComfyModelProfile(
     ...current,
     ...patch,
     defaults: patch.defaults ? cleanDefaults(patch.defaults, current.defaults) : current.defaults,
+    qualityMode: patch.qualityMode ?? current.qualityMode,
     updatedAt: Date.now()
   }
   if (patch.agentEnabled === true && !current.agentEnabled && !getComfyAgentReadiness(next).ready) {

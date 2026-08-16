@@ -57,6 +57,15 @@ export const COMFY_MODEL_CAPABILITIES = ['txt2img', 'img2img', 'inpaint'] as con
 
 export type ComfyModelCapability = (typeof COMFY_MODEL_CAPABILITIES)[number]
 
+/**
+ * The quality policy is intentionally small and explicit.  `refine` is not a
+ * generic upscaler promise: it only selects Aiso's built-in latent refinement
+ * path when the registered profile supports that exact workflow.
+ */
+export const COMFY_QUALITY_MODES = ['base', 'refine'] as const
+
+export type ComfyQualityMode = (typeof COMFY_QUALITY_MODES)[number]
+
 export interface ComfyGenerationDefaults {
   width: number
   height: number
@@ -149,6 +158,8 @@ export interface ComfyModelProfile {
   /** 사용자가 ComfyUI에서 내보내 연결한 검증된 API 형식 워크플로. */
   workflowTemplate?: ComfyWorkflowTemplate
   defaults: ComfyGenerationDefaults
+  /** Per-profile quality choice. Unsupported profiles are normalized to `base`. */
+  qualityMode: ComfyQualityMode
   agentEnabled: boolean
   priority: number
   createdAt: number
@@ -190,8 +201,29 @@ export interface ComfyModelProfilePatch {
   capabilities?: ComfyModelCapability[]
   tags?: string[]
   defaults?: Partial<ComfyGenerationDefaults>
+  qualityMode?: ComfyQualityMode
   agentEnabled?: boolean
   priority?: number
+}
+
+/**
+ * v0.4's built-in refinement graph has been verified only for the automatic
+ * SDXL workflow.  SD 1.5, FLUX, and user-provided API workflows keep their
+ * own existing graph and therefore remain on base generation.
+ */
+export function supportsComfyQualityRefinement(
+  profile: Pick<ComfyModelProfile, 'family' | 'workflowTemplate'>
+): boolean {
+  return profile.family === 'sdxl' && profile.workflowTemplate === undefined
+}
+
+/** Return the effective mode so stale/imported registry data never overclaims support. */
+export function getEffectiveComfyQualityMode(
+  profile: Pick<ComfyModelProfile, 'family' | 'workflowTemplate' | 'qualityMode'>
+): ComfyQualityMode {
+  return profile.qualityMode === 'refine' && supportsComfyQualityRefinement(profile)
+    ? 'refine'
+    : 'base'
 }
 
 export interface ComfyWorkflowImportResult {

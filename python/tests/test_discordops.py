@@ -3,7 +3,7 @@
 
 - validate_ops: 한도·화이트리스트·#aiso 보호·이름 해석(ID/이름/모호성)·배치 내 카테고리 선참조.
 - render: 미리보기의 삭제(복구 불가) 강조, 서버 맵의 보호 마크.
-- 에이전트 통합: 조건부 노출(봇 연결시에만), 무폴더 허용, auto 모드에서도 apply 승인 강제.
+- 에이전트 통합: 조건부 노출(봇 연결시에만), 무폴더 허용, 권한 모드별 실행 경계.
 """
 from __future__ import annotations
 
@@ -181,7 +181,7 @@ def test_design_guide_wired_into_both_prompts():
     topic 15/15, 운영·자료실·QA·회의 전부 포함으로 확인."""
     import discordbot
 
-    assert "서버 설계 기준" in ops.DESIGN_GUIDE and "자료실" in ops.DESIGN_GUIDE
+    assert "Server-design guide" in ops.DESIGN_GUIDE and "resources" in ops.DESIGN_GUIDE
     assert ops.DESIGN_GUIDE in discordbot._tools_prompt()  # 디스코드 입구
 
 
@@ -189,7 +189,7 @@ def test_design_guide_in_agent_prompt_when_bot_online(env, monkeypatch):
     monkeypatch.setattr(agent.discordops, "available", lambda: True)
     fc = FakeChat([{"content": "완료"}])
     env.run(fc, approval_mode="auto")
-    assert "서버 설계 기준" in fc.payloads[0]["messages"][0]["content"]  # 에이전트 입구
+    assert "Server-design guide" in fc.payloads[0]["messages"][0]["content"]  # 에이전트 입구
 
 
 def test_format_hint_covers_correct_field_names():
@@ -326,7 +326,7 @@ def test_tools_hidden_when_bot_offline(env):
     tool_names = {t["function"]["name"] for t in fc.payloads[0]["tools"]}
     assert "discord_server_apply" not in tool_names
     sys_text = fc.payloads[0]["messages"][0]["content"]
-    assert "디스코드 서버 구성" not in sys_text
+    assert "Discord server configuration" not in sys_text
 
 
 def test_tools_exposed_when_bot_online(env, monkeypatch):
@@ -335,7 +335,7 @@ def test_tools_exposed_when_bot_online(env, monkeypatch):
     env.run(fc, approval_mode="auto")
     tool_names = {t["function"]["name"] for t in fc.payloads[0]["tools"]}
     assert {"discord_server_map", "discord_server_apply"} <= tool_names
-    assert "디스코드 서버 구성" in fc.payloads[0]["messages"][0]["content"]
+    assert "Discord server configuration" in fc.payloads[0]["messages"][0]["content"]
 
 
 def test_partial_discord_policy_only_describes_exposed_tools(env, monkeypatch):
@@ -353,8 +353,8 @@ def test_partial_discord_policy_only_describes_exposed_tools(env, monkeypatch):
     assert "discord_schedule_add" not in sys_text
 
 
-def test_apply_forces_approval_even_in_auto_mode(env, monkeypatch):
-    """서버 변경(apply)은 자동 모드에서도 반드시 승인 — 거부하면 실행되지 않는다."""
+def test_apply_runs_without_approval_in_auto_mode(env, monkeypatch):
+    """자동 모드는 Discord 서버 변경도 승인 카드 없이 실행한다."""
     monkeypatch.setattr(agent.discordops, "available", lambda: True)
     fc = FakeChat([
         {"calls": [("discord_server_apply", {"ops": [{"action": "create_category", "name": "QA"}]})]},
@@ -362,21 +362,21 @@ def test_apply_forces_approval_even_in_auto_mode(env, monkeypatch):
     ])
     evs = env.drive(fc, approve=False, approval_mode="auto")
     t = types(evs)
-    assert "approval_request" in t  # auto인데도 승인 요청이 떴다
+    assert "approval_request" not in t
     tr = next(e for e in evs if e["type"] == "tool_result")
-    assert tr["ok"] is False and tr.get("rejected") is True
+    assert tr["ok"] is True and "[불가]" in tr["output"]
 
 
-def test_apply_approved_in_auto_runs_handler(env, monkeypatch):
-    """승인하면 핸들러 실행 — 봇 미연결 환경에선 친절한 [불가] 안내가 결과로 온다."""
+def test_apply_read_mode_still_requires_approval(env, monkeypatch):
+    """읽기 모드에서는 서버 변경을 거부하면 핸들러가 실행되지 않는다."""
     monkeypatch.setattr(agent.discordops, "available", lambda: True)
     fc = FakeChat([
         {"calls": [("discord_server_apply", {"ops": [{"action": "create_category", "name": "QA"}]})]},
         {"content": "완료"},
     ])
-    evs = env.drive(fc, approve=True, approval_mode="auto")
+    evs = env.drive(fc, approve=False, approval_mode="read")
     tr = next(e for e in evs if e["type"] == "tool_result")
-    assert tr["ok"] is True and "[불가]" in tr["output"]  # 봇 미실행 → 실행은 되되 불가 안내
+    assert tr["ok"] is False and tr.get("rejected") is True
 
 
 def test_available_false_without_running_bot():

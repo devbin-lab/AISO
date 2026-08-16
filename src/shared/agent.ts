@@ -9,6 +9,7 @@ export type AgentToolCategory =
   | 'research'
   | 'automation'
   | 'rag'
+  | 'mydb'
   | 'discord'
   | 'image'
 
@@ -41,7 +42,7 @@ export interface AgentToolCatalog {
 export const APPROVAL_MODES: { v: ApprovalMode; label: string; hint: string }[] = [
   { v: 'manual', label: '수동', hint: '읽기·쓰기·편집·삭제 모두 승인' },
   { v: 'read', label: '읽기', hint: '읽기는 자동, 쓰기·편집·삭제는 승인' },
-  { v: 'auto', label: '자동', hint: '읽기·일부 변경은 자동, 실행·삭제·외부 발신은 승인' }
+  { v: 'auto', label: '자동', hint: '허용한 모든 도구를 승인 없이 실행' }
 ]
 
 export type PlanStatus = 'pending' | 'in_progress' | 'completed'
@@ -89,6 +90,9 @@ export interface ComfyGeneratedImage {
   prompt: string
   negativePrompt: string
   seed: string
+  /** Initial latent dimensions before any verified Aiso refinement pass. */
+  baseWidth?: number
+  baseHeight?: number
   width: number
   height: number
   steps: number
@@ -112,11 +116,28 @@ export type AgentEvent =
   | { type: 'content'; text: string }
   | ({ type: 'tool_call'; name: string; args: Record<string, unknown> } & AgentToolIdentity)
   | ({ type: 'approval_request'; name: string; args: Record<string, unknown> } & AgentToolIdentity)
-  | ({ type: 'tool_result'; ok: boolean; output: string; rejected?: boolean; reused?: boolean } & AgentToolIdentity)
-  | { type: 'screenshot'; id: string; data: string }
-  | { type: 'image_result'; id: string; image: ComfyGeneratedImage }
+  | ({
+      type: 'tool_result'
+      ok: boolean
+      output: string
+      rejected?: boolean
+      reused?: boolean
+    } & AgentToolIdentity)
+  | { type: 'screenshot'; id: string; assistantTurnId: string; data: string }
+  | {
+      type: 'image_result'
+      id: string
+      /** The Agent execution that produced this image. Never render a stale turn's result. */
+      assistantTurnId: string
+      image: ComfyGeneratedImage
+    }
   | { type: 'plan'; steps: PlanStep[] }
-  | { type: 'notice'; text: string }
+  | {
+      type: 'notice'
+      text: string
+      /** Progress feedback for the current stream only; clear it at the next tool/terminal event. */
+      transient?: boolean
+    }
   | { type: 'usage'; total: number }
   | { type: 'done' }
   | { type: 'error'; error: string }
@@ -132,11 +153,20 @@ export interface AgentToolIdentity {
 
 export const TOOL_LABEL: Record<string, string> = {
   get_system_time: '현재 시각 확인',
+  list_calendar_events: '캘린더 일정 목록',
+  create_calendar_event: '캘린더 일정 등록',
+  manage_calendar_event: '캘린더 일정 수정·완료·삭제',
+  list_mydb_library: 'My DB 내용 조회',
+  list_mydb_history: 'My DB 변경 이력 조회',
+  list_mydb_trash: 'My DB 휴지통 조회',
+  restore_mydb_trash_node: 'My DB 휴지통 항목 복구',
   list_dir: '폴더 목록',
   list_tree: '폴더 구조',
   grep: '내용 검색',
   glob: '파일 찾기',
   read_file: '파일 읽기',
+  convert_document: '문서 HTML 변환',
+  analyze_document_calendar: '문서 일정 만들기',
   create_dir: '폴더 생성',
   write_file: '파일 쓰기',
   edit_file: '파일 편집',
@@ -159,6 +189,7 @@ export const TOOL_LABEL: Record<string, string> = {
   discord_server_apply: '디스코드 서버 구성 적용',
   discord_send: '디스코드 메시지 전송',
   discord_schedule_add: '디스코드 예약 추가',
+  discord_channel_report_add: '디스코드 채널 대화 보고 예약',
   discord_schedule_list: '디스코드 예약 목록',
   discord_schedule_remove: '디스코드 예약 삭제',
   update_plan: '계획 갱신',

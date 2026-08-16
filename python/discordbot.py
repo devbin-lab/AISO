@@ -16,22 +16,28 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import io
 import json
 import os
+import re
 from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 import discord
 from discord import app_commands
+from agent_prompting import final_response_language_prompt
+from response_language import normalize_response_language, response_language_from_messages
 
 # 전체 응답 텍스트를 돌려주는 생성 함수(main.py가 Ollama 기계를 재사용해 주입).
 GenerateFn = Callable[[list], Awaitable[str]]
 # 한 턴 생성 — (messages, tools|None) → {"content": str, "tool_calls": list}. 서버 구성 루프용.
 StepFn = Callable[[list, "list | None"], Awaitable[dict]]
 # 웹 조사 기반 생성(리서치 루프) — 브리핑 예약이 발화 시각에 내용을 만들 때 사용.
-ResearchFn = Callable[[list], Awaitable[str]]
+# The second argument keeps the original user-request language separate from attachment text.
+ResearchFn = Callable[[list, str | None], Awaitable[str]]
+ImageFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 DISCORD_MSG_LIMIT = 2000       # 디스코드 단일 메시지 길이 상한
 HISTORY_TURNS = 12             # 채널별 최근 대화 유지(간단한 문맥)
@@ -39,34 +45,138 @@ COMMAND_CHANNEL = "aiso"       # 자동 생성할 명령 채널 이름
 STATE_FILE = "state.json"      # data_dir 안에 봇 동적 상태 영속
 MAX_TOOL_TURNS = 6             # 서버 구성 루프의 생성 턴 상한(폭주 방지)
 APPROVAL_TIMEOUT_S = 120       # 서버 구성 승인 버튼 대기 시간(초) — 지나면 자동 취소
-SYSTEM_PROMPT = "너는 Aiso, 사용자 PC에서 로컬로 도는 도우미다. 한국어로 간결하고 친근하게 답한다."
+
+def base_system_prompt(response_language: str | None = "ko") -> str:
+    """Return model-facing Discord policy with a request-scoped output language."""
+    language = normalize_response_language(response_language)
+    return (
+        "You are Aiso, a helpful assistant running locally on the user's PC. "
+        "Be concise, accurate, and friendly. Do not claim an action succeeded unless a tool result confirms it.\n\n"
+        + final_response_language_prompt(language)
+    )
 
 
-@functools.lru_cache(maxsize=1)  # 완전 정적 문자열 — 매 메시지 재조립하지 않고 1회 계산해 캐시
-def _tools_prompt() -> str:
+# Compatibility export for callers/tests that use the default Korean Discord experience.
+SYSTEM_PROMPT = base_system_prompt("ko")
+
+_EXPLICIT_WEB_RESEARCH_RE = re.compile(
+    r"(?:인터넷|웹).{0,40}(?:검색|조사|확인)|"
+    r"(?:검색|조사|찾아|알아)\s*(?:봐|줘|해줘|해주세요|해서)|"
+    r"(?:근거|출처)\s*(?:도|를|를\s*포함해)?\s*(?:알려|제시|확인)|"
+    r"\b(?:search|research|look\s+up|browse|verify\s+online)\b",
+    re.IGNORECASE,
+)
+_TIME_SENSITIVE_RE = re.compile(
+    r"(?:최신|최근|오늘|어제|이번\s*(?:주|달|분기|연도)|뉴스|소식|속보|업데이트|"
+    r"사용량\s*초기화|초기화\s*(?:날짜|일시|시간)|가격|요금|정책|버전|출시|"
+    r"날씨|환율|주가|대표|최고경영자|CEO|latest|recent|today|current|news|price|"
+    r"pricing|release|schedule|weather)",
+    re.IGNORECASE,
+)
+
+
+def requires_web_research(text: str) -> bool:
+    """Whether a Discord request needs current, external evidence."""
+    value = str(text or "").strip()
+    return bool(value and (_EXPLICIT_WEB_RESEARCH_RE.search(value) or _TIME_SENSITIVE_RE.search(value)))
+
+
+def _chat_route(text: str, *, can_research: bool, can_use_tools: bool) -> str:
+    if requires_web_research(text):
+        return "research" if can_research else "research_unavailable"
+    return "tools" if can_use_tools else "generate"
+
+
+_DELIVERY_CHANNEL_RE = re.compile(
+    r"(?:#\s*)?([0-9A-Za-z가-힣_.-]{1,100})\s*(?:채널|방)\s*(?:에(?:다(?:가)?)?|으로)\s*"
+    r"(?:알려|보내|전송|올려|게시|공지)|"
+    r"#\s*([0-9A-Za-z가-힣_.-]{1,100})\s*(?:에|으로)\s*(?:알려|보내|전송|올려|게시)",
+    re.IGNORECASE,
+)
+
+
+def requested_delivery_channel(text: str) -> str:
+    match = _DELIVERY_CHANNEL_RE.search(str(text or ""))
+    if not match:
+        return ""
+    return str(match.group(1) or match.group(2) or "").strip()
+
+
+def _research_failed(reply: str) -> bool:
+    value = str(reply or "").lstrip()
+    return value.startswith(("(웹 조사 실패", "(브리핑 생성 실패", "(빈 브리핑"))
+
+
+async def _research_chat(
+    channel,
+    text: str,
+    messages: list[dict],
+    *,
+    response_language: str | None = None,
+) -> str:
+    """Run the research callback without allowing attachment text to choose the reply language."""
+    if _S.research is None:
+        return "(웹 조사 기능을 사용할 수 없어 최신 정보를 확인하지 못했습니다. 근거 없이 답하지 않았습니다.)"
+    language = normalize_response_language(
+        response_language
+        or response_language_from_messages([{"role": "user", "content": text}], fallback="ko")
+    )
+    research_messages = [item for item in messages if item.get("role") != "system"]
+    async with _S.gen_lock:
+        reply = await _S.research(research_messages, language)
+    delivery_channel = requested_delivery_channel(text)
+    if delivery_channel and not _research_failed(reply):
+        delivery_result = await _send_with_approval(
+            channel,
+            {"channel": delivery_channel, "message": reply},
+        )
+        if language == "ko":
+            return f"웹 조사를 완료했습니다. {delivery_result}"
+        return f"Research is complete. {delivery_result}"
+    return reply
+
+
+@functools.lru_cache(maxsize=32)
+def _tools_prompt(image_enabled: bool = False, response_language: str = "ko") -> str:
+    """Build the model-only Discord tool policy.
+
+    ``response_language`` is deliberately part of the cache key: a Korean request must not
+    inherit an English final-answer instruction (or vice versa) from a previous request.
+    """
     import discordops  # noqa: PLC0415 — 설계 기준·형식은 discordops가 단일 출처
 
-    return SYSTEM_PROMPT + (
-        "\n\n서버 구성 도구를 쓸 수 있다: 사용자가 이 디스코드 서버의 채널 구성(팀 카테고리·채널 생성, "
-        "이름 변경, 이동, 주제 설정, 삭제)을 요청하면 (1) discord_server_map으로 현재 구조를 확인하고 "
-        "(2) 설계해 discord_server_apply(ops=[...])로 적용하라. "
-        "설계가 끝나면 텍스트로 다시 묻지 말고 바로 discord_server_apply를 호출하라 — 호출하면 사용자에게 "
-        "계획 미리보기와 승인/취소 버튼이 자동으로 뜬다. 삭제도 마찬가지다: 사용자가 이미 명확히 요청했다면 "
-        "텍스트로 재확인하지 말고 바로 호출하라(승인 버튼이 최종 확인이다). "
-        "#aiso(명령 채널)는 보호되어 있으니 삭제·변경 목록에 넣지 마라 — 넣어도 자동 제외된다. "
-        "일반 대화에는 도구를 쓰지 말고 그냥 답하라.\n"
-        "메시지 전송: discord_send(channel, message). "
-        "예약 전송: discord_schedule_add(channel, text, when, repeat, kind) — when은 'HH:MM' 또는 "
-        "'YYYY-MM-DD HH:MM', repeat는 once(1회)/daily(매일), kind는 message(고정 문구)/"
-        "briefing(그 시각에 웹 조사로 내용을 생성 — 날씨·뉴스 브리핑용). "
-        "예약 목록은 discord_schedule_list, 삭제는 discord_schedule_remove(id). "
-        "예약은 앱이 켜져 있는 동안만 발화된다. "
-        "전송·예약도 서버 구성과 똑같다: 호출하면 소유자에게 승인 버튼이 자동으로 뜨니 '~할까요?'라고 "
-        "텍스트로 되묻지 말고, 채널·내용·시각이 있으면 곧바로 discord_send/discord_schedule_add를 호출하라. "
-        "정보가 부족할 때만 딱 한 번 물어라. 반복이 불명확하면 once. "
-        "한국어 시각은 24시간제로 변환하라(오후 11시 45분=23:45; 오전/오후가 없으면 다가오는 가장 가까운 시각).\n\n"
+    image_guide = (
+        "\nImage generation: when the user clearly asks for an image, illustration, or drawing, call "
+        "generate_image. Automatically select only a registered ComfyUI model that allows Agent use. "
+        "Never construct an arbitrary node graph or download an external model. Put the requested scene, "
+        "composition, and style into the prompt precisely.\n"
+        if image_enabled
+        else ""
+    )
+    return base_system_prompt(response_language) + (
+        "\n\nDiscord server tools are available. When the user asks to change this server's channel layout "
+        "(create team categories or channels, rename, move, set topics, or delete), first call "
+        "discord_server_map to inspect the current structure, then call discord_server_apply(ops=[...]) with "
+        "the proposed operations. Once the plan is ready, do not ask for textual confirmation: call "
+        "discord_server_apply immediately. That call automatically shows the user a preview with approve/cancel "
+        "buttons. The same rule applies to deletion; if the user already made the request explicit, do not ask "
+        "again in text because the approval button is the final confirmation. Never include #aiso, the protected "
+        "command channel, in a delete or modification list. Do not use tools for ordinary conversation.\n"
+        "Send a message with discord_send(channel, message). Register a schedule with "
+        "discord_schedule_add(channel, text, when, repeat, kind): when is HH:MM or YYYY-MM-DD HH:MM, repeat is "
+        "once or daily, and kind is message (fixed text) or briefing (generate current information by web research "
+        "at the scheduled time, for example weather or news). Use discord_schedule_list to list schedules and "
+        "discord_schedule_remove(id) to delete one. Schedules run only while the app is open. Sending and "
+        "scheduling also show the owner an approval button automatically; when channel, content, and time are known, "
+        "call discord_send or discord_schedule_add instead of asking \"shall I?\". Ask exactly one clarifying "
+        "question only when necessary. Use once when repetition is unclear. Interpret time expressions in the "
+        "user's language as 24-hour local time.\n\n"
+        "Register a recurring channel-conversation report with "
+        "discord_channel_report_add(channels, report_channel, interval_hours, instruction). Summarize only new "
+        "messages posted after registration, and never include a successfully reported message again.\n\n"
+        + image_guide
         + discordops.DESIGN_GUIDE + "\n\n"
-        + "ops의 각 항목은 반드시 다음 필드명을 그대로 써라(op·parent·type 같은 다른 이름은 인식되지 않는다): "
+        + "Every ops entry MUST use exactly these field names (aliases such as op, parent, and type are not accepted): "
         '{"action":"create_category","name":"..."}, '
         '{"action":"create_text_channel","name":"...","category":"...","topic":"..."}, '
         '{"action":"create_voice_channel","name":"...","category":"..."}, '
@@ -103,6 +213,8 @@ class _State:
         self.generate: GenerateFn | None = None
         self.step: StepFn | None = None    # 툴콜 지원 한 턴 생성(서버 구성 루프용)
         self.research: ResearchFn | None = None  # 웹 조사 생성(브리핑 예약용)
+        self.image: ImageFn | None = None
+        self.allow_attachment_images: bool = False
         self.sched_task: "asyncio.Task | None" = None  # 예약 러너
         self.tree: "app_commands.CommandTree | None" = None
         self.data_dir: str = ""
@@ -136,6 +248,8 @@ def status() -> dict:
         "guild_id": _S.guild_id,
         "channel_id": _S.channel_id,
         "allowlist": sorted(_S.allowlist),
+        "attachment_images": _S.allow_attachment_images,
+        "comfy_image_generation": _S.image is not None,
         "last_error": _S.last_error,
     }
 
@@ -423,6 +537,26 @@ async def _schedule_add_with_approval(channel, args: dict) -> str:
     return "예약이 등록되었습니다.\n" + discordsched.render_job(discordsched.commit_job(draft))
 
 
+async def _channel_report_add_with_approval(channel, args: dict) -> str:
+    """Require the Discord owner to approve a recurring channel report."""
+    import discordsched  # noqa: PLC0415
+
+    normalized = discordsched.canonical_channel_report_args(args or {})
+    sources = ", ".join(f"#{name}" for name in normalized["channels"]) or "(없음)"
+    destination = normalized["report_channel"] or "(없음)"
+    preview = (
+        "채널 대화 보고 예약 요청\n"
+        f"수집: {sources}\n보고: #{destination}\n"
+        f"주기: {normalized['interval_hours']}시간마다\n"
+        "등록 이후 새 메시지만 수집하며 성공적으로 보고한 메시지는 다시 포함하지 않습니다."
+    )
+    if normalized["instruction"]:
+        preview += f"\n추가 지시: {normalized['instruction']}"
+    if not await _ask_owner_approval(channel, preview):
+        return _REJECTED
+    return await discordsched.channel_report_add(**normalized)
+
+
 async def _run_bot_tool(channel, author_id: str, name: str, args: dict) -> str:
     import discordops  # noqa: PLC0415
     import discordsched  # noqa: PLC0415
@@ -435,6 +569,8 @@ async def _run_bot_tool(channel, author_id: str, name: str, args: dict) -> str:
         return await _send_with_approval(channel, args)
     if name == "discord_schedule_add":
         return await _schedule_add_with_approval(channel, args)
+    if name == "discord_channel_report_add":
+        return await _channel_report_add_with_approval(channel, args)
     if name == "discord_schedule_list":
         return await discordsched.schedule_list()
     if name == "discord_schedule_remove":
@@ -442,6 +578,21 @@ async def _run_bot_tool(channel, author_id: str, name: str, args: dict) -> str:
         if not _S.owner_id or str(author_id) != _S.owner_id:
             return "[거부] 예약 삭제는 소유자만 할 수 있습니다."
         return await discordsched.schedule_remove(**(args or {}))
+    if name == "generate_image":
+        if _S.image is None:
+            return "[오류] Discord 이미지 생성은 ComfyUI 연결과 준비된 Agent 모델이 있을 때만 사용할 수 있습니다."
+        result = await _S.image(args if isinstance(args, dict) else {})
+        data = result.get("data")
+        filename = str(result.get("filename") or "aiso-image.png")
+        summary = str(result.get("summary") or "이미지를 생성했습니다.")
+        if not isinstance(data, bytes) or not data:
+            raise ValueError("이미지 생성 결과 데이터 형식이 올바르지 않습니다.")
+        if len(data) > 10 * 1024 * 1024:
+            raise ValueError("생성 이미지는 Discord 첨부 제한(10MB)을 초과해 전송할 수 없습니다.")
+        if Path(filename).name != filename or not filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+            raise ValueError("생성 이미지 파일명 형식이 올바르지 않습니다.")
+        await channel.send(f"🖼️ {summary}", file=discord.File(io.BytesIO(data), filename=filename))
+        return f"이미지를 Discord에 전송했습니다. {summary}"
     return f"[불가] 알 수 없는 도구: {name}"
 
 
@@ -465,8 +616,15 @@ async def _tool_chat(channel, author_id: str, convo: list) -> str:
     tools = [
         discordops.MAP_SCHEMA, discordops.APPLY_SCHEMA, discordops.SEND_SCHEMA,
         discordsched.SCHEDULE_ADD_SCHEMA, discordsched.SCHEDULE_LIST_SCHEMA,
-        discordsched.SCHEDULE_REMOVE_SCHEMA,
+        discordsched.SCHEDULE_REMOVE_SCHEMA, discordsched.CHANNEL_REPORT_ADD_SCHEMA,
     ]
+    if _S.image is not None:
+        from comfy_generation import GENERATE_IMAGE_SCHEMA  # noqa: PLC0415
+        tools.append(GENERATE_IMAGE_SCHEMA)
+    # Raw schemas also feed Settings in Korean.  Send a separate English model
+    # copy here, while matching and execution still use the original names.
+    from tool_schema_language import model_schemas_for  # noqa: PLC0415
+    tools = model_schemas_for(tools)
     allowed_tool_names = {
         str((tool.get("function") or {}).get("name") or "") for tool in tools
     }
@@ -630,17 +788,68 @@ def _build_client(generate: GenerateFn) -> "discord.Client":
         if not is_authorized(_S.owner_id, _S.channel_id, _S.allowlist, message.author.id, message.channel.id):
             return  # 비인가·비지정채널 → 무응답
         text = (message.content or "").strip()
+        raw_attachments = list(getattr(message, "attachments", ()) or ())
+        if not text and raw_attachments:
+            text = "첨부한 자료를 읽고 핵심 내용을 요약해 주세요."
         if not text:
             return
         hist = _S.history[message.channel.id]
+        # Decide the answer language from Discord text before an attachment extractor appends
+        # document/OCR content. A foreign-language attachment must not change the user's reply language.
+        raw_language_messages = [
+            {"role": role, "content": content}
+            for role, content in hist
+        ]
+        raw_language_messages.append({"role": "user", "content": text})
+        response_language = response_language_from_messages(raw_language_messages, fallback="ko")
         use_tools = _S.step is not None  # 서버 구성 도구를 쓸 수 있으면 툴 루프로
-        messages = [{"role": "system", "content": _tools_prompt() if use_tools else SYSTEM_PROMPT}]
+        route = _chat_route(text, can_research=_S.research is not None, can_use_tools=use_tools)
+        messages = [{
+            "role": "system",
+            "content": (
+                _tools_prompt(_S.image is not None, response_language)
+                if use_tools
+                else base_system_prompt(response_language)
+            ),
+        }]
         for role, content in hist:
             messages.append({"role": role, "content": content})
         messages.append({"role": "user", "content": text})
         try:
             async with message.channel.typing():
-                if use_tools:
+                if raw_attachments:
+                    from discord_attachments import (  # noqa: PLC0415
+                        DiscordAttachmentError,
+                        append_discord_attachment_context,
+                        build_discord_attachment_context,
+                    )
+                    try:
+                        attachment_context = await build_discord_attachment_context(
+                            raw_attachments, allow_images=_S.allow_attachment_images
+                        )
+                        messages = append_discord_attachment_context(messages, attachment_context)
+                        if attachment_context.notices:
+                            messages[-1]["content"] += (
+                                "\n\n[첨부 처리 안내]\n- " + "\n- ".join(attachment_context.notices)
+                            )
+                    except DiscordAttachmentError as error:
+                        reply = f"(첨부 분석을 시작하지 못했습니다: {error})"
+                        hist.append(("user", text))
+                        hist.append(("assistant", reply))
+                        await message.channel.send(reply)
+                        return
+                if route == "research":
+                    # Discord 조작 지침을 조사 프롬프트와 섞지 않는다. 조사 실패 시에는
+                    # 모델의 오래된 기억으로 대체하지 않고 리서치 루프의 실패를 그대로 알린다.
+                    reply = await _research_chat(
+                        message.channel,
+                        text,
+                        messages,
+                        response_language=response_language,
+                    )
+                elif route == "research_unavailable":
+                    reply = "(웹 조사 기능을 사용할 수 없어 최신 정보를 확인하지 못했습니다. 근거 없이 답하지 않았습니다.)"
+                elif route == "tools":
                     # _tool_chat이 생성 턴마다 gen_lock을 잡고 놓는다 — 승인 대기는 락 밖에서
                     # 이뤄져 미결 승인이 다른 채팅을 최대 120초 얼리지 않는다.
                     reply = await _tool_chat(message.channel, str(message.author.id), messages)
@@ -664,10 +873,170 @@ def _build_client(generate: GenerateFn) -> "discord.Client":
 SCHED_TICK_S = 30
 BRIEFING_TIMEOUT_S = 240  # 브리핑 생성(조사 루프)이 이 시간을 넘으면 중단 — gen_lock을 물고 채팅을 무한정 얼리지 않게
 
-BRIEFING_SYSTEM = (
-    "너는 Aiso다. 아래 지시에 따라 디스코드 채널에 보낼 브리핑을 작성하라. "
-    "간결한 마크다운(굵게·목록)으로, 인사말 없이 본문만. 한국어로 쓴다."
-)
+CHANNEL_REPORT_TIMEOUT_S = 240
+CHANNEL_REPORT_TOTAL_CHARS = 40_000
+CHANNEL_REPORT_MESSAGES_PER_CHANNEL = 100
+
+def briefing_system(response_language: str | None = "ko") -> str:
+    """Model-only policy for a scheduled Discord briefing."""
+    language = normalize_response_language(response_language)
+    return (
+        "You are Aiso. Write a briefing that will be posted to a Discord channel according to the user's "
+        "instruction. Return only the body: no greeting, no preamble. Use concise Markdown with useful headings "
+        "and lists. Do not invent facts or sources.\n\n"
+        + final_response_language_prompt(language)
+    )
+
+
+def channel_report_system(response_language: str | None = "ko") -> str:
+    """Model-only policy for a recurring, new-message-only channel report."""
+    language = normalize_response_language(response_language)
+    return (
+        "You are a records assistant summarizing only newly collected collaboration-channel messages. Do not infer "
+        "facts that are absent from the supplied source messages. Write concise Markdown, in this semantic order: "
+        "Key summary, Decisions, To-dos, Open questions. Use equivalent localized headings in the required output "
+        "language. If a section has no evidence, explicitly say that it has none. Include an assignee only when the "
+        "source explicitly names one, and cite the source channel for important items. Keep the entire body within "
+        "3,000 characters.\n\n"
+        + final_response_language_prompt(language)
+    )
+
+
+# Compatibility exports retain the former default Korean scheduling experience.
+BRIEFING_SYSTEM = briefing_system("ko")
+CHANNEL_REPORT_SYSTEM = channel_report_system("ko")
+
+
+def _job_response_language(job: dict) -> str:
+    """Infer a scheduled job's output language from its original instruction, never collected messages."""
+    return response_language_from_messages(
+        [{"role": "user", "content": str(job.get("text") or "")}],
+        fallback="ko",
+    )
+
+
+def _scheduled_heading(kind: str, response_language: str) -> str:
+    """Localized deterministic wrapper labels for the two scheduled model outputs."""
+    if normalize_response_language(response_language) == "ko":
+        return "예약 브리핑" if kind == "briefing" else "채널 대화 보고서"
+    return "Scheduled briefing" if kind == "briefing" else "Channel conversation report"
+
+
+async def _collect_channel_report_messages(guild, job: dict) -> tuple[list[str], list[dict], list[str]]:
+    """Collect only messages after each persisted channel cursor."""
+    import discord
+
+    sources = [dict(item) for item in (job.get("source_channels") or []) if isinstance(item, dict)]
+    per_channel_chars = max(2_000, CHANNEL_REPORT_TOTAL_CHARS // max(1, len(sources)))
+    collected: list[tuple[datetime, str]] = []
+    updated_sources: list[dict] = []
+    errors: list[str] = []
+    for source in sources:
+        channel_id = str(source.get("id") or "")
+        channel_name = str(source.get("name") or channel_id)
+        cursor = str(source.get("last_message_id") or "0")
+        channel = guild.get_channel(int(channel_id)) if channel_id.isdigit() else None
+        if channel is None or not hasattr(channel, "history"):
+            errors.append(f"#{channel_name}: 채널을 찾을 수 없음")
+            updated_sources.append(source)
+            continue
+        used_chars = 0
+        last_processed = cursor
+        after = discord.Object(id=int(cursor)) if cursor.isdigit() and int(cursor) > 0 else None
+        try:
+            async for message in channel.history(
+                limit=CHANNEL_REPORT_MESSAGES_PER_CHANNEL,
+                after=after,
+                oldest_first=True,
+            ):
+                message_id = str(message.id)
+                if getattr(message.author, "bot", False):
+                    last_processed = message_id
+                    continue
+                content = str(getattr(message, "clean_content", None) or message.content or "").strip()
+                attachments = [str(getattr(item, "filename", "첨부 파일")) for item in message.attachments]
+                if attachments:
+                    suffix = "첨부: " + ", ".join(attachments)
+                    content = f"{content} [{suffix}]" if content else f"[{suffix}]"
+                if not content:
+                    last_processed = message_id
+                    continue
+                content = content.replace("\n", " ")[:1000]
+                created = message.created_at
+                stamp = created.astimezone().strftime("%Y-%m-%d %H:%M")
+                author = str(getattr(message.author, "display_name", None) or message.author)
+                line = f"[{stamp}] #{channel_name} · {author}: {content}"
+                if used_chars and used_chars + len(line) + 1 > per_channel_chars:
+                    break
+                used_chars += len(line) + 1
+                last_processed = message_id
+                collected.append((created, line))
+        except Exception as error:  # noqa: BLE001
+            errors.append(f"#{channel_name}: 기록 읽기 실패 ({error})")
+            updated_sources.append(source)
+            continue
+        updated = dict(source)
+        updated["last_message_id"] = last_processed
+        updated_sources.append(updated)
+    collected.sort(key=lambda item: item[0])
+    return [line for _created, line in collected], updated_sources, errors
+
+
+async def _run_channel_report(job: dict) -> None:
+    """Generate and send one report, committing cursors only after success."""
+    import discordsched  # noqa: PLC0415
+
+    guild = bound_guild()
+    if guild is None:
+        return
+    lines, updated_sources, errors = await _collect_channel_report_messages(guild, job)
+    if not lines:
+        # Bot-only or empty traffic is safe to skip permanently and should not produce spam.
+        if updated_sources != job.get("source_channels"):
+            discordsched.update_job(job.get("id", ""), {"source_channels": updated_sources})
+        return
+    instruction = str(job.get("text") or "").strip()
+    response_language = _job_response_language(job)
+    user_prompt = (
+        f"The following are {len(lines)} newly collected Discord messages since the last report.\n"
+        + (f"Additional user instruction: {instruction}\n" if instruction else "")
+        + (f"Collection warnings: {'; '.join(errors)}\n" if errors else "")
+        + "\n[New source messages]\n"
+        + "\n".join(lines)
+    )
+    try:
+        async with _S.gen_lock:
+            if _S.generate is None:
+                return
+            body = await asyncio.wait_for(
+                _S.generate([
+                    {"role": "system", "content": channel_report_system(response_language)},
+                    {"role": "user", "content": user_prompt},
+                ]),
+                timeout=CHANNEL_REPORT_TIMEOUT_S,
+            )
+    except Exception as error:  # noqa: BLE001
+        print(f"[discord] 채널 보고서 생성 실패: {error}")
+        return
+    body = str(body or "").strip()
+    if not body:
+        return
+    destination_id = str(job.get("channel_id") or "")
+    destination = guild.get_channel(int(destination_id)) if destination_id.isdigit() else None
+    if destination is None:
+        return
+    source_names = ", ".join(f"#{item.get('name')}" for item in job.get("source_channels", []))
+    report = f"**{_scheduled_heading('channel_report', response_language)}** · {source_names}\n\n{body}"
+    try:
+        for part in chunk_message(report):
+            await destination.send(part, allowed_mentions=discord.AllowedMentions.none())
+    except Exception as error:  # noqa: BLE001
+        print(f"[discord] 채널 보고서 전송 실패: {error}")
+        return
+    discordsched.update_job(job.get("id", ""), {
+        "source_channels": updated_sources,
+        "last_reported_at": datetime.now().isoformat(timespec="minutes"),
+    })
 
 
 async def _run_job(job: dict) -> None:
@@ -677,6 +1046,9 @@ async def _run_job(job: dict) -> None:
 
     guild = bound_guild()
     if guild is None:
+        return
+    if job.get("kind") == "channel_report":
+        await _run_channel_report(job)
         return
     if job.get("missed"):
         # 앱이 꺼져 있어 놓친 예약 → 명령 채널에 안내(일회성은 소진됨, 매일은 다음 회차 예정)
@@ -689,14 +1061,24 @@ async def _run_job(job: dict) -> None:
                 pass
         return
     if job.get("kind") == "briefing":
+        response_language = _job_response_language(job)
         messages = [
-            {"role": "system", "content": BRIEFING_SYSTEM},
-            {"role": "user", "content": f"{job.get('text')}\n(현재 시각: {datetime.now().strftime('%Y-%m-%d %H:%M')})"},
+            {"role": "system", "content": briefing_system(response_language)},
+            {
+                "role": "user",
+                "content": (
+                    f"{job.get('text')}\n"
+                    f"(Current local time: {datetime.now().strftime('%Y-%m-%d %H:%M')})"
+                ),
+            },
         ]
         try:
             async with _S.gen_lock:  # 채팅과 생성을 직렬화(12B 단일 모델)
                 if _S.research is not None:
-                    body = await asyncio.wait_for(_S.research(messages), timeout=BRIEFING_TIMEOUT_S)
+                    body = await asyncio.wait_for(
+                        _S.research(messages, response_language),
+                        timeout=BRIEFING_TIMEOUT_S,
+                    )
                 elif _S.generate is not None:
                     body = await asyncio.wait_for(_S.generate(messages), timeout=BRIEFING_TIMEOUT_S)
                 else:
@@ -705,7 +1087,7 @@ async def _run_job(job: dict) -> None:
             body = "(브리핑 생성이 시간을 초과해 중단되었습니다)"
         except Exception as e:  # noqa: BLE001
             body = f"(브리핑 생성 실패: {e})"
-        text = f"📋 **예약 브리핑** — {job.get('text', '')[:60]}\n\n{body}"
+        text = f"📋 **{_scheduled_heading('briefing', response_language)}** — {job.get('text', '')[:60]}\n\n{body}"
     else:
         text = str(job.get("text") or "")
     await discordops.send_message_live(guild, job.get("channel_id", ""), text)
@@ -726,7 +1108,7 @@ async def _sched_runner(client: "discord.Client") -> None:
 
 async def apply_config(
     config: dict, generate: GenerateFn, step: "StepFn | None" = None,
-    research: "ResearchFn | None" = None,
+    research: "ResearchFn | None" = None, image: "ImageFn | None" = None,
 ) -> None:
     """설정을 적용해 봇을 (재)시작하거나 중지한다. 토큰·활성만 넘기면 나머지는 자동.
 
@@ -736,6 +1118,8 @@ async def apply_config(
     _S.generate = generate
     _S.step = step
     _S.research = research
+    _S.image = image
+    _S.allow_attachment_images = bool(config.get("allow_attachment_images"))
     _S.data_dir = str(config.get("data_dir") or os.path.join(str(Path.home()), ".aiso", "discord"))
     _load_state()  # 저장된 guild·channel·allowlist 복원
     import discordsched  # noqa: PLC0415

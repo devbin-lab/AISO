@@ -175,17 +175,23 @@ def test_add_preview_not_truncated(tmp_path):
 def test_schedule_and_send_tools_registered_and_workspace_free():
     from toolspec import AGENT_TOOLS, REGISTRY
 
-    for name in ("discord_send", "discord_schedule_add", "discord_schedule_list", "discord_schedule_remove"):
+    for name in (
+        "discord_send", "discord_schedule_add", "discord_channel_report_add",
+        "discord_schedule_list", "discord_schedule_remove",
+    ):
         assert name in REGISTRY
         assert name in agent.WORKSPACE_FREE_TOOLS
         assert name not in {t["function"]["name"] for t in AGENT_TOOLS}  # 조건부(KV 스냅샷 불변)
 
 
-def test_send_and_schedule_add_forced_approval():
-    """전송·예약등록은 외부 발신이라 auto 모드에서도 승인 강제 대상."""
-    assert {"discord_send", "discord_schedule_add"} <= agent.DISCORD_FORCE_APPROVE
-    # list는 읽기라 강제 대상 아님
-    assert "discord_schedule_list" not in agent.DISCORD_FORCE_APPROVE
+def test_send_and_schedule_add_follow_the_selected_approval_mode():
+    """외부 발신도 자동 모드에서는 즉시 실행하고 읽기 모드에서는 확인한다."""
+    assert agent.needs_approval("discord_send", "auto") is False
+    assert agent.needs_approval("discord_schedule_add", "auto") is False
+    assert agent.needs_approval("discord_channel_report_add", "auto") is False
+    assert agent.needs_approval("discord_send", "read") is True
+    assert agent.needs_approval("discord_schedule_add", "read") is True
+    assert agent.needs_approval("discord_channel_report_add", "read") is True
     assert agent.needs_approval("discord_schedule_list", "read") is False
 
 
@@ -196,4 +202,7 @@ def test_schedule_tools_exposed_when_bot_online(env, monkeypatch):
     fc = FakeChat([{"content": "완료"}])
     env.run(fc, approval_mode="auto")
     names = {t["function"]["name"] for t in fc.payloads[0]["tools"]}
-    assert {"discord_send", "discord_schedule_add", "discord_schedule_list"} <= names
+    assert {
+        "discord_send", "discord_schedule_add", "discord_channel_report_add",
+        "discord_schedule_list",
+    } <= names

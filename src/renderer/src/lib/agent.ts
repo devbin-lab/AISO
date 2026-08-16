@@ -6,10 +6,12 @@ import {
 import type { AgentEvent, AgentToolCatalog, ApprovalMode } from '../../../shared/agent'
 import type { ComfyModelProfile } from '../../../shared/comfy-model'
 import { authHeaders } from './backend'
+import type { AttachmentRef } from '../../../shared/attachments'
 
 export interface AgentMessage {
   role: 'user' | 'assistant'
   content: string
+  attachments?: AttachmentRef[]
 }
 
 /**
@@ -56,7 +58,11 @@ export async function streamAgent(
   comfyProfiles: ComfyModelProfile[],
   onEvent: (e: AgentEvent) => void,
   signal?: AbortSignal,
-  comfySelection?: ComfySelectionRequest
+  comfySelection?: ComfySelectionRequest,
+  /** Proven only by a persisted/rendered image result card, never by model prose. */
+  imageContextVerified = false,
+  /** Client-side conversation correlation only; never writes to My DB. */
+  conversationId = ''
 ): Promise<void> {
   const target = snapshotLlmSettings(settings)
   const nvidiaGrantId = target.provider === 'nvidia'
@@ -77,11 +83,16 @@ export async function streamAgent(
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({
-      messages,
+      messages: messages.map((message) => ({
+        role: message.role,
+        content: message.content,
+        attachments: message.attachments?.map((attachment) => attachment.id) ?? []
+      })),
       provider: target.provider,
       workspace: target.provider === 'nvidia' ? '' : workspace,
       model: target.model,
       assistant_turn_id: assistantTurnId,
+      image_context_verified: imageContextVerified,
       nvidia_grant: nvidiaGrantId,
       deployment_mode: target.deploymentMode,
       endpoint: target.endpoint,
@@ -90,6 +101,7 @@ export async function streamAgent(
       context_length: settings.contextLength,
       approval_mode: approvalMode,
       session_id: sessionId,
+      conversation_id: conversationId,
       ollama_host: settings.ollamaHost,
       rag_enabled: target.provider === 'nvidia'
         ? false

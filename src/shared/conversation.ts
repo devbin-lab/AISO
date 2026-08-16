@@ -23,3 +23,14 @@ export interface ConversationSave {
   title: string
   data: unknown
 }
+
+/** 에이전트 대화들을 묶는 프로젝트. 작업 폴더는 프로젝트가 아닌 각 대화가 선택한다. */
+export interface AgentProject {
+  id: string
+  title: string
+  createdAt: number
+  updatedAt: number
+  /** 이전 1:1 프로젝트 구조와의 읽기 호환용. 새 UI는 conversations를 사용한다. */
+  conversationId: string | null
+  conversations: ConversationMeta[]
+}

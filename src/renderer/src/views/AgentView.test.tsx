@@ -19,13 +19,13 @@ function capability(model: string) {
   }
 }
 
-function installApiStub(status: ReturnType<typeof vi.fn>): void {
+function installApiStub(status: ReturnType<typeof vi.fn>, conversation: unknown = null): void {
   Object.defineProperty(window, 'api', {
     configurable: true,
     value: {
       conversations: {
         list: vi.fn().mockResolvedValue([]),
-        get: vi.fn().mockResolvedValue(null),
+        get: vi.fn().mockResolvedValue(conversation),
         save: vi.fn().mockResolvedValue(undefined),
         setPinned: vi.fn().mockResolvedValue(undefined),
         remove: vi.fn().mockResolvedValue(undefined)
@@ -65,6 +65,24 @@ describe('AgentView NVIDIA capability gate', () => {
     }))
   })
   afterEach(() => vi.unstubAllGlobals())
+
+  it('groups the agent prompt, context controls, and send action in one composer surface', () => {
+    installApiStub(vi.fn().mockResolvedValue(null))
+    const { container } = render(
+      <AgentView
+        {...commonProps}
+        settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'ollama' }}
+      />
+    )
+
+    const composer = container.querySelector('.agent-composer')
+    expect(composer).toBeTruthy()
+    expect(composer?.querySelector('textarea.agent-composer__ta')).toBeTruthy()
+    expect(composer?.querySelector('[aria-label="파일 또는 폴더 첨부"]')).toBeTruthy()
+    expect(composer?.querySelector('[aria-label="실행"]')).toBeTruthy()
+    expect(container.querySelector('.composer-head .ws-pick')).toBeTruthy()
+    expect(container.querySelector('.composer-tools')).toBeNull()
+  })
 
   it('keeps input disabled for unknown metadata and enables it only for cached tools=supported', async () => {
     const status = vi.fn()
@@ -330,6 +348,35 @@ describe('AgentView NVIDIA capability gate', () => {
     })
   })
 
+  it('does not start workspace preview or RAG work while the Agent view is hidden', async () => {
+    const status = vi.fn().mockResolvedValue(capability('model/a'))
+    installApiStub(status)
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({ indexed: false, count: 0, files: 0 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { rerender } = render(
+      <AgentView
+        {...commonProps}
+        active={false}
+        settings={{ ...DEFAULT_SETTINGS, workspace: 'C:/workspace', activeLlmProvider: 'ollama' }}
+      />
+    )
+
+    await act(async () => { await Promise.resolve() })
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    rerender(
+      <AgentView
+        {...commonProps}
+        active
+        settings={{ ...DEFAULT_SETTINGS, workspace: 'C:/workspace', activeLlmProvider: 'ollama' }}
+      />
+    )
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+  })
+
   it('keeps input and conversation untouched when the Main grant expires before execution', async () => {
     const status = vi.fn().mockResolvedValue(capability('model/a'))
     installApiStub(status)
@@ -403,5 +450,226 @@ describe('AgentView NVIDIA capability gate', () => {
     expect(window.api.nvidia.agent.prepare).toHaveBeenCalledWith(expect.objectContaining({
       approvalMode: 'read'
     }))
+  })
+
+  it('clears a run notice when the Agent stream finishes with an error', async () => {
+    const status = vi.fn().mockResolvedValue(null)
+    installApiStub(status)
+    const encoder = new TextEncoder()
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith('/agent')) {
+        return {
+          ok: true,
+          status: 200,
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              streamController = controller
+              controller.enqueue(encoder.encode(`${JSON.stringify({
+                type: 'notice',
+                text: '이미지 생성 도구 호출을 이어갑니다…',
+                transient: true
+              })}\n`))
+            }
+          })
+        }
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({ indexed: false, count: 0, files: 0 })
+      }
+    }))
+
+    render(
+      <AgentView
+        {...commonProps}
+        settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'ollama' }}
+      />
+    )
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: '테스트 이미지 생성' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+
+    await screen.findByText('이미지 생성 도구 호출을 이어갑니다…')
+    await act(async () => {
+      ;(streamController as ReadableStreamDefaultController<Uint8Array>).enqueue(encoder.encode([
+        JSON.stringify({ type: 'error', error: 'ComfyUI 이미지 생성 실패' }),
+        JSON.stringify({ type: 'done' })
+      ].join('\n') + '\n'))
+      ;(streamController as ReadableStreamDefaultController<Uint8Array>).close()
+    })
+
+    await waitFor(() => {
+      expect(screen.queryByText('이미지 생성 도구 호출을 이어갑니다…')).toBeNull()
+      expect(screen.getByText(/ComfyUI 이미지 생성 실패/)).toBeTruthy()
+    })
+  })
+
+  it('removes a transient routing notice while preserving a durable notice after the response finishes', async () => {
+    const status = vi.fn().mockResolvedValue(null)
+    installApiStub(status)
+    const encoder = new TextEncoder()
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    const routingNotice = '요청에 맞는 실제 도구 호출이 없어 한 번만 올바른 도구 호출로 다시 시도합니다…'
+    const durableNotice = '안전 한도에 도달해 이후 실행은 중단했습니다.'
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith('/agent')) {
+        return {
+          ok: true,
+          status: 200,
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              streamController = controller
+              controller.enqueue(encoder.encode(`${JSON.stringify({
+                type: 'notice',
+                text: routingNotice,
+                transient: true
+              })}\n`))
+            }
+          })
+        }
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({ indexed: false, count: 0, files: 0 })
+      }
+    }))
+
+    render(
+      <AgentView
+        {...commonProps}
+        settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'ollama' }}
+      />
+    )
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '현재 작업 폴더의 파일구조 보여줘' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+
+    await screen.findByText(routingNotice)
+    await act(async () => {
+      ;(streamController as ReadableStreamDefaultController<Uint8Array>).enqueue(encoder.encode([
+        JSON.stringify({ type: 'content', text: '현재 작업 폴더의 파일 구조입니다.' }),
+        JSON.stringify({ type: 'notice', text: durableNotice }),
+        JSON.stringify({ type: 'done' })
+      ].join('\n') + '\n'))
+      ;(streamController as ReadableStreamDefaultController<Uint8Array>).close()
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('현재 작업 폴더의 파일 구조입니다.')).toBeTruthy()
+      expect(screen.queryByText(routingNotice)).toBeNull()
+      expect(screen.getByText(durableNotice)).toBeTruthy()
+    })
+  })
+
+  it('uses only a rendered image card as correction context and ignores stale image events', async () => {
+    const historicalImage = {
+      jobId: 'historical-image-job',
+      filename: 'historical.png',
+      subfolder: '',
+      storageType: 'output',
+      baseUrl: 'http://127.0.0.1:8188',
+      profileId: 'historical-profile',
+      profileName: 'Historical verified image',
+      modelName: 'historical-model',
+      selectionReason: 'verified result',
+      prompt: '1girl',
+      negativePrompt: '',
+      seed: '42',
+      width: 1024,
+      height: 1024,
+      steps: 20,
+      cfg: 5,
+      sampler: 'euler',
+      scheduler: 'normal'
+    }
+    const status = vi.fn().mockResolvedValue(null)
+    installApiStub(status, {
+      id: 'agent-with-image-history',
+      kind: 'agent',
+      title: 'image history',
+      createdAt: 1,
+      updatedAt: 1,
+      pinned: false,
+      data: {
+        items: [{ kind: 'image', image: historicalImage }],
+        history: [{ role: 'assistant', content: '이미지 생성을 완료했습니다. 결과 카드에서 확인할 수 있습니다.' }],
+        plan: [],
+        workspace: ''
+      }
+    })
+
+    const encoder = new TextEncoder()
+    const agentRequests: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/agent')) {
+        const request = JSON.parse(String(init?.body)) as Record<string, string>
+        agentRequests.push(request)
+        const currentImage = {
+          ...historicalImage,
+          jobId: 'current-image-job',
+          filename: 'current.png',
+          profileName: 'Current image result'
+        }
+        const staleImage = {
+          ...historicalImage,
+          jobId: 'stale-image-job',
+          filename: 'stale.png',
+          profileName: 'Stale image result'
+        }
+        return {
+          ok: true,
+          status: 200,
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(encoder.encode([
+                JSON.stringify({
+                  type: 'image_result',
+                  id: 'stale-image-call',
+                  assistantTurnId: 'stale-assistant-turn',
+                  image: staleImage
+                }),
+                JSON.stringify({
+                  type: 'image_result',
+                  id: 'current-image-call',
+                  assistantTurnId: request.assistant_turn_id,
+                  image: currentImage
+                }),
+                JSON.stringify({ type: 'content', text: 'stream complete' }),
+                JSON.stringify({ type: 'done' })
+              ].join('\n') + '\n'))
+              controller.close()
+            }
+          })
+        }
+      }
+      if (url.includes('/comfy/image?')) return { ok: false, status: 404 }
+      return {
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({ indexed: false, count: 0, files: 0 })
+      }
+    }))
+
+    render(
+      <AgentView
+        {...commonProps}
+        conversationRequest={{ kind: 'agent', id: 'agent-with-image-history', nonce: 1 }}
+        settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'ollama' }}
+      />
+    )
+
+    await screen.findByText('Historical verified image')
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'continue' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+
+    await screen.findByText('stream complete')
+    await waitFor(() => expect(agentRequests).toHaveLength(1))
+    expect(agentRequests[0]?.image_context_verified).toBe(true)
+    expect(screen.getByText('Current image result')).toBeTruthy()
+    expect(screen.queryByText('Stale image result')).toBeNull()
+    expect(document.querySelectorAll('.generated-image')).toHaveLength(2)
   })
 })

@@ -2,8 +2,9 @@ import { lazy, Suspense, useEffect, useState } from 'react'
 import type { AppSettings } from '../../shared/settings'
 import { DEFAULT_SETTINGS } from '../../shared/settings'
 import type { BackendInfo, HealthInfo } from '../../shared/backend'
+import type { ConversationKind } from '../../shared/conversation'
 import Titlebar from './components/Titlebar'
-import Sidebar, { type ViewKey } from './components/Sidebar'
+import Sidebar, { type ConversationRequest, type ViewKey } from './components/Sidebar'
 import TooltipHost from './components/Tooltip'
 import { ConfirmHost } from './components/ConfirmDialog'
 import { applyTheme } from './lib/theme'
@@ -12,9 +13,10 @@ import { authHeaders } from './lib/backend'
 // Heavy views (Markdown, ComfyUI controls, settings integrations) are split from
 // the startup bundle. A visited view remains mounted so active conversations and
 // unsaved settings retain their existing behavior.
-const HomeView = lazy(() => import('./views/HomeView'))
 const ChatView = lazy(() => import('./views/ChatView'))
 const AgentView = lazy(() => import('./views/AgentView'))
+const TodoView = lazy(() => import('./views/TodoView'))
+const MyDbView = lazy(() => import('./views/MyDbView'))
 const ComfyView = lazy(() => import('./views/ComfyView'))
 const SettingsView = lazy(() => import('./views/SettingsView'))
 
@@ -29,8 +31,8 @@ function App(): React.JSX.Element {
   const [backend, setBackend] = useState<BackendInfo>({ state: 'starting', port: null })
   const [health, setHealth] = useState<HealthInfo | null>(null)
   // 대화 목록 패널 접힘 상태 — 뷰별로 별도 유지, 토글 버튼은 타이틀바에 있다
-  const [chatConvCollapsed, setChatConvCollapsed] = useState(false)
-  const [agentConvCollapsed, setAgentConvCollapsed] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [conversationRequest, setConversationRequest] = useState<ConversationRequest | null>(null)
 
   // 메인 프로세스에서 저장된 설정 불러오기
   useEffect(() => {
@@ -124,28 +126,41 @@ function App(): React.JSX.Element {
   }
 
   // 뷰는 숨김 처리로 유지 → 채팅 대화가 뷰 전환에 사라지지 않는다
-  const wrap = (k: ViewKey): string => `viewwrap${view === k ? '' : ' viewwrap--hidden'}`
+  const wrap = (k: ViewKey): string => `viewwrap${k === 'todo' ? ' viewwrap--todo' : ''}${k === 'graph' ? ' viewwrap--graph' : ''}${view === k ? '' : ' viewwrap--hidden'}`
   const navigate = (next: ViewKey): void => {
     setVisitedViews((current) => current.has(next) ? current : new Set(current).add(next))
     setView(next)
   }
 
-  const convToggle =
-    view === 'chat'
-      ? { collapsed: chatConvCollapsed, onToggle: () => setChatConvCollapsed((v) => !v) }
-      : view === 'agent'
-        ? { collapsed: agentConvCollapsed, onToggle: () => setAgentConvCollapsed((v) => !v) }
-        : null
+  const convToggle = {
+    collapsed: sidebarCollapsed,
+    onToggle: () => setSidebarCollapsed((value) => !value)
+  }
+
+  const requestConversation = (kind: ConversationKind, id: string | null): void => {
+    navigate(kind)
+    setSidebarCollapsed(false)
+    setConversationRequest({ kind, id, nonce: Date.now() })
+  }
 
   return (
     <div className="frame">
       <Titlebar backend={backend} health={health} provider={settings.activeLlmProvider} convToggle={convToggle} />
       <div className="body">
-        <Sidebar view={view} onNavigate={navigate} />
+        <Sidebar
+          view={view}
+          onNavigate={navigate}
+          onNewConversation={(kind) => requestConversation(kind, null)}
+          onOpenConversation={requestConversation}
+          activeConversation={conversationRequest}
+          collapsed={sidebarCollapsed}
+        />
         <main className="content">
-          {visitedViews.has('home') && <div className={wrap('home')}><Suspense fallback={<ViewFallback />}><HomeView settings={settings} backend={backend} health={health} onSaveSettings={saveSettings} /></Suspense></div>}
-          {visitedViews.has('chat') && <div className={wrap('chat')}><Suspense fallback={<ViewFallback />}><ChatView settings={settings} backend={backend} health={health} onSaveSettings={saveSettings} convCollapsed={chatConvCollapsed} /></Suspense></div>}
-          {visitedViews.has('agent') && <div className={wrap('agent')}><Suspense fallback={<ViewFallback />}><AgentView active={view === 'agent'} settings={settings} backend={backend} health={health} onPickWorkspace={pickWorkspace} onSaveSettings={saveSettings} convCollapsed={agentConvCollapsed} /></Suspense></div>}
+          {visitedViews.has('home') && <div className={wrap('home')} aria-label="홈" />}
+          {visitedViews.has('chat') && <div className={wrap('chat')}><Suspense fallback={<ViewFallback />}><ChatView settings={settings} backend={backend} health={health} onSaveSettings={saveSettings} conversationRequest={conversationRequest} onConversationActive={(id) => setConversationRequest({ kind: 'chat', id, nonce: Date.now() })} /></Suspense></div>}
+          {visitedViews.has('agent') && <div className={wrap('agent')}><Suspense fallback={<ViewFallback />}><AgentView active={view === 'agent'} settings={settings} backend={backend} health={health} onPickWorkspace={pickWorkspace} onSaveSettings={saveSettings} conversationRequest={conversationRequest} onConversationActive={(id) => setConversationRequest({ kind: 'agent', id, nonce: Date.now() })} /></Suspense></div>}
+          {visitedViews.has('todo') && <div className={wrap('todo')}><Suspense fallback={<ViewFallback />}><TodoView active={view === 'todo'} backend={backend} /></Suspense></div>}
+          {visitedViews.has('graph') && <div className={wrap('graph')}><Suspense fallback={<ViewFallback />}><MyDbView active={view === 'graph'} /></Suspense></div>}
           {visitedViews.has('comfy') && <div className={wrap('comfy')}><Suspense fallback={<ViewFallback />}><ComfyView settings={settings} backend={backend} active={view === 'comfy'} onSaveSettings={saveSettings} /></Suspense></div>}
           {visitedViews.has('settings') && <div className={wrap('settings')}><Suspense fallback={<ViewFallback />}><SettingsView settings={settings} backend={backend} health={health} onSave={saveSettings} onExternalSettingsChange={setSettings} active={view === 'settings'} /></Suspense></div>}
         </main>

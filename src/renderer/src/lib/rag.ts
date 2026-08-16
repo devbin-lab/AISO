@@ -21,6 +21,8 @@ export type RagIndexEvent =
       dim: number
       truncated?: boolean
       total_found?: number
+      total_found_exact?: boolean
+      file_limit_reached?: boolean
     }
   | { type: 'error'; error: string }
 

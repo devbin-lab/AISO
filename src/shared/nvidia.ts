@@ -61,6 +61,10 @@ export interface NvidiaAgentDataScopeRequest {
   workspace: boolean
   rag: boolean
   image: boolean
+  /** Aiso's own saved document-ToDo metadata (not arbitrary workspace files). */
+  todos?: boolean
+  /** My DB library metadata and trash-restore results (never source paths or file contents). */
+  myDb?: boolean
   /** Main validates this against its private Comfy registry. */
   selectedComfyModelId?: string
 }
@@ -82,6 +86,8 @@ export interface NvidiaAgentDataManifest {
     workspace: boolean
     rag: boolean
     imagePrompt: boolean
+    savedTodos: boolean
+    myDb: boolean
     toolResults: string[]
     toolResultDetails: string[]
   }
@@ -89,6 +95,8 @@ export interface NvidiaAgentDataManifest {
     workspacePath: string | null
     rag: { enabled: boolean; localOllama: true; topK: number }
     image: { enabled: boolean; selectionMode: 'auto' | 'manual' }
+    savedTodos: boolean
+    myDb: boolean
   }
   localOnly: string[]
   allowedTools: string[]

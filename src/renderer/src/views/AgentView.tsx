@@ -11,12 +11,11 @@ import type {
   ComfyGeneratedImage,
   PlanStep
 } from '../../../shared/agent'
-import type { ConversationMeta } from '../../../shared/conversation'
 import { TOOL_LABEL, APPROVAL_MODES } from '../../../shared/agent'
 import { streamAgent, approveAgent, type AgentMessage } from '../lib/agent'
 import { newConversationId, titleFromText } from '../lib/conversations'
 import { modelInstalled } from '../lib/ollama'
-import ConversationList from '../components/ConversationList'
+import type { ConversationRequest } from '../components/Sidebar'
 import Markdown from '../components/Markdown'
 import { ragStatus, ragIndex, type RagStatus } from '../lib/rag'
 import { authHeaders } from '../lib/backend'
@@ -38,6 +37,8 @@ import Dropdown, { type DropdownOption } from '../components/Dropdown'
 import GeneratedImage from '../components/GeneratedImage'
 import { ensureComfyReadyForAgent, looksLikeImageGenerationRequest } from '../lib/comfy'
 import { getComfyAgentReadiness, type ComfyModelProfile } from '../../../shared/comfy-model'
+import AttachmentPicker from '../components/AttachmentPicker'
+import type { AttachmentRef } from '../../../shared/attachments'
 
 const EFFORT_OPTIONS: DropdownOption[] = [
   { value: 'low', label: '낮음', hint: '빠름' },
@@ -69,7 +70,7 @@ async function listComfyProfilesForAgent(manualSelection: boolean): Promise<Comf
 type ToolStatus = 'running' | 'awaiting' | 'done' | 'error' | 'rejected'
 
 type Item =
-  | { kind: 'user'; text: string }
+  | { kind: 'user'; text: string; attachments?: AttachmentRef[] }
   | { kind: 'assistant'; text: string; thinking: string; streaming: boolean }
   | {
       kind: 'tool'
@@ -93,7 +94,11 @@ interface Props {
   health: HealthInfo | null
   onPickWorkspace: () => Promise<void>
   onSaveSettings: (patch: Partial<AppSettings>) => Promise<boolean>
-  convCollapsed: boolean
+  conversationRequest?: ConversationRequest | null
+  onConversationActive?: (id: string | null) => void
+  /** App-level Agent mode only: conversations must begin from a registered project. */
+  requireProjectStart?: boolean
+  convCollapsed?: boolean
 }
 
 function argPath(args: Record<string, unknown>): string {
@@ -111,13 +116,17 @@ function AgentView({
   health,
   onPickWorkspace,
   onSaveSettings,
-  convCollapsed
+  conversationRequest,
+  onConversationActive = () => {},
+  requireProjectStart = false
 }: Props): React.JSX.Element {
   const [items, setItems] = useState<Item[]>([])
   const [input, setInput] = useState('')
+  const [attachments, setAttachments] = useState<AttachmentRef[]>([])
   const [running, setRunning] = useState(false)
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>('read')
   const [note, setNote] = useState<string | null>(null)
+  const [transientNote, setTransientNote] = useState<string | null>(null)
   const [plan, setPlan] = useState<PlanStep[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(false) // 우측 사이드바(계획+미리보기) 전체 토글
   const [showPreview, setShowPreview] = useState(true) // 사이드바 안 미리보기 하위 패널만
@@ -144,6 +153,7 @@ function AgentView({
   // 작업 폴더가 정해지면 사이드카에 미리보기 루트를 알려준다 (/f 정적 서빙용)
   useEffect(() => {
     if (
+      active &&
       settings.activeLlmProvider !== 'nvidia' &&
       backend.state === 'ready' && backend.port && settings.workspace
     ) {
@@ -153,7 +163,7 @@ function AgentView({
         body: JSON.stringify({ workspace: settings.workspace })
       }).catch(() => {})
     }
-  }, [backend.state, backend.port, settings.activeLlmProvider, settings.workspace])
+  }, [active, backend.state, backend.port, settings.activeLlmProvider, settings.workspace])
 
   // Metadata-only local cache lookup. Starting Agent never probes NVIDIA implicitly;
   // Main remains the authoritative gate and revalidates again before minting a grant.
@@ -199,6 +209,7 @@ function AgentView({
   // RAG 색인 상태 로드 (작업 폴더·백엔드 준비 시)
   useEffect(() => {
     if (
+      active &&
       backend.state === 'ready' &&
       backend.port &&
       settings.workspace.trim()
@@ -207,7 +218,7 @@ function AgentView({
     } else {
       setRag(null)
     }
-  }, [backend.state, backend.port, settings.activeLlmProvider, settings.workspace])
+  }, [active, backend.state, backend.port, settings.activeLlmProvider, settings.workspace])
 
   const previewUrl =
     backend.port && previewPath
@@ -218,6 +229,9 @@ function AgentView({
   const sessionRef = useRef<string>('')
   const historyRef = useRef<AgentMessage[]>([])
   const finalTextRef = useRef<string>('') // 이번 run의 마지막 assistant 답변 (툴콜 이후 초기화)
+  // NDJSON events can arrive after a newer run starts.  Keep the active execution
+  // identity outside React state so a stale image_result cannot mutate this timeline.
+  const activeAssistantTurnIdRef = useRef<string>('')
   const autoIndexedRef = useRef<string>('') // 자동 색인을 이미 시도한 워크스페이스 (중복 방지)
   const scrollRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
@@ -233,13 +247,7 @@ function AgentView({
   // ── 대화방 (에이전트 작업 세션) ──
   const [convId, setConvId] = useState<string | null>(null)
   const [convTitle, setConvTitle] = useState('새 대화')
-  const [convList, setConvList] = useState<ConversationMeta[]>([])
   const convIdRef = useRef<string | null>(null)
-
-  const refreshConvs = (): void => {
-    window.api.conversations.list('agent').then(setConvList).catch(() => {})
-  }
-  useEffect(() => refreshConvs(), [])
 
   const resetNvidiaSessionForConversation = (): void => {
     if (!nvidiaSelected) return
@@ -265,6 +273,7 @@ function AgentView({
   }, [])
 
   useEffect(() => {
+    if (!active) return
     if (settings.comfyModelSelectionMode === 'manual') {
       void refreshManualComfyProfiles()
       return
@@ -272,6 +281,7 @@ function AgentView({
     setManualComfyProfiles([])
     setManualComfyProfileId('')
   }, [
+    active,
     settings.comfyModelSelectionMode,
     refreshManualComfyProfiles
   ])
@@ -288,24 +298,37 @@ function AgentView({
         title: convTitle,
         data: { items: lean, history: historyRef.current, plan, workspace: settings.workspace }
       })
-      .then(refreshConvs)
+      .then(() => window.dispatchEvent(new Event('aiso:conversations-changed')))
       .catch(() => {})
   }, [items, plan, running, convTitle])
 
-  const newConv = (): void => {
+  const newConv = (announce = true): void => {
     if (running) return
     resetNvidiaSessionForConversation()
     convIdRef.current = null
     setConvId(null)
     setConvTitle('새 대화')
     setItems([])
+    setAttachments([])
     setPlan([])
     historyRef.current = []
     setNote(null)
+    setTransientNote(null)
+    if (announce) onConversationActive(null)
     // 새 대화는 작업 폴더 미선택 상태로 시작 — 작업 폴더는 대화(작업 세션)마다 따로 고른다
     if (settings.workspace) void onSaveSettings({ workspace: '' })
   }
-  const selectConv = async (id: string): Promise<void> => {
+  useEffect(() => {
+    const onRenamed = (event: Event): void => {
+      const detail = (event as CustomEvent<{ id?: unknown; title?: unknown }>).detail
+      if (detail?.id === convIdRef.current && typeof detail.title === 'string') {
+        setConvTitle(detail.title)
+      }
+    }
+    window.addEventListener('aiso:conversation-renamed', onRenamed)
+    return () => window.removeEventListener('aiso:conversation-renamed', onRenamed)
+  }, [])
+  const selectConv = async (id: string, announce = true): Promise<void> => {
     if (running || id === convId) return
     const c = await window.api.conversations.get(id)
     if (!c) return
@@ -318,24 +341,18 @@ function AgentView({
     setPlan(d.plan ?? [])
     historyRef.current = d.history ?? []
     setNote(null)
+    setTransientNote(null)
+    if (announce) onConversationActive(id)
     // 작업 세션마다 작업 폴더가 다를 수 있으니 저장된 폴더로 복원
     if (d.workspace && d.workspace !== settings.workspace) void onSaveSettings({ workspace: d.workspace })
   }
-  const renameConv = async (id: string, title: string): Promise<void> => {
-    const c = await window.api.conversations.get(id)
-    if (!c) return
-    await window.api.conversations.save({ id, kind: 'agent', title, data: c.data })
-    if (convIdRef.current === id) setConvTitle(title)
-    refreshConvs()
-  }
-  const pinConv = (id: string, pinned: boolean): void => {
-    window.api.conversations.setPinned(id, pinned).then(refreshConvs).catch(() => {})
-  }
-  const deleteConv = async (id: string): Promise<void> => {
-    await window.api.conversations.remove(id)
-    if (convIdRef.current === id) newConv()
-    refreshConvs()
-  }
+  const consumedRequestRef = useRef(0)
+  useEffect(() => {
+    if (conversationRequest?.kind !== 'agent' || conversationRequest.nonce === consumedRequestRef.current) return
+    consumedRequestRef.current = conversationRequest.nonce
+    if (conversationRequest.id) void selectConv(conversationRequest.id, false)
+    else newConv(false)
+  }, [conversationRequest])
 
   useEffect(() => {
     const el = scrollRef.current
@@ -363,13 +380,21 @@ function AgentView({
     nvidiaSelected ? nvidiaAgentCapability === 'supported' : ollamaOk
   )
   const canSend =
-    ready && !running && input.trim().length > 0
+    ready && !running && input.trim().length > 0 && (!requireProjectStart || convIdRef.current != null)
 
   // ---- 이벤트 → 타임라인 리듀서 (순수: 기존 객체를 변형하지 않는다) ----
   const reduce = (ev: AgentEvent): void => {
+    // Check before scheduling React state work. The stream can finish and clear
+    // the active ref before a functional setItems updater is eventually run.
+    if (ev.type === 'image_result' && ev.assistantTurnId !== activeAssistantTurnIdRef.current) {
+      return
+    }
     // 마지막 assistant 답변 추적 (setItems 밖에서 1회만 실행 → StrictMode 이중호출 영향 없음)
     if (ev.type === 'content') finalTextRef.current += ev.text
     else if (ev.type === 'tool_call') {
+      // A backend notice describes only the transition into a tool call.  It
+      // must not survive once that call actually starts.
+      setTransientNote(null)
       finalTextRef.current = ''
       // 방금 다룬 HTML을 우측 미리보기 대상으로 추적
       const p = typeof ev.args.path === 'string' ? ev.args.path : ''
@@ -381,7 +406,12 @@ function AgentView({
       setLiveTokens(ev.total)
       return
     } else if (ev.type === 'notice') {
-      setNote(ev.text)
+      if (ev.transient) {
+        setTransientNote(ev.text)
+      } else {
+        setTransientNote(null)
+        setNote(ev.text)
+      }
       return
     } else if (ev.type === 'plan') {
       setPlan(ev.steps)
@@ -391,11 +421,18 @@ function AgentView({
     }
 
     if (ev.type === 'error') {
+      setTransientNote(null)
       setItems((prev) => [
         ...prev.map((i) => (i.kind === 'assistant' ? { ...i, streaming: false } : i)),
         { kind: 'assistant', text: `⚠ ${ev.error}`, thinking: '', streaming: false }
       ])
       return
+    }
+
+    // Keep run-scoped guidance out of the next idle state even when a terminal
+    // event and the timeline update are batched by React.
+    if (ev.type === 'tool_result' || ev.type === 'image_result' || ev.type === 'done') {
+      setTransientNote(null)
     }
 
     setItems((prev) => {
@@ -483,6 +520,10 @@ function AgentView({
   const send = async (): Promise<void> => {
     const text = input.trim()
     if (!text || !ready || running || sendGuardRef.current) return
+    if (requireProjectStart && !convIdRef.current) {
+      setNote('왼쪽 사이드바에서 프로젝트를 만들고 “프로젝트 시작”을 눌러 대화를 시작해 주세요.')
+      return
+    }
     sendGuardRef.current = true
     const ac = new AbortController()
     abortRef.current = ac
@@ -501,10 +542,20 @@ function AgentView({
     let executionStarted = false
 
     try {
-      const previousAssistant = [...historyRef.current]
-        .reverse()
-        .find((message) => message.role === 'assistant')?.content ?? ''
-      const imageRequested = looksLikeImageGenerationRequest(text, previousAssistant)
+      // A completion-looking assistant sentence is not evidence that ComfyUI
+      // produced an image.  Only a real, rendered image timeline item unlocks
+      // contextual correction intent for this request.
+      const imageContextVerified = items.some((item) => item.kind === 'image')
+      const previousAssistant = imageContextVerified
+        ? [...historyRef.current]
+          .reverse()
+          .find((message) => message.role === 'assistant')?.content ?? ''
+        : ''
+      const imageRequested = looksLikeImageGenerationRequest(
+        text,
+        previousAssistant,
+        imageContextVerified
+      )
       const manualSelection = settings.comfyModelSelectionMode === 'manual'
       const availableComfyProfiles = await listComfyProfilesForAgent(manualSelection)
       const selectedComfyProfile = availableComfyProfiles.find(
@@ -547,17 +598,22 @@ function AgentView({
         convIdRef.current = id
         setConvId(id)
         setConvTitle(titleFromText(text))
+        onConversationActive(id)
       }
       setInput('')
       if (taRef.current) taRef.current.style.height = 'auto'
-      historyRef.current = [...historyRef.current, { role: 'user', content: text }]
+      const pendingAttachments = attachments
+      historyRef.current = [...historyRef.current, { role: 'user', content: text, attachments: pendingAttachments }]
       finalTextRef.current = ''
       setNote(null)
+      setTransientNote(null)
       setPlan([])
-      setItems((prev) => [...prev, { kind: 'user', text }])
+      setItems((prev) => [...prev, { kind: 'user', text, attachments: pendingAttachments }])
       setRunning(true)
+      setAttachments([])
       setLiveTokens(0)
       runTokensRef.current = 0
+      activeAssistantTurnIdRef.current = assistantTurnId
       executionStarted = true
 
       await streamAgent(
@@ -574,18 +630,26 @@ function AgentView({
         {
           selectedComfyModelId: selectedComfyModelId ?? undefined,
           nvidiaGrantId
-        }
+        },
+        imageContextVerified,
+        convIdRef.current ?? ''
       )
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
         if (executionStarted) {
-          setNote(null)
+          setTransientNote(null)
           reduce({ type: 'error', error: (err as Error).message })
         } else {
           setNote((err as Error).message)
         }
       }
     } finally {
+      // Network termination, user cancellation, and malformed streams may end
+      // without a terminal SSE event.  Never leave a run-scoped notice behind.
+      if (executionStarted) setTransientNote(null)
+      if (activeAssistantTurnIdRef.current === assistantTurnId) {
+        activeAssistantTurnIdRef.current = ''
+      }
       setRunning(false)
       sendGuardRef.current = false
       abortRef.current = null
@@ -617,6 +681,7 @@ function AgentView({
 
   const stop = (): void => {
     abortRef.current?.abort()
+    setTransientNote(null)
     // 승인 대기 중인 툴은 거부 처리 → 백엔드 홀딩 해제
     items.forEach((i) => {
       if (i.kind === 'tool' && i.status === 'awaiting') {
@@ -667,9 +732,11 @@ function AgentView({
           setRagNote(
             e.count === 0
               ? 'RAG로 참고할 코드·문서를 찾지 못했습니다 (작업 폴더에 텍스트 파일이 있는지 확인하세요).'
-              : e.truncated
-                ? `폴더가 커서 일부만 RAG에 넣었습니다 (발견 ${e.total_found ?? e.files}개 중 ${e.files}개 파일). 더 넣으려면 설정 → RAG의 '색인 범위(최대 파일 수)'를 늘리세요.`
-                : null
+              : e.file_limit_reached
+                ? `폴더가 커서 일부만 RAG에 넣었습니다 (최소 ${e.total_found ?? e.files}개 중 ${e.files}개 파일). 더 넣으려면 설정 → RAG의 '색인 범위(최대 파일 수)'를 늘리세요.`
+                : e.truncated
+                  ? '문서 또는 청크 상한으로 일부 내용만 RAG에 넣었습니다. 필요한 문서는 짧게 나누거나 색인 범위를 조정하세요.'
+                  : null
           )
         } else if (e.type === 'error') setRagNote(e.error)
       })
@@ -687,7 +754,7 @@ function AgentView({
   // 색인이 없으면 자동으로 한 번 색인한다 (매번 수동 클릭 불필요). 이후 파일 변경은 백엔드가
   // 백그라운드로 재색인하므로 최초 1회만 트리거하면 된다.
   useEffect(() => {
-    if (!settings.ragEnabled || !backendReady || !hasWorkspace || indexing) return
+    if (!active || !settings.ragEnabled || !backendReady || !hasWorkspace || indexing) return
     if (rag == null || rag.indexed) return // 상태 미확인 or 이미 색인됨
     if (autoIndexedRef.current === settings.workspace) return // 이 워크스페이스는 이미 시도함
     // 임베딩 모델이 설치돼 있을 때만 (health 로드 대기 + 미설치면 조용히 대기 — 수동 버튼으로 처리)
@@ -698,6 +765,7 @@ function AgentView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     rag,
+    active,
     backendReady,
     hasWorkspace,
     indexing,
@@ -747,25 +815,9 @@ function AgentView({
       kind: 'warn'
     }
   } else if (!ollamaOk && !nvidiaSelected) notice = { text: 'Ollama에 연결할 수 없습니다 — Ollama 앱을 실행하세요', kind: 'err' }
-  else if (!hasWorkspace)
-    notice = {
-      text: '작업 폴더 없이 실행 중 — 웹 조사·스킬 제작만 가능합니다. 파일 작업을 하려면 아래에서 작업 폴더를 선택하세요.',
-      kind: 'warn'
-    }
 
   return (
     <div className="convshell">
-      {!convCollapsed && (
-        <ConversationList
-          items={convList}
-          activeId={convId}
-          onSelect={selectConv}
-          onNew={newConv}
-          onRename={renameConv}
-          onPin={pinConv}
-          onDelete={deleteConv}
-        />
-      )}
       <div className="agent">
       <section className="agent__main view view--chat">
       <header className="view__head view__head--row">
@@ -798,7 +850,16 @@ function AgentView({
           </div>
         ) : (
           items.map((it, i) => {
-            if (it.kind === 'user') return <div key={i} className="msg msg--user"><div className="msg__bubble">{it.text}</div></div>
+            if (it.kind === 'user') return (
+              <div key={i} className="msg msg--user">
+                <div className="msg__bubble">
+                  {it.text}
+                  {it.attachments && it.attachments.length > 0 && (
+                    <div className="msg__attachments">첨부: {it.attachments.map((item) => item.name).join(', ')}</div>
+                  )}
+                </div>
+              </div>
+            )
             if (it.kind === 'assistant') {
               return (
                 <div key={i} className="msg msg--assistant">
@@ -927,6 +988,7 @@ function AgentView({
 
       {ragNote && !awaiting && <div className="notice notice--warn">{ragNote}</div>}
       {note && !awaiting && <div className="notice notice--warn">{note}</div>}
+      {transientNote && running && !awaiting && <div className="notice notice--warn">{transientNote}</div>}
       {notice && !awaiting && !note && !ragNote && (
         <div className={`notice notice--${notice.kind}`}>{notice.text}</div>
       )}
@@ -946,7 +1008,6 @@ function AgentView({
         </div>
       )}
 
-      {/* 입력창 위: 작업 폴더 + RAG (왼쪽 정렬) */}
       <div className="composer-head">
         <button
           className="ws-pick"
@@ -981,41 +1042,35 @@ function AgentView({
         )}
       </div>
 
-      <div className="composer">
+      <div className="agent-composer">
         <textarea
           ref={taRef}
-          className="input composer__ta"
+          className="agent-composer__ta"
           rows={1}
           value={input}
           disabled={!ready || running}
           placeholder={
             ready
-              ? '무엇을 할까요? · Enter 전송'
+              ? '무엇이든 요청하세요'
               : '엔진 준비 후 사용 가능'
           }
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onKeyDown}
           onInput={autoGrow}
         />
-        {running ? (
-          <button className="btn btn--stop" onClick={stop}>중지</button>
-        ) : (
-          <button className="btn" disabled={!canSend} onClick={() => void send()}>실행</button>
-        )}
-      </div>
+        <div className="agent-composer__footer">
+          <AttachmentPicker value={attachments} onChange={setAttachments} disabled={!ready || running} />
 
-      <div className="composer-tools">
-        <Dropdown
-          value={approvalMode}
-          options={APPROVAL_OPTIONS}
-          onChange={(v) => setApprovalMode(v as ApprovalMode)}
-          align="left"
-          title="승인 모드 — 수동(모든 작업 확인) · 읽기(생성·변경 확인) · 자동(실행·삭제·외부 발신 확인)"
-        />
+          <Dropdown
+            value={approvalMode}
+            options={APPROVAL_OPTIONS}
+            onChange={(v) => setApprovalMode(v as ApprovalMode)}
+            align="left"
+            title="승인 모드 — 수동(모든 작업 확인) · 읽기(생성·변경 확인) · 자동(승인 없이 실행)"
+          />
 
-        {settings.comfyModelSelectionMode === 'manual' && (
-          <div className="composer-tools__manual-model">
-            <span className="composer-tools__label">이미지 모델</span>
+          {settings.comfyModelSelectionMode === 'manual' && (
+            <div className="agent-composer__image-model">
             <Dropdown
               value={manualComfyProfileId}
               options={manualComfyOptions}
@@ -1032,38 +1087,53 @@ function AgentView({
               aria-label="이미지 모델 목록 새로고침"
               onClick={() => void refreshManualComfyProfiles()}
               disabled={running || manualComfyLoading}
-            >
-              <RefreshIcon />
-            </button>
-          </div>
-        )}
+              >
+                <RefreshIcon />
+              </button>
+            </div>
+          )}
 
-        <div className="composer-tools__right">
-          <Dropdown
-            value={nvidiaSelected ? settings.nvidiaModel : settings.model}
-            options={modelOptions}
-            onChange={(v) => void onSaveSettings(nvidiaSelected ? { nvidiaModel: v } : { model: v })}
-            mono
-            align="right"
-            title="모델"
-            placeholder="모델"
-          />
-          <Dropdown
-            value={settings.reasoningEffort}
-            options={EFFORT_OPTIONS}
-            onChange={(v) => void onSaveSettings({ reasoningEffort: v as ReasoningEffort })}
-            align="right"
-            title="추론 성능"
-          />
+          <div className="agent-composer__controls">
+            <Dropdown
+              value={nvidiaSelected ? settings.nvidiaModel : settings.model}
+              options={modelOptions}
+              onChange={(v) => void onSaveSettings(nvidiaSelected ? { nvidiaModel: v } : { model: v })}
+              mono
+              align="right"
+              title="모델"
+              placeholder="모델"
+            />
+            <Dropdown
+              value={settings.reasoningEffort}
+              options={EFFORT_OPTIONS}
+              onChange={(v) => void onSaveSettings({ reasoningEffort: v as ReasoningEffort })}
+              align="right"
+              title="추론 성능"
+            />
           {items.length > 0 && (
             <button
-              className="iconbtn"
+              className="iconbtn agent-composer__new"
               data-tip="새 대화 시작"
               aria-label="새 대화 시작"
-              onClick={newConv}
+              onClick={() => newConv()}
               disabled={running}
             >
               <TrashIcon />
+            </button>
+          )}
+          </div>
+
+          {running ? (
+            <button className="agent-composer__send agent-composer__send--stop" onClick={stop}>중지</button>
+          ) : (
+            <button
+              className="agent-composer__send"
+              aria-label="실행"
+              title="실행"
+              disabled={!canSend}
+              onClick={() => void send()}
+            >
+              <span aria-hidden="true">↑</span>
             </button>
           )}
         </div>

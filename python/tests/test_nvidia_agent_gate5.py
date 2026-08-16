@@ -9,6 +9,7 @@ import textwrap
 import pytest
 
 import agent
+import agent_runner
 from agent_ledger import AgentExecutionLedger, LedgerKey
 from llm import LlmEvent, LlmModelRuntime, LlmRequest
 from llm.providers.nvidia import NvidiaAdapter
@@ -62,6 +63,7 @@ async def collect(
     approval_mode="read",
     allowed_tools=("update_plan", "get_system_time"),
     renderer_enabled_tools=None,
+    messages=None,
 ):
     return [
         event
@@ -69,7 +71,11 @@ async def collect(
             host="unused",
             workspace=workspace,
             model="nvidia/test-model",
-            messages=[{"role": "user", "content": "safe request"}],
+            messages=(
+                [{"role": "user", "content": "safe request"}]
+                if messages is None
+                else messages
+            ),
             session_id="session-gate5-0001",
             approval_mode=approval_mode,
             provider="nvidia",
@@ -122,26 +128,156 @@ def test_split_safe_call_executes_once_and_preserves_three_distinct_ids(tmp_path
     assert wire_messages[-1]["tool_call_id"] == "provider-call-01"
 
 
+def test_nvidia_existing_web_validation_scope_hides_rewrite_tools(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "index.html").write_text("<!doctype html><p>keep</p>", encoding="utf-8")
+    original = (workspace / "index.html").read_bytes()
+    executions: list[str] = []
+
+    async def fake_execute(spec, root, host, args):
+        executions.append(spec.name)
+        return "unexpected", None
+
+    monkeypatch.setattr(agent, "execute", fake_execute)
+    runtime = FakeNvidiaRuntime([
+        final_turn("처음부터 다시 만들겠습니다."),
+        final_turn("검증 실행 없이 끝냅니다."),
+    ])
+    messages = [{"role": "user", "content": "검증 기능 다시 활성화했어. 검증해줘"}]
+    allowed = (
+        "list_tree", "read_file", "glob",
+        "write_code_file", "edit_code_file", "run_web", "run_code", "run_command",
+    )
+
+    with AgentExecutionLedger(tmp_path / "ledger.sqlite3") as ledger:
+        events = asyncio.run(collect(
+            runtime,
+            ledger,
+            workspace=str(workspace),
+            allowed_tools=allowed,
+            messages=messages,
+        ))
+
+    exposed = {tool["function"]["name"] for tool in runtime.requests[0].tools}
+    assert exposed == {"list_tree", "read_file", "glob", "run_web"}
+    assert "This request: validate existing web output only" in runtime.requests[0].messages[0]["content"]
+    assert executions == []
+    assert (workspace / "index.html").read_bytes() == original
+    assert not any("처음부터 다시" in event.get("text", "") for event in events)
+    notices = [event.get("text", "") for event in events if event["type"] == "notice"]
+    assert sum("기존 웹 산출물을 먼저 찾습니다" in notice for notice in notices) == 1
+    assert sum("기존 웹 산출물 검증 미실행" in notice for notice in notices) == 1
+
+
+def test_nvidia_validation_keeps_raw_browser_diagnostics_local(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    secret = "AISO_PROVIDER_SECRET_7F31"
+
+    async def fake_execute(spec, root, host, args):
+        assert spec.name == "run_web"
+        assert args["_strict_local_assets"] is True
+        return (
+            "[WEB_VALIDATION v1]\n"
+            "status=FAIL level=runtime entry=index.html\n"
+            "summary=기본 실행 검사에서 문제를 발견했습니다.\n"
+            "runtime=FAIL errors=1\n"
+            f"- [콘솔에러] {secret}\n"
+            f"- blocked_url=https://example.invalid/?token={secret}",
+            None,
+        )
+
+    monkeypatch.setattr(agent, "execute", fake_execute)
+    monkeypatch.setattr(agent, "needs_approval", lambda *_args, **_kwargs: False)
+    runtime = FakeNvidiaRuntime([
+        tool_turn("provider-run-web", name="run_web", arguments='{"path":"index.html"}'),
+        final_turn("검증 실패를 확인했습니다."),
+    ])
+
+    with AgentExecutionLedger(tmp_path / "ledger.sqlite3") as ledger:
+        events = asyncio.run(collect(
+            runtime,
+            ledger,
+            workspace=str(workspace),
+            approval_mode="auto",
+            allowed_tools=("run_web",),
+            messages=[{"role": "user", "content": "index.html 검증해줘"}],
+        ))
+
+    local_result = next(event["output"] for event in events if event["type"] == "tool_result")
+    provider_messages = runtime.requests[1].messages
+    provider_result = next(
+        message["content"]
+        for message in provider_messages
+        if "WEB_VALIDATION v1 REDACTED" in str(message.get("content") or "")
+    )
+    assert secret in local_result
+    assert "REDacted".upper() in provider_result.upper()
+    assert all(secret not in str(message.get("content") or "") for message in provider_messages)
+    assert all("blocked_url=" not in str(message.get("content") or "") for message in provider_messages)
+
+
+def test_nvidia_existing_web_validation_discovery_turns_are_bounded(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    turns = [
+        tool_turn(
+            f"provider-glob-{index}",
+            name="glob",
+            arguments=f'{{"pattern":"**/*{index}.html"}}',
+        )
+        for index in range(agent._WEB_VALIDATION_DISCOVERY_TURN_LIMIT + 2)
+    ]
+    runtime = FakeNvidiaRuntime(turns)
+
+    async def fake_execute(spec, root, host, args):
+        assert spec.name == "glob"
+        return "조건에 맞는 파일이 없습니다.", None
+
+    monkeypatch.setattr(agent, "execute", fake_execute)
+    with AgentExecutionLedger(tmp_path / "ledger.sqlite3") as ledger:
+        events = asyncio.run(collect(
+            runtime,
+            ledger,
+            workspace=str(workspace),
+            allowed_tools=("glob", "run_web"),
+            messages=[{"role": "user", "content": "검증 기능 다시 켰어. 검증해줘"}],
+        ))
+
+    assert len(runtime.requests) == agent._WEB_VALIDATION_DISCOVERY_TURN_LIMIT
+    assert sum(
+        "탐색이 반복되어 안전 한도" in event.get("text", "")
+        for event in events if event["type"] == "notice"
+    ) == 1
+
+
 def test_multiple_calls_execute_sequentially_and_later_turn_may_reuse_provider_id(tmp_path, monkeypatch):
     order: list[str] = []
 
     async def fake_execute(spec, root, host, args):
-        order.append(str(args.get("label", "none")))
+        order.append(str(args.get("query", "none")))
         await asyncio.sleep(0)
         return order[-1], None
 
     monkeypatch.setattr(agent, "execute", fake_execute)
     runtime = FakeNvidiaRuntime([
         [
-            delta(1, call_id="provider-b", name="get_system_time", arguments='{"label":"b"}'),
-            delta(0, call_id="provider-a", name="get_system_time", arguments='{"label":"a"}'),
+            delta(1, call_id="provider-b", name="web_search", arguments='{"query":"b"}'),
+            delta(0, call_id="provider-a", name="web_search", arguments='{"query":"a"}'),
             LlmEvent(kind="done", done_reason="tool_calls"),
         ],
-        tool_turn("provider-a", arguments='{"label":"later"}'),
+        tool_turn("provider-a", name="web_search", arguments='{"query":"later"}'),
         final_turn(),
     ])
     with AgentExecutionLedger(tmp_path / "ledger.sqlite3") as ledger:
-        events = asyncio.run(collect(runtime, ledger))
+        events = asyncio.run(collect(
+            runtime,
+            ledger,
+            approval_mode="auto",
+            allowed_tools=("web_search",),
+        ))
 
     assert order == ["a", "b", "later"]
     scopes = [event["assistantTurnId"] for event in events if event["type"] == "tool_call"]
@@ -418,7 +554,7 @@ def test_update_plan_arguments_are_hashed_not_persisted_in_the_ledger(tmp_path):
 
 
 def test_every_agent_tool_event_uses_the_complete_identity_contract():
-    tree = ast.parse(textwrap.dedent(inspect.getsource(agent._run_agent_impl)))
+    tree = ast.parse(textwrap.dedent(inspect.getsource(agent_runner._run_agent_impl)))
     checked = 0
     for node in ast.walk(tree):
         if not isinstance(node, ast.Dict):

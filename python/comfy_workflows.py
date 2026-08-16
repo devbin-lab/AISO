@@ -37,6 +37,19 @@ MAX_USER_WORKFLOW_INPUTS = 64
 MAX_USER_WORKFLOW_OUTPUTS = 4
 MAX_USER_WORKFLOW_NODE_CLASSES = 64
 
+# A quality mode is deliberately narrow: it does not promise a generic
+# upscaler or mutate user-authored workflows.  It only enables Aiso's
+# built-in SDXL latent refinement when the live ComfyUI core node contract is
+# present and trusted.
+QUALITY_MODE_BASE = "base"
+QUALITY_MODE_REFINE = "refine"
+QUALITY_MODES = frozenset({QUALITY_MODE_BASE, QUALITY_MODE_REFINE})
+MAX_REFINEMENT_DIMENSION = MAX_DIMENSION
+REFINEMENT_SCALE = 1.5
+REFINEMENT_ALIGN = 64
+REFINEMENT_DENOISE = 0.35
+_REFINEMENT_UPSCALE_METHODS = ("bislerp", "bicubic", "bilinear", "nearest-exact", "area")
+
 TRUSTED_SAMPLERS = frozenset({"euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde"})
 TRUSTED_SCHEDULERS = frozenset({"normal", "karras", "simple", "beta"})
 
@@ -107,6 +120,35 @@ _ASSET_FOLDERS = {
 }
 _INVENTORY_MODEL_FOLDERS = frozenset(_ASSET_FOLDERS.values())
 
+# Animagine XL 4 is a tag-captioned SDXL fine-tune with a documented prompt
+# contract.  Apply it only to the two official checkpoint hashes.  A profile
+# name, filename, or broad ``anime`` tag is user-controlled metadata and is not
+# sufficient evidence for changing a generic SDXL checkpoint's prompt format.
+ANIMAGINE_XL_4_POLICY_ID = "cagliostrolab.animagine-xl-4.0.tag-style.v1"
+ANIMAGINE_XL_4_POLICY_LABEL = "Animagine XL 4.0 / Opt 구조화 태그 정책"
+ANIMAGINE_XL_4_POSITIVE_TAGS = ("masterpiece", "high score", "great score", "absurdres")
+ANIMAGINE_XL_4_NEGATIVE_TAGS = (
+    "lowres", "bad anatomy", "bad hands", "text", "error", "missing finger",
+    "extra digits", "fewer digits", "cropped", "worst quality", "low quality",
+    "low score", "bad score", "average score", "signature", "watermark",
+    "username", "blurry",
+)
+_ANIMAGINE_XL_4_OFFICIAL_HASHES = {
+    "1d5b43ff75b6ab598502d4c779d2fbfa3dceca51c60c3b609640a60772333916": "4.0",
+    "6327eca98bfb6538dd7a4edce22484a1bbc57a8cff6b11d075d40da1afb847ac": "4.0 Opt",
+}
+_ANIMAGINE_EXCLUSION_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("weapon", ("weapon", "weapons", "무기")),
+    ("sword", ("sword", "swords", "검", "칼")),
+    ("gun", ("gun", "guns", "firearm", "firearms", "총")),
+    ("bow", ("bow", "bows", "활")),
+    ("knife", ("knife", "knives", "단검")),
+    ("props", ("prop", "props", "소품")),
+    ("text", ("text", "caption", "captions", "lettering", "글자", "텍스트", "자막")),
+    ("logo", ("logo", "logos", "로고")),
+    ("watermark", ("watermark", "watermarks", "워터마크")),
+)
+
 
 class WorkflowValidationError(ValueError):
     """프로필, 생성 입력 또는 ComfyUI 노드 계약이 안전 기준을 벗어남."""
@@ -161,6 +203,7 @@ class ModelProfile:
     workflow_template_id: str
     workflow_template: WorkflowTemplate | None
     defaults: "ProfileDefaults"
+    quality_mode: str
 
 
 @dataclass(frozen=True)
@@ -215,6 +258,14 @@ SD_NODE_CONTRACTS: dict[str, NodeContract] = {
     ),
     "VAEDecode": NodeContract("nodes", frozenset({"samples", "vae"})),
     "SaveImage": NodeContract("nodes", frozenset({"images", "filename_prefix"})),
+}
+
+# This node is optional.  It must never be added to SD_NODE_CONTRACTS because
+# that would turn a quality preference into a hard runtime dependency.
+SD_REFINEMENT_NODE_CONTRACTS: dict[str, NodeContract] = {
+    "LatentUpscale": NodeContract(
+        "nodes", frozenset({"samples", "upscale_method", "width", "height", "crop"})
+    ),
 }
 
 FLUX_NODE_CONTRACTS: dict[str, NodeContract] = {
@@ -291,6 +342,22 @@ def node_classes_for_profile(profile: ModelProfile) -> frozenset[str]:
     return frozenset(node_contracts_for_architecture(profile.architecture))
 
 
+def _supports_builtin_refinement(profile: ModelProfile) -> bool:
+    """Return whether this exact profile is eligible for Aiso's optional path."""
+    return profile.architecture == ARCH_SDXL and profile.workflow_template is None
+
+
+def refinement_node_classes_for_profile(profile: ModelProfile) -> frozenset[str]:
+    """Return optional live node classes for a requested quality refinement.
+
+    Callers fetch these separately from the mandatory workflow inventory.  A
+    missing or incompatible optional node must leave the base workflow usable.
+    """
+    if profile.quality_mode == QUALITY_MODE_REFINE and _supports_builtin_refinement(profile):
+        return frozenset(SD_REFINEMENT_NODE_CONTRACTS)
+    return frozenset()
+
+
 def _required_text(value: Any, field: str, *, max_length: int) -> str:
     if not isinstance(value, str):
         raise WorkflowValidationError(f"{field} 형식이 올바르지 않습니다.")
@@ -355,6 +422,22 @@ def _normalize_slot(kind: str, value: Any) -> str:
     if kind != "text_encoder" and normalized != expected:
         raise WorkflowValidationError(f"{kind} 구성요소 slot이 올바르지 않습니다.")
     return normalized
+
+
+def _normalize_quality_mode(
+    raw: Any,
+    architecture: str,
+    workflow_template: WorkflowTemplate | None,
+) -> str:
+    """Normalize persisted quality mode without enabling unsupported graphs."""
+    mode = QUALITY_MODE_BASE if raw is None else raw
+    if not isinstance(mode, str) or mode not in QUALITY_MODES:
+        raise WorkflowValidationError("생성 품질 모드 형식이 올바르지 않습니다.")
+    if mode == QUALITY_MODE_REFINE and not (
+        architecture == ARCH_SDXL and workflow_template is None
+    ):
+        return QUALITY_MODE_BASE
+    return mode
 
 
 def _normalize_profile_defaults(
@@ -790,6 +873,9 @@ def normalize_profile(
     defaults = _normalize_profile_defaults(
         raw.get("defaults"), architecture, allow_user_options=workflow_template is not None
     )
+    quality_mode = _normalize_quality_mode(
+        raw.get("qualityMode"), architecture, workflow_template
+    )
 
     profile = ModelProfile(
         id=profile_id,
@@ -803,6 +889,7 @@ def normalize_profile(
         workflow_template_id=workflow_template_id,
         workflow_template=workflow_template,
         defaults=defaults,
+        quality_mode=quality_mode,
     )
     required_assets(profile)  # 빠진 slot과 현재 템플릿이 무시할 구성요소를 함께 거부한다.
     return profile
@@ -1018,6 +1105,132 @@ def select_profile(
     return selected, reason
 
 
+def _prompt_tag_key(value: str) -> str:
+    """Canonical comparison key without rewriting the displayed tag."""
+    return re.sub(r"\s+", " ", value.strip().replace("_", " ")).casefold()
+
+
+def _split_unique_prompt_tags(value: str) -> list[str]:
+    """Normalize comma/semicolon/newline tag lists and remove exact duplicates."""
+    tags: list[str] = []
+    seen: set[str] = set()
+    for fragment in re.split(r"[,;\n]+", value):
+        tag = " ".join(fragment.strip().split())
+        if not tag:
+            continue
+        key = _prompt_tag_key(tag)
+        if key not in seen:
+            tags.append(tag)
+            seen.add(key)
+    return tags
+
+
+def _append_canonical_suffix(
+    source: Sequence[str],
+    canonical: Sequence[str],
+) -> tuple[list[str], list[str]]:
+    """Move a canonical group to the end exactly once, preserving other order."""
+    canonical_keys = {_prompt_tag_key(tag) for tag in canonical}
+    source_keys = {_prompt_tag_key(tag) for tag in source}
+    preserved = [tag for tag in source if _prompt_tag_key(tag) not in canonical_keys]
+    added = [tag for tag in canonical if _prompt_tag_key(tag) not in source_keys]
+    return [*preserved, *canonical], added
+
+
+def _animagine_variant(profile: ModelProfile) -> str | None:
+    if profile.architecture != ARCH_SDXL or profile.workflow_template is not None:
+        return None
+    checkpoint = required_assets(profile).get("checkpoint")
+    if checkpoint is None:
+        return None
+    return _ANIMAGINE_XL_4_OFFICIAL_HASHES.get(checkpoint.sha256.casefold())
+
+
+def _tag_contains_alias(tag: str, aliases: Sequence[str]) -> bool:
+    normalized = re.sub(r"[_-]+", " ", tag.casefold())
+    for alias in aliases:
+        phrase = r"\s+".join(re.escape(part) for part in alias.casefold().split())
+        # Korean object/topic particles may be attached to a noun in an
+        # exclusion such as "무기를 ...".  They are not part of the canonical
+        # negative tag.
+        if re.search(rf"(?<!\w){phrase}(?:을|를|은|는|이|가)?(?![A-Za-z0-9_])", normalized):
+            return True
+    return False
+
+
+def _explicit_animagine_exclusions(
+    positive_tags: Sequence[str],
+    negative_tags: Sequence[str],
+) -> tuple[list[str], set[int]]:
+    """Return recognized explicit exclusions and pure positive exclusion tags.
+
+    Only a small visual-object vocabulary is canonicalized.  This prevents a
+    loose natural-language parser from treating ordinary positive description
+    as a prohibition, while covering common requests such as ``no weapon`` and
+    ``소품 없이``.  Arbitrary user negative tags remain untouched below.
+    """
+    exclusions: list[str] = []
+    seen: set[str] = set()
+    pure_positive_indexes: set[int] = set()
+    english_negation = re.compile(
+        r"\b(?:no|without|avoid(?:ing)?|exclude(?:d|ing)?|do\s+not\s+include|don't\s+include)\b",
+        re.IGNORECASE,
+    )
+    korean_negation = re.compile(r"(?:없이|없게|제외|금지|넣지\s*마|그리지\s*마)")
+
+    def remember(canonical: str) -> None:
+        key = _prompt_tag_key(canonical)
+        if key not in seen:
+            exclusions.append(canonical)
+            seen.add(key)
+
+    for index, tag in enumerate(positive_tags):
+        folded = tag.casefold()
+        has_negation = bool(english_negation.search(folded) or korean_negation.search(folded))
+        if re.search(r"\b(?:weaponless|unarmed)\b", folded):
+            remember("weapon")
+            has_negation = True
+        matched = False
+        if has_negation:
+            for canonical, aliases in _ANIMAGINE_EXCLUSION_ALIASES:
+                if _tag_contains_alias(tag, aliases):
+                    remember(canonical)
+                    matched = True
+        if matched and (
+            re.fullmatch(
+                r"\s*(?:(?:no|without|avoid(?:ing)?|exclude(?:d|ing)?)\s+.+|(?:weaponless|unarmed))\s*",
+                tag,
+                re.IGNORECASE,
+            )
+            or re.fullmatch(r"\s*.+(?:없이|없게|제외|금지|넣지\s*마|그리지\s*마)\s*", tag)
+        ):
+            pure_positive_indexes.add(index)
+
+    # Anything in a negative prompt is already an exclusion; record recognized
+    # object terms for transparent result metadata without discarding custom
+    # concepts that Aiso does not know how to canonicalize.
+    for tag in negative_tags:
+        for canonical, aliases in _ANIMAGINE_EXCLUSION_ALIASES:
+            if _tag_contains_alias(tag, aliases):
+                remember(canonical)
+    return exclusions, pure_positive_indexes
+
+
+def _infer_animagine_subject_tag(tags: Sequence[str]) -> str | None:
+    folded = " ".join(_prompt_tag_key(tag) for tag in tags)
+    # Do not invent a count for an explicitly plural or mixed-character prompt.
+    if re.search(r"\b(?:two|multiple|group|girls|boys|women|men|2girls|2boys)\b", folded):
+        return None
+    female = bool(re.search(
+        r"(?<!\w)(?:girl|woman|female|hatsune\s+miku|miku|소녀|여성|여자|미쿠)(?!\w)",
+        folded,
+    ))
+    male = bool(re.search(r"(?<!\w)(?:boy|man|male|소년|남성|남자)(?!\w)", folded))
+    if female == male:
+        return None
+    return "1girl" if female else "1boy"
+
+
 def apply_prompt_policy(
     profile: ModelProfile,
     *,
@@ -1138,6 +1351,141 @@ def apply_prompt_policy(
         "extra fingers", "mutated body", "deformed body", "anatomical distortion",
         "바디 호러", "추가 팔", "기형적인 신체",
     ))
+    text_requested = contains_any((
+        "text", "typography", "lettering", "caption", "title", "sign", "readable text",
+        "글자", "텍스트", "타이포그래피", "자막", "간판",
+    ))
+    deliberate_crop = contains_any((
+        "cropped", "intentional crop", "crop composition", "cut off composition",
+        "의도적인 크롭", "크롭 구도",
+    ))
+
+    animagine_variant = _animagine_variant(profile)
+    if animagine_variant is not None:
+        positive_tags = _split_unique_prompt_tags(original)
+        negative_tags = _split_unique_prompt_tags(original_negative)
+        if not positive_tags:
+            raise WorkflowValidationError("Animagine positive prompt에 유효한 태그가 없습니다.")
+
+        explicit_exclusions, pure_exclusion_indexes = _explicit_animagine_exclusions(
+            positive_tags, negative_tags
+        )
+        positive_tags = [
+            tag for index, tag in enumerate(positive_tags)
+            if index not in pure_exclusion_indexes
+        ]
+        if not positive_tags:
+            raise WorkflowValidationError("Animagine positive prompt에 금지 요소 외의 유효한 태그가 없습니다.")
+
+        subject_re = re.compile(r"[1-9][0-9]*(?:girls?|boys?|others?)", re.IGNORECASE)
+        subject_tags = [
+            tag for tag in positive_tags if subject_re.fullmatch(_prompt_tag_key(tag))
+        ]
+        inferred_subject = None if subject_tags else _infer_animagine_subject_tag(positive_tags)
+        if inferred_subject is not None:
+            subject_tags = [inferred_subject]
+
+        quality_keys = {_prompt_tag_key(tag) for tag in ANIMAGINE_XL_4_POSITIVE_TAGS}
+        body_tags = [
+            tag for tag in positive_tags
+            if not subject_re.fullmatch(_prompt_tag_key(tag))
+            and _prompt_tag_key(tag) not in quality_keys
+        ]
+        present_quality_keys = {
+            _prompt_tag_key(tag) for tag in positive_tags if _prompt_tag_key(tag) in quality_keys
+        }
+        # Quality tags are a model contract, not an illustration style.  Still,
+        # an explicit low-quality/lo-fi request wins over automatic enhancement;
+        # only quality tags the user already supplied are retained in that case.
+        quality_suffix = tuple(
+            tag for tag in ANIMAGINE_XL_4_POSITIVE_TAGS
+            if not deliberate_low_quality or _prompt_tag_key(tag) in present_quality_keys
+        )
+        effective_positive_tags = [*subject_tags, *body_tags, *quality_suffix]
+        effective_prompt = ", ".join(effective_positive_tags)
+
+        normalized_negative_tags: list[str] = []
+        normalized_negative_seen: set[str] = set()
+        for tag in negative_tags:
+            tag_exclusions, pure_indexes = _explicit_animagine_exclusions([tag], ())
+            replacements = tag_exclusions if 0 in pure_indexes else [tag]
+            for replacement in replacements:
+                key = _prompt_tag_key(replacement)
+                if key and key not in normalized_negative_seen:
+                    normalized_negative_tags.append(replacement)
+                    normalized_negative_seen.add(key)
+
+        explicit_added: list[str] = []
+        for exclusion in explicit_exclusions:
+            key = _prompt_tag_key(exclusion)
+            if key in normalized_negative_seen:
+                continue
+            normalized_negative_tags.append(exclusion)
+            normalized_negative_seen.add(key)
+            explicit_added.append(exclusion)
+
+        conflicting_automatic_negative: set[str] = set()
+        if deliberate_low_resolution:
+            conflicting_automatic_negative.add("lowres")
+        if deliberate_low_quality:
+            conflicting_automatic_negative.update({
+                "worst quality", "low quality", "low score", "bad score", "average score",
+            })
+        if deliberate_blur:
+            conflicting_automatic_negative.add("blurry")
+        if deliberate_anatomy_distortion:
+            conflicting_automatic_negative.update({
+                "bad anatomy", "bad hands", "missing finger", "extra digits", "fewer digits",
+            })
+        if text_requested:
+            conflicting_automatic_negative.add("text")
+        if deliberate_crop:
+            conflicting_automatic_negative.add("cropped")
+        canonical_negative = tuple(
+            tag for tag in ANIMAGINE_XL_4_NEGATIVE_TAGS
+            if _prompt_tag_key(tag) not in conflicting_automatic_negative
+        )
+        effective_negative_tags, canonical_added = _append_canonical_suffix(
+            normalized_negative_tags, canonical_negative
+        )
+        effective_negative = ", ".join(effective_negative_tags)
+
+        if len(effective_prompt) > MAX_PROMPT_LENGTH or len(effective_negative) > MAX_PROMPT_LENGTH:
+            raise WorkflowValidationError(
+                "Animagine 구조화 태그 적용 후 프롬프트가 4,000자 제한을 초과했습니다."
+            )
+        added_positive = [
+            *([inferred_subject] if inferred_subject is not None else []),
+            *[
+                tag for tag in quality_suffix
+                if _prompt_tag_key(tag) not in present_quality_keys
+            ],
+        ]
+        return {
+            "originalPrompt": original,
+            "originalNegativePrompt": original_negative,
+            "effectivePrompt": effective_prompt,
+            "effectiveNegativePrompt": effective_negative,
+            "promptPolicy": {
+                "id": ANIMAGINE_XL_4_POLICY_ID,
+                "label": ANIMAGINE_XL_4_POLICY_LABEL,
+                "description": (
+                    f"Animagine XL {animagine_variant} 공식 체크포인트 SHA-256이 확인되어 "
+                    "사용자 태그 순서를 보존하고 주체 태그를 앞에, 공식 품질 태그를 끝에 배치했습니다. "
+                    "명시적 금지 요소는 네거티브 조건으로 옮기며 사용자 의도와 충돌하는 자동 항목은 제외합니다."
+                ),
+                "addedPositive": added_positive,
+                "addedNegative": [*explicit_added, *canonical_added],
+                "contract": {
+                    "format": "ordered-comma-tags",
+                    "variant": animagine_variant,
+                    "subjectPrefix": subject_tags,
+                    "qualitySuffix": list(quality_suffix),
+                    "explicitExclusions": explicit_exclusions,
+                    "maxPromptLength": MAX_PROMPT_LENGTH,
+                },
+            },
+        }
 
     if profile.architecture in (ARCH_SD15, ARCH_SDXL):
         negative_terms: list[str] = []
@@ -1635,6 +1983,110 @@ def _build_sd_workflow(
     }
 
 
+def _refinement_dimensions(options: GenerationOptions) -> tuple[int, int] | None:
+    """Compute a same-aspect latent target, bounded by Aiso's safe maximum."""
+    largest = max(options.width, options.height)
+    scale = min(REFINEMENT_SCALE, MAX_REFINEMENT_DIMENSION / largest)
+    if scale <= 1.0:
+        return None
+    width = int(math.floor((options.width * scale) / REFINEMENT_ALIGN)) * REFINEMENT_ALIGN
+    height = int(math.floor((options.height * scale) / REFINEMENT_ALIGN)) * REFINEMENT_ALIGN
+    if width <= options.width or height <= options.height:
+        return None
+    return width, height
+
+
+def _refinement_plan(
+    profile: ModelProfile,
+    options: GenerationOptions,
+    node_infos: Mapping[str, Mapping[str, Any]] | None,
+) -> tuple[str, int, int] | None:
+    """Validate the optional core node and return a safe refinement plan.
+
+    This is intentionally fail-closed to the *base graph*, not to an image
+    generation error.  The runtime contract is live ComfyUI data, so a custom
+    override, a changed signature, or a missing interpolation option simply
+    disables the optional refinement for that request.
+    """
+    if (
+        profile.quality_mode != QUALITY_MODE_REFINE
+        or not _supports_builtin_refinement(profile)
+        or not isinstance(node_infos, Mapping)
+    ):
+        return None
+    dimensions = _refinement_dimensions(options)
+    if dimensions is None:
+        return None
+    info = node_infos.get("LatentUpscale")
+    sampler_info = node_infos.get("KSampler")
+    if not isinstance(info, Mapping) or not isinstance(sampler_info, Mapping):
+        return None
+    contract = SD_REFINEMENT_NODE_CONTRACTS["LatentUpscale"]
+    try:
+        if (
+            info.get("name") not in (None, "LatentUpscale")
+            or info.get("python_module") != contract.module
+            or info.get("api_node") is True
+        ):
+            return None
+        required = _required_input_map("LatentUpscale", info)
+        if not contract.required_inputs.issubset(required):
+            return None
+        methods = _enum_values("LatentUpscale", info, "upscale_method")
+        crops = _enum_values("LatentUpscale", info, "crop")
+        method = next((candidate for candidate in _REFINEMENT_UPSCALE_METHODS if candidate in methods), None)
+        if method is None or "disabled" not in crops:
+            return None
+        width, height = dimensions
+        _ensure_numeric_supported("LatentUpscale", info, "width", width)
+        _ensure_numeric_supported("LatentUpscale", info, "height", height)
+        _ensure_numeric_supported(
+            "KSampler", sampler_info, "steps", max(8, min(20, options.steps // 2))
+        )
+    except WorkflowValidationError:
+        return None
+    return method, width, height
+
+
+def _apply_sdxl_refinement(
+    workflow: dict[str, dict[str, Any]],
+    profile: ModelProfile,
+    options: GenerationOptions,
+    node_infos: Mapping[str, Mapping[str, Any]] | None,
+) -> bool:
+    plan = _refinement_plan(profile, options, node_infos)
+    if plan is None:
+        return False
+    method, width, height = plan
+    workflow["8"] = {
+        "class_type": "LatentUpscale",
+        "inputs": {
+            "samples": ["5", 0],
+            "upscale_method": method,
+            "width": width,
+            "height": height,
+            "crop": "disabled",
+        },
+    }
+    workflow["9"] = {
+        "class_type": "KSampler",
+        "inputs": {
+            "model": ["1", 0],
+            "seed": options.seed,
+            "steps": max(8, min(20, options.steps // 2)),
+            "cfg": options.cfg,
+            "sampler_name": options.sampler,
+            "scheduler": options.scheduler,
+            "positive": ["2", 0],
+            "negative": ["3", 0],
+            "latent_image": ["8", 0],
+            "denoise": REFINEMENT_DENOISE,
+        },
+    }
+    workflow["6"]["inputs"]["samples"] = ["9", 0]
+    return True
+
+
 def _build_flux_workflow(
     profile: ModelProfile, options: GenerationOptions, filename_prefix: str
 ) -> dict[str, dict[str, Any]]:
@@ -1757,6 +2209,7 @@ def build_workflow(
     options: GenerationOptions,
     *,
     prompt_id: str,
+    node_infos: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     if not isinstance(prompt_id, str) or not re.fullmatch(
         r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", prompt_id
@@ -1767,6 +2220,8 @@ def build_workflow(
         workflow = _build_user_workflow(profile, options, filename_prefix)
     elif profile.architecture in (ARCH_SD15, ARCH_SDXL):
         workflow = _build_sd_workflow(profile, options, filename_prefix)
+        if profile.architecture == ARCH_SDXL:
+            _apply_sdxl_refinement(workflow, profile, options, node_infos)
     elif profile.architecture == ARCH_FLUX1_SPLIT:
         workflow = _build_flux_workflow(profile, options, filename_prefix)
     elif profile.architecture == ARCH_FLUX2_KLEIN_4B:
@@ -1774,6 +2229,8 @@ def build_workflow(
     else:
         raise WorkflowValidationError("지원하지 않는 모델 아키텍처입니다.")
     allowed = set(node_classes_for_profile(profile))
+    if any(node.get("class_type") == "LatentUpscale" for node in workflow.values()):
+        allowed.update(SD_REFINEMENT_NODE_CONTRACTS)
     for node_id, node in workflow.items():
         if not _SAFE_NODE_ID_RE.fullmatch(node_id) or node.get("class_type") not in allowed:
             raise WorkflowValidationError("신뢰되지 않은 ComfyUI 워크플로 노드입니다.")
@@ -1831,7 +2288,12 @@ def snapshot_workflow(
     if any(not isinstance(node_id, str) or not _SAFE_NODE_ID_RE.fullmatch(node_id) for node_id in node_ids):
         raise WorkflowValidationError("워크플로 snapshot 노드 ID가 올바르지 않습니다.")
 
-    contracts = {**SD_NODE_CONTRACTS, **FLUX_NODE_CONTRACTS, **FLUX2_KLEIN_NODE_CONTRACTS}
+    contracts = {
+        **SD_NODE_CONTRACTS,
+        **SD_REFINEMENT_NODE_CONTRACTS,
+        **FLUX_NODE_CONTRACTS,
+        **FLUX2_KLEIN_NODE_CONTRACTS,
+    }
     asset_inputs = {"ckpt_name", "unet_name", "clip_name1", "clip_name2", "clip_name", "vae_name"}
     snapshot: dict[str, dict[str, Any]] = {}
     for node_id, raw_node in workflow.items():
@@ -1881,6 +2343,10 @@ def primary_model_name(profile: ModelProfile) -> str:
 
 
 __all__ = [
+    "ANIMAGINE_XL_4_NEGATIVE_TAGS",
+    "ANIMAGINE_XL_4_POLICY_ID",
+    "ANIMAGINE_XL_4_POLICY_LABEL",
+    "ANIMAGINE_XL_4_POSITIVE_TAGS",
     "ARCH_FLUX1_SPLIT",
     "ARCH_FLUX2_KLEIN_4B",
     "ARCH_USER_API",
@@ -1892,8 +2358,12 @@ __all__ = [
     "GenerationOptions",
     "ModelAsset",
     "ModelProfile",
+    "QUALITY_MODE_BASE",
+    "QUALITY_MODE_REFINE",
+    "QUALITY_MODES",
     "WorkflowAssetBinding",
     "SD_NODE_CONTRACTS",
+    "SD_REFINEMENT_NODE_CONTRACTS",
     "SUPPORTED_ARCHITECTURES",
     "WorkflowValidationError",
     "apply_prompt_policy",
@@ -1901,6 +2371,7 @@ __all__ = [
     "inventory_folders",
     "node_contracts_for_architecture",
     "node_classes_for_profile",
+    "refinement_node_classes_for_profile",
     "normalize_asset",
     "normalize_profile",
     "normalize_profiles",

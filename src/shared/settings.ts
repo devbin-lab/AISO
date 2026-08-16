@@ -24,8 +24,8 @@ export interface SettingsRecoveryStatus {
 }
 
 export interface AppSettings {
-  /** Persisted settings contract. v0.4.x uses schema 5. */
-  schemaVersion: 5
+  /** Persisted settings contract. v0.4.x uses schema 9. */
+  schemaVersion: 10
   /** Explicit LLM provider. Migration always starts existing users on Ollama. */
   activeLlmProvider: ActiveLlmProvider
   /** Ollama 모델 이름 */
@@ -85,6 +85,17 @@ export interface AppSettings {
   comfyBaseUrl: string
   /** ComfyUI Windows Portable의 최상위 폴더. 비어 있으면 사용자가 직접 실행한 서버에만 연결한다. */
   comfyInstallPath: string
+  /**
+   * My DB 개인 라이브러리의 루트 폴더. 비어 있으면 문서\Aiso My DB를 사용한다.
+   * 이 경로는 Agent 작업 폴더·첨부 임시 폴더와 완전히 분리된다.
+   */
+  myDbStoragePath: string
+  /**
+   * Aiso가 실행 중일 때 전날 My DB 보고서의 누락 여부를 확인하는 주기(시간).
+   * 하루 보고서는 날짜별로 한 번만 저장되므로, 이 값은 생성 빈도가 아니라
+   * 다음 날 보고서를 발견하는 최대 지연 시간만 정한다.
+   */
+  myDbDailyReportCheckHours: number
   /**
    * ComfyUI 이미지 생성 모델 선택 방식.
    * - auto: Agent가 등록·검증된 후보 중 요청과 태그를 기준으로 고른다.
@@ -162,7 +173,7 @@ export const RAG_MAX_FILES_OPTIONS: { value: number; label: string }[] = [
 ]
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  schemaVersion: 5,
+  schemaVersion: 10,
   activeLlmProvider: 'ollama',
   model: 'gemma4:12b',
   ollamaHost: 'http://localhost:11434',
@@ -190,6 +201,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoLaunch: false,
   comfyBaseUrl: 'http://127.0.0.1:8188',
   comfyInstallPath: '',
+  myDbStoragePath: '',
+  myDbDailyReportCheckHours: 6,
   comfyModelSelectionMode: 'auto'
 }
 

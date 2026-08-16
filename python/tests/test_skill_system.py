@@ -293,11 +293,11 @@ def test_run_skill_timeout_kills_process_tree(tmp_path, monkeypatch):
 
 
 def test_skill_approval_grades():
-    # Skills are persistent arbitrary code, so every mode requires a gate.
+    # Skills are persistent arbitrary code, so read/manual require a gate.
     assert agent.needs_approval("run_skill", "read") is True
     assert agent.needs_approval("run_skill", "manual") is True
-    assert agent.needs_approval("run_skill", "auto") is True
+    assert agent.needs_approval("run_skill", "auto") is False
     # Creating a skill stores executable code outside the workspace as well.
     assert agent.needs_approval("create_skill", "read") is True
     assert agent.needs_approval("create_skill", "manual") is True
-    assert agent.needs_approval("create_skill", "auto") is True
+    assert agent.needs_approval("create_skill", "auto") is False

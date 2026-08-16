@@ -9,10 +9,11 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import time
 from fnmatch import fnmatch
 from pathlib import Path
 
-from extract import EXTRACTORS, ExtractError
+from extract import EXTRACTORS, ExtractError, pptx_to_html
 
 MAX_READ_BYTES = 256 * 1024  # 읽기 상한 (256KB)
 MAX_READ_LINES = 2000        # offset/limit 미지정 시 라인모드 기본 상한
@@ -25,6 +26,18 @@ MAX_GREP_FILE_BYTES = 5 * 1024 * 1024  # 이보다 큰 파일은 스캔 제외
 MAX_MATCH_LINE_LEN = 300          # 매치 라인 표시 길이
 MAX_GLOB_RESULTS = 300            # glob 결과 파일 수 상한
 MAX_CODE_FILE_BYTES = 2 * 1024 * 1024
+MAX_HTML_SCAN_ENTRIES = 50_000
+MAX_HTML_SCAN_SECONDS = 2.0
+
+# Existing-web validation needs a complete, harness-owned inventory.  Unlike
+# the general tree/search helpers, keep common web build output folders in the
+# scan because the artifact to validate may legitimately live in dist/out/build.
+_HTML_ENTRY_SKIP = frozenset({
+    ".git", ".aiso", ".next", "node_modules", ".venv", "venv",
+    "__pycache__", "tools", "target", ".idea", ".vscode", "coverage",
+    "library", "temp", "obj", "binaries", "intermediate", "saved",
+    "deriveddatacache",
+})
 
 _CODE_FILE_SUFFIXES = frozenset({
     ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
@@ -77,9 +90,37 @@ def _resolve(root: Path, rel: str) -> Path:
     if ":" in rel:
         raise ToolError(f"경로에 ':'를 쓸 수 없습니다: {rel}")
     target = (root / rel).resolve()
-    if target != root and root not in target.parents:
+    if not is_path_within(target, root):
         raise ToolError(f"작업 폴더 밖 경로 접근이 거부되었습니다: {rel}")
     return target
+
+
+def is_path_within(path: Path, root: Path) -> bool:
+    """Check ancestry by filesystem identity, including case-sensitive Windows roots.
+
+    ``WindowsPath`` comparisons fold case, which is unsafe for NTFS directories
+    with per-directory case sensitivity and some UNC/Samba mounts.  Walking the
+    nearest existing ancestor and comparing file identities avoids treating a
+    case-only sibling as the selected workspace.
+    """
+    try:
+        resolved_root = root.resolve()
+        current = path.resolve()
+    except (OSError, RuntimeError):
+        return False
+
+    while True:
+        try:
+            if os.path.samefile(current, resolved_root):
+                return True
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError:
+            return False
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
 
 
 def _require_doc(target: Path, path: str) -> None:
@@ -171,6 +212,17 @@ def _rel(root: Path, target: Path) -> str:
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 
 
+def _link_or_reparse_status(path: Path) -> bool | None:
+    """Return link status, or ``None`` when the entry cannot be inspected."""
+    try:
+        if path.is_symlink():
+            return True
+        attrs = getattr(path.lstat(), "st_file_attributes", 0)
+        return bool(attrs & _FILE_ATTRIBUTE_REPARSE_POINT)
+    except OSError:
+        return None
+
+
 def _is_link_or_reparse_point(path: Path) -> bool:
     """Return whether a child can redirect traversal outside the workspace.
 
@@ -178,14 +230,8 @@ def _is_link_or_reparse_point(path: Path) -> bool:
     reparse points and do not reliably report as symlinks. Never recurse through
     either kind of entry from a workspace tree listing.
     """
-    try:
-        if path.is_symlink():
-            return True
-        attrs = getattr(path.lstat(), "st_file_attributes", 0)
-        return bool(attrs & _FILE_ATTRIBUTE_REPARSE_POINT)
-    except OSError:
-        # An inaccessible or racing entry should not be followed optimistically.
-        return True
+    # An inaccessible or racing entry should not be followed optimistically.
+    return _link_or_reparse_status(path) is not False
 
 
 # ---- 안전 툴 (자동 실행) ----
@@ -195,10 +241,21 @@ def list_dir(root: Path, path: str = ".") -> str:
     if not target.is_dir():
         raise ToolError(f"폴더가 아닙니다: {path}")
     entries = []
-    for i, p in enumerate(sorted(target.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))):
+    def safe_sort_key(entry: Path) -> tuple[int, str]:
+        if _is_link_or_reparse_point(entry):
+            return 2, entry.name.lower()
+        try:
+            return (1 if entry.is_file() else 0), entry.name.lower()
+        except OSError:
+            return 2, entry.name.lower()
+
+    for i, p in enumerate(sorted(target.iterdir(), key=safe_sort_key)):
         if i >= MAX_LIST_ENTRIES:
             entries.append(f"... (외 {MAX_LIST_ENTRIES}개 초과 생략)")
             break
+        if _is_link_or_reparse_point(p):
+            entries.append(f"[link] {p.name}  [링크/정션 — 정보 조회 생략]")
+            continue
         kind = "dir " if p.is_dir() else "file"
         size = f"  {p.stat().st_size}B" if p.is_file() else ""
         entries.append(f"[{kind}] {p.name}{size}")
@@ -297,11 +354,23 @@ def grep(
         files = [start]
     else:
         for dirpath, dirnames, filenames in os.walk(start):
-            dirnames[:] = [d for d in dirnames if d not in _SEARCH_SKIP]
+            current = Path(dirpath)
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in _SEARCH_SKIP
+                and not _is_link_or_reparse_point(current / d)
+            ]
             for fn in filenames:
                 if glob and not fnmatch(fn, glob):
                     continue
-                files.append(Path(dirpath) / fn)
+                candidate = current / fn
+                if _is_link_or_reparse_point(candidate):
+                    continue
+                try:
+                    safe_candidate = _resolve(root, _rel(root, candidate))
+                except ToolError:
+                    continue
+                files.append(safe_candidate)
                 if len(files) >= MAX_GREP_FILES:
                     break
             if len(files) >= MAX_GREP_FILES:
@@ -383,19 +452,104 @@ def glob(root: Path, pattern: str, path: str = ".") -> str:
     rx = _glob_to_regex(pattern)
     hits: list[tuple[float, str]] = []
     for dirpath, dirnames, filenames in os.walk(start):
-        dirnames[:] = [d for d in dirnames if d not in _SEARCH_SKIP]
+        current = Path(dirpath)
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in _SEARCH_SKIP
+            and not _is_link_or_reparse_point(current / d)
+        ]
         for fn in filenames:
-            fp = Path(dirpath) / fn
+            fp = current / fn
+            if _is_link_or_reparse_point(fp):
+                continue
             if rx.match(fp.relative_to(start).as_posix()):
                 try:
-                    hits.append((fp.stat().st_mtime, _rel(root, fp)))
-                except OSError:
+                    safe_fp = _resolve(root, _rel(root, fp))
+                    hits.append((safe_fp.stat().st_mtime, _rel(root, safe_fp)))
+                except (OSError, ToolError):
                     continue
     hits.sort(key=lambda t: t[0], reverse=True)  # 최신 수정 우선
     truncated = len(hits) > MAX_GLOB_RESULTS
     rows = [rel for _, rel in hits[:MAX_GLOB_RESULTS]]
     body = "\n".join(rows) or "조건에 맞는 파일이 없습니다."
     return body + (f"\n…(파일 {MAX_GLOB_RESULTS}개 초과 — 이후 생략)" if truncated else "")
+
+
+def find_html_entries(
+    root: Path,
+    max_results: int = MAX_GLOB_RESULTS,
+    *,
+    max_scanned_entries: int = MAX_HTML_SCAN_ENTRIES,
+    time_budget_seconds: float = MAX_HTML_SCAN_SECONDS,
+) -> list[str] | None:
+    """Return a complete, workspace-confined HTML inventory or ``None``.
+
+    This is a harness boundary, not an LLM-facing search result.  A validation
+    model must not be able to authorize an arbitrary file by choosing a narrow
+    glob/list call, so callers use this single fail-closed inventory as the
+    source of truth.  Any traversal error or result-cap overflow makes the
+    inventory indeterminate instead of silently treating a partial list as
+    complete.
+    """
+    try:
+        limit = int(max_results)
+        scan_limit = int(max_scanned_entries)
+        time_limit = float(time_budget_seconds)
+    except (TypeError, ValueError):
+        return None
+    if limit < 1 or scan_limit < 1 or time_limit <= 0:
+        return None
+
+    entries: list[str] = []
+    scanned = 0
+    deadline = time.monotonic() + time_limit
+    pending = [root]
+    while pending:
+        if time.monotonic() > deadline:
+            return None
+        current = pending.pop()
+        children: list[Path] = []
+        try:
+            with os.scandir(current) as iterator:
+                for dir_entry in iterator:
+                    scanned += 1
+                    if scanned > scan_limit or time.monotonic() > deadline:
+                        return None
+                    child = Path(dir_entry.path)
+                    link_status = _link_or_reparse_status(child)
+                    if link_status is None:
+                        return None
+                    if link_status:
+                        continue
+                    try:
+                        if dir_entry.is_dir(follow_symlinks=False):
+                            if dir_entry.name.casefold() in _HTML_ENTRY_SKIP:
+                                continue
+                            safe_child = _resolve(root, _rel(root, child))
+                            if not safe_child.is_dir():
+                                return None
+                            children.append(safe_child)
+                            continue
+                        if not dir_entry.is_file(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        return None
+                    if child.suffix.casefold() not in {".html", ".htm"}:
+                        continue
+                    try:
+                        safe_candidate = _resolve(root, _rel(root, child))
+                        if not safe_candidate.is_file():
+                            return None
+                        entries.append(_rel(root, safe_candidate))
+                    except (OSError, ToolError):
+                        return None
+                    if len(entries) > limit:
+                        return None
+        except OSError:
+            return None
+        pending.extend(sorted(children, key=lambda path: path.name.casefold(), reverse=True))
+
+    return sorted(entries, key=lambda path: (path.casefold(), path))
 
 
 def read_file(root: Path, path: str, offset: int | None = None, limit: int | None = None) -> str:
@@ -471,6 +625,88 @@ def read_file(root: Path, path: str, offset: int | None = None, limit: int | Non
         return f"[{path}] 파일은 총 {total}줄입니다. offset {start}은 파일 끝을 벗어났습니다 (표시할 내용 없음)."
     header = f"[{path} · {start}~{min(start + n - 1, total)}줄 / 총 {total}줄]"
     return header + "\n" + "\n".join(picked)
+
+
+def convert_document(root: Path, path: str, output_path: str) -> str:
+    """Convert a PowerPoint document to a safe, text-first HTML reading copy."""
+    source = _resolve(root, path)
+    destination = _resolve(root, output_path)
+    if not source.is_file():
+        raise ToolError(f"File does not exist: {path}")
+    if source.suffix.lower() not in {".pptx", ".pptm"}:
+        raise ToolError("Document conversion currently supports PowerPoint (.pptx, .pptm) to HTML only.")
+    if destination.suffix.lower() != ".html":
+        raise ToolError("The converted document path must have a .html extension.")
+    if destination == source:
+        raise ToolError("The PowerPoint source cannot be overwritten by the converted result.")
+    if destination.exists():
+        raise ToolError(f"The conversion result already exists: {_rel(root, destination)}")
+    try:
+        pptx_to_html(source, destination)
+    except ExtractError as error:
+        raise ToolError(str(error)) from error
+    return f"Converted {_rel(root, source)} to {_rel(root, destination)} as an HTML reading copy; source was unchanged."
+
+
+def analyze_document_todos(root: Path, paths: list[str]) -> str:
+    """Create a saved, source-backed ToDo list without asking an LLM for JSON.
+
+    The import stays local to this function because document_todos uses this
+    module's workspace boundary helpers.  That keeps the normal file-tool
+    import path free of a circular dependency.
+    """
+    from document_todos import analyze_documents, save_todos
+
+    result = analyze_documents(str(root), paths)
+    candidates = result.get("candidates", [])
+    if not candidates:
+        return (
+            "문서 분석 완료: 원문에서 실행 동사가 확인된 일정 후보를 찾지 못했습니다. "
+            "원문에 없는 작업을 추측하지 않았습니다."
+        )
+    normalized_sources = {str(path).replace("\\", "/").lstrip("./") for path in paths}
+    saved = save_todos(str(root), candidates, replace_sources=normalized_sources)
+    lines = [
+        f"문서 일정 분석 완료 — {len(candidates)}개 항목으로 해당 문서의 기존 일정을 교체해 저장했습니다.",
+        "각 항목은 원문 근거를 포함합니다.",
+    ]
+    for index, item in enumerate(candidates, 1):
+        source = item["evidence"][0]
+        due_parts = [value for value in (item.get("dueDate"), item.get("dueTime")) if value]
+        due = f", 기한 {' '.join(due_parts)}" if due_parts else ""
+        lines.append(
+            f"{index}. {item['title']} (우선순위 {item['priority']}{due})\n"
+            f"   근거: {source['file']} · {source['location']} — “{source['quote']}”"
+        )
+    lines.append(
+        f"저장 위치: Aiso 캘린더 데이터베이스 (전체 {len(saved.get('items', []))}개 항목)"
+    )
+    return "\n".join(lines)
+
+
+async def list_saved_todos() -> str:
+    """List Aiso-saved calendar entries without requiring a current workspace."""
+    from document_todos import list_saved_todos as list_saved_document_todos
+
+    result = list_saved_document_todos()
+    items = [item for item in result.get("items", []) if isinstance(item, dict)]
+    if not items:
+        return (
+            "저장된 일정이 없습니다. 문서를 분석해 일정을 만들면 이후에는 작업 폴더를 다시 "
+            "선택하지 않아도 여기서 목록을 확인할 수 있습니다."
+        )
+    lines = [f"저장된 일정 {len(items)}개 (완료 포함)"]
+    for index, item in enumerate(items, start=1):
+        status = "완료" if item.get("status") == "done" else "진행 전"
+        due_date = str(item.get("dueDate") or "기한 미정")
+        due_time = str(item.get("dueTime") or "시간 미정")
+        workspace_name = Path(str(item.get("workspace") or "")).name or "저장된 작업"
+        lines.append(
+            f"{index}. [{status}] {item.get('title') or '제목 없음'} "
+            f"(우선순위 {item.get('priority') or 'medium'}, {due_date} {due_time}, {workspace_name})\n"
+            f"   일정 ID: {item.get('id') or '알 수 없음'}"
+        )
+    return "\n".join(lines)
 
 
 def create_dir(root: Path, path: str) -> str:
@@ -558,12 +794,15 @@ def write_code_file(root: Path, path: str, content: str = "") -> str:
     if target.is_dir():
         raise ToolError(f"폴더에는 쓸 수 없습니다: {path}")
     existed = target.is_file()
+    encoded = content.encode("utf-8")
     if existed:
         _read_utf8_code_file(target, path)
+        if target.read_bytes() == encoded:
+            return f"[NO_CHANGE] {_rel(root, target)} 코드 파일 내용이 이미 동일해 변경하지 않음."
     target.parent.mkdir(parents=True, exist_ok=True)
     # Write exact UTF-8 bytes so an existing/model-supplied CRLF is not translated
     # into CRCRLF by Windows text-mode newline conversion.
-    target.write_bytes(content.encode("utf-8"))
+    target.write_bytes(encoded)
     verb = "덮어씀" if existed else "생성함"
     return f"{_rel(root, target)} 코드 파일을 {verb} ({len(content)}자)."
 
@@ -596,6 +835,7 @@ def multi_edit_code_file(root: Path, path: str, edits: list) -> str:
     target = _resolve(root, path)
     _require_code_file(root, target, path)
     text = _read_utf8_code_file(target, path)
+    original_text = text
     if not isinstance(edits, list) or not edits:
         raise ToolError("적용할 편집(edits)이 없습니다.")
     applied = 0
@@ -625,6 +865,8 @@ def multi_edit_code_file(root: Path, path: str, edits: list) -> str:
         text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
         applied += count if replace_all else 1
     _validate_code_content(text)
+    if text == original_text:
+        return f"[NO_CHANGE] {_rel(root, target)} 코드 파일의 최종 내용이 원본과 동일해 변경하지 않음."
     target.write_bytes(text.encode("utf-8"))
     return f"{_rel(root, target)} 코드 파일을 편집함 ({len(edits)}개 편집, {applied}곳 치환)."
 
@@ -707,6 +949,8 @@ _DISPATCH = {
     "grep": grep,
     "glob": glob,
     "read_file": read_file,
+    "convert_document": convert_document,
+    "analyze_document_calendar": analyze_document_todos,
     "create_dir": create_dir,
     "write_file": write_file,
     "edit_file": edit_file,
@@ -721,6 +965,11 @@ _DISPATCH = {
 
 
 def run_tool(root: Path, name: str, args: dict) -> str:
+    # The public Agent schema uses calendar terminology.  Keep the former
+    # identifier here only for old persisted traces and integrations.
+    name = {
+        "analyze_document_todos": "analyze_document_calendar",
+    }.get(name, name)
     fn = _DISPATCH.get(name)
     if fn is None:
         raise ToolError(f"알 수 없는 툴: {name}")
@@ -736,6 +985,14 @@ def run_tool(root: Path, name: str, args: dict) -> str:
 
 # LLM runtime의 tools 파라미터로 넘길 함수 스키마
 TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_calendar_events",
+            "description": "Aiso에 저장된 일정을 작업 폴더 선택 없이 모두 조회한다. 현재 해야 할 일, 저장된 일정, 캘린더 목록을 물으면 먼저 사용한다.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -767,7 +1024,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "작업 폴더 내 파일의 내용을 읽는다. 코드·md·csv 등 텍스트는 물론, PDF·엑셀(xlsx)·워드(docx)·한글(hwp/hwpx) 문서도 자동으로 텍스트를 추출한다. 큰 텍스트 파일은 offset·limit으로 특정 줄 범위만 읽을 수 있고(줄번호가 함께 표시됨), 문서에는 줄 범위가 적용되지 않는다.",
+            "description": "작업 폴더 내 파일의 내용을 읽는다. 코드·md·csv 등 텍스트는 물론, PDF·PowerPoint(pptx/pptm)·엑셀(xlsx)·워드(docx)·한글(hwp/hwpx) 문서도 자동으로 텍스트를 추출한다. 큰 텍스트 파일은 offset·limit으로 특정 줄 범위만 읽을 수 있고(줄번호가 함께 표시됨), 문서에는 줄 범위가 적용되지 않는다.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -778,6 +1035,39 @@ TOOL_SCHEMAS = [
                 "required": ["path"],
             },
         },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_document",
+            "description": "Convert a PowerPoint (.pptx or .pptm) into a new, text-first HTML reading copy inside the workspace. Use only when a browser-readable copy is needed; the original file is never changed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Workspace-relative PowerPoint file path."},
+                    "output_path": {"type": "string", "description": "New workspace-relative .html result path. Existing files cannot be overwritten."}
+                },
+                "required": ["path", "output_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_document_calendar",
+            "description": "선택한 작업 폴더 문서에서 원문 근거(파일·쪽/슬라이드/문단·인용문)가 있는 일정을 만든다. 기획서는 구현 가능한 기능 단위로 재구성하고, 제목·목차·설명문은 제외한다. 같은 문서를 다시 분석하면 기존 일정은 새 결과로 교체해 중앙 캘린더에 저장한다. 단순 파일 구조 조회에는 절대 사용하지 않는다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "분석할 작업 폴더 기준 상대 문서 경로 목록."
+                    }
+                },
+                "required": ["paths"]
+            }
+        }
     },
     {
         "type": "function",

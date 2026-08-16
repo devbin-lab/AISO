@@ -7,12 +7,13 @@ interface Props {
   onChange: (v: string) => void
   placeholder?: string
   disabled?: boolean
+  ariaLabel?: string
   /** 옵션·트리거 왼쪽 상태 점: 'on'(초록)·'off'(빨강)·null(없음). 예: 모델 설치 여부. */
   status?: (value: string) => 'on' | 'off' | null
 }
 
 /** Ollama 모델 등 목록에서 고르는 커스텀 드롭다운 (키보드 탐색 지원). */
-function Select({ value, options, onChange, placeholder, disabled, status }: Props): React.JSX.Element {
+function Select({ value, options, onChange, placeholder, disabled, ariaLabel, status }: Props): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [highlight, setHighlight] = useState(0)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -70,6 +71,7 @@ function Select({ value, options, onChange, placeholder, disabled, status }: Pro
         className="select__trigger"
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-label={ariaLabel}
         disabled={disabled}
         onClick={() => (open ? setOpen(false) : openMenu())}
         onKeyDown={onKeyDown}

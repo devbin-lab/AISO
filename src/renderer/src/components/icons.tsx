@@ -57,6 +57,18 @@ export function AgentIcon({ size = 17 }: IconProps): React.JSX.Element {
   )
 }
 
+export function TodoIcon({ size = 17 }: IconProps): React.JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
+      <rect x="5" y="3.5" width="14" height="17" rx="2" />
+      <path d="m8 9 1.5 1.5L12 7.8" />
+      <path d="M13.5 9h2" />
+      <path d="m8 15 1.5 1.5 2.5-2.7" />
+      <path d="M13.5 15h2" />
+    </svg>
+  )
+}
+
 export function ComfyIcon({ size = 17 }: IconProps): React.JSX.Element {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
@@ -200,6 +212,46 @@ export function DatabaseIcon({ size = 13 }: IconProps): React.JSX.Element {
       <ellipse cx="12" cy="5.5" rx="7.5" ry="2.8" />
       <path d="M4.5 5.5v6c0 1.55 3.36 2.8 7.5 2.8s7.5-1.25 7.5-2.8v-6" />
       <path d="M4.5 11.5v6c0 1.55 3.36 2.8 7.5 2.8s7.5-1.25 7.5-2.8v-6" />
+    </svg>
+  )
+}
+
+export function DownloadIcon({ size = 15 }: IconProps): React.JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
+      <path d="M12 3v11" />
+      <path d="m7.5 10.5 4.5 4.5 4.5-4.5" />
+      <path d="M4.5 18.5v1a1 1 0 0 0 1 1h13a1 1 0 0 0 1-1v-1" />
+    </svg>
+  )
+}
+
+export function LinkIcon({ size = 13 }: IconProps): React.JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
+      <path d="M10 13.8a4.5 4.5 0 0 0 6.36.04l2.08-2.08a4.5 4.5 0 0 0-6.36-6.36L10.9 6.56" />
+      <path d="M14 10.2a4.5 4.5 0 0 0-6.36-.04l-2.08 2.08a4.5 4.5 0 0 0 6.36 6.36l1.18-1.18" />
+    </svg>
+  )
+}
+
+export function UnlinkIcon({ size = 13 }: IconProps): React.JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
+      <path d="m9 15-1.36 1.36a4.5 4.5 0 1 1-6.36-6.36l2.08-2.08a4.5 4.5 0 0 1 6.36 0" />
+      <path d="m15 9 1.36-1.36a4.5 4.5 0 1 1 6.36 6.36L20.64 16.08a4.5 4.5 0 0 1-6.36 0" />
+      <path d="m4 20 16-16" />
+    </svg>
+  )
+}
+
+export function GraphIcon({ size = 17 }: IconProps): React.JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
+      <circle cx="6" cy="7" r="2.4" />
+      <circle cx="18" cy="6" r="2.4" />
+      <circle cx="12" cy="18" r="2.7" />
+      <path d="m8.2 7.1 7.45-0.75M7.45 9.1l3.1 6.2M16.6 8.3l-3 6.6" />
     </svg>
   )
 }

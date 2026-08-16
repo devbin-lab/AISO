@@ -14,8 +14,12 @@ import {
 } from '../shared/nvidia.ts'
 
 export const NVIDIA_AGENT_BASE_TOOLS = ['update_plan', 'get_system_time'] as const
+export const NVIDIA_AGENT_TODO_TOOLS = ['list_calendar_events', 'create_calendar_event', 'manage_calendar_event'] as const
+export const NVIDIA_AGENT_MYDB_TOOLS = [
+  'list_mydb_library', 'list_mydb_history', 'list_mydb_trash', 'restore_mydb_trash_node'
+] as const
 export const NVIDIA_AGENT_WORKSPACE_TOOLS = [
-  'list_dir', 'list_tree', 'read_file', 'grep', 'glob', 'create_dir', 'move',
+  'list_dir', 'list_tree', 'read_file', 'grep', 'glob', 'create_dir', 'move', 'convert_document', 'analyze_document_calendar',
   'write_file', 'edit_file', 'multi_edit',
   'write_code_file', 'edit_code_file', 'multi_edit_code_file',
   'delete_file', 'delete_dir', 'run_web', 'run_code', 'run_command'
@@ -27,6 +31,8 @@ export const NVIDIA_AGENT_MANIFEST_TTL_MS = 10 * 60 * 1000
 const NVIDIA_SUPPORTED_TOOL_SET = new Set<string>(NVIDIA_SUPPORTED_AGENT_TOOL_IDS)
 const DECLARED_NVIDIA_TOOL_SET = new Set<string>([
   ...NVIDIA_AGENT_BASE_TOOLS,
+  ...NVIDIA_AGENT_TODO_TOOLS,
+  ...NVIDIA_AGENT_MYDB_TOOLS,
   ...NVIDIA_AGENT_WORKSPACE_TOOLS,
   ...NVIDIA_AGENT_RAG_TOOLS,
   ...NVIDIA_AGENT_IMAGE_TOOLS
@@ -92,6 +98,8 @@ export function buildAutomaticNvidiaAgentDataScope(
   )
   const rag = Boolean(settings.workspace.trim()) && settings.ragEnabled && enabled.has('search_docs')
   const workspace = Boolean(settings.workspace.trim()) && (hasWorkspaceTool || rag)
+  const todos = enabled.has('list_calendar_events') || enabled.has('create_calendar_event')
+  const myDb = NVIDIA_AGENT_MYDB_TOOLS.some((toolId) => enabled.has(toolId))
   const selectionMode = settings.comfyModelSelectionMode === 'manual' ? 'manual' : 'auto'
 
   const imageToolEnabled = enabled.has('generate_image')
@@ -114,6 +122,8 @@ export function buildAutomaticNvidiaAgentDataScope(
     workspace,
     rag,
     image,
+    todos,
+    myDb,
     ...(image && selectionMode === 'manual' && selectedComfyModelId
       ? { selectedComfyModelId }
       : {})
@@ -141,7 +151,9 @@ function validateScope(raw: unknown): NvidiaAgentDataScopeRequest {
   if (
     typeof value.workspace !== 'boolean' ||
     typeof value.rag !== 'boolean' ||
-    typeof value.image !== 'boolean'
+    typeof value.image !== 'boolean' ||
+    (value.todos !== undefined && typeof value.todos !== 'boolean') ||
+    (value.myDb !== undefined && typeof value.myDb !== 'boolean')
   ) {
     throw new Error('NVIDIA Agent 전송 범위 형식이 올바르지 않습니다.')
   }
@@ -162,6 +174,8 @@ function validateScope(raw: unknown): NvidiaAgentDataScopeRequest {
     workspace: value.workspace,
     rag: value.rag,
     image: value.image,
+    todos: value.todos === true,
+    myDb: value.myDb === true,
     ...(selectedComfyModelId ? { selectedComfyModelId } : {})
   }
 }
@@ -250,6 +264,8 @@ export function buildNvidiaAgentManifestAuthority(
   }
   const ollamaHost = request.rag ? requireLocalOllamaHost(settings.ollamaHost) : ''
   const ragTopK = request.rag ? Math.max(1, Math.min(20, Math.trunc(settings.ragTopK))) : 0
+  const savedTodos = request.todos === true
+  const myDb = request.myDb === true
 
   const selectionMode = settings.comfyModelSelectionMode === 'manual' ? 'manual' : 'auto'
   const selectedProfileId = request.image && selectionMode === 'manual'
@@ -280,6 +296,12 @@ export function buildNvidiaAgentManifestAuthority(
 
   const allowedTools = [
     ...NVIDIA_AGENT_BASE_TOOLS.filter((name) => settings.agentToolPolicy.nvidia.includes(name)),
+    ...(savedTodos
+      ? NVIDIA_AGENT_TODO_TOOLS.filter((name) => settings.agentToolPolicy.nvidia.includes(name))
+      : []),
+    ...(myDb
+      ? NVIDIA_AGENT_MYDB_TOOLS.filter((name) => settings.agentToolPolicy.nvidia.includes(name))
+      : []),
     ...(request.workspace
       ? NVIDIA_AGENT_WORKSPACE_TOOLS.filter((name) => settings.agentToolPolicy.nvidia.includes(name))
       : []),
@@ -293,6 +315,12 @@ export function buildNvidiaAgentManifestAuthority(
   const baseToolsSent = allowedTools.some((name) => NVIDIA_AGENT_BASE_TOOLS.includes(
     name as typeof NVIDIA_AGENT_BASE_TOOLS[number]
   ))
+  const todoToolsSent = allowedTools.some((name) => NVIDIA_AGENT_TODO_TOOLS.includes(
+    name as typeof NVIDIA_AGENT_TODO_TOOLS[number]
+  ))
+  const myDbToolsSent = allowedTools.some((name) => NVIDIA_AGENT_MYDB_TOOLS.includes(
+    name as typeof NVIDIA_AGENT_MYDB_TOOLS[number]
+  ))
   const workspaceToolsSent = allowedTools.some((name) => NVIDIA_AGENT_WORKSPACE_TOOLS.includes(
     name as typeof NVIDIA_AGENT_WORKSPACE_TOOLS[number]
   ))
@@ -303,6 +331,8 @@ export function buildNvidiaAgentManifestAuthority(
     ragEnabled: request.rag,
     ollamaHost,
     ragTopK,
+    savedTodos,
+    myDb,
     allowedTools,
     comfy: {
       enabled: request.image,
@@ -318,6 +348,8 @@ export function buildNvidiaAgentManifestAuthority(
     'ComfyUI 설치 경로·모델/체크포인트 경로·등록 정보·workflow JSON',
     ...(request.workspace ? [] : ['작업 폴더와 파일 내용']),
     ...(request.rag ? [] : ['로컬 RAG 검색 결과']),
+    ...(request.todos ? [] : ['Aiso에 저장된 문서 ToDo 목록']),
+    ...(request.myDb ? [] : ['My DB 라이브러리 메타데이터·변경 이력·휴지통 목록']),
     ...(request.image ? ['로컬 이미지 파일과 상세 생성 메타데이터'] : ['ComfyUI 이미지 생성 정보']),
     'Discord 데이터와 사용자 스킬'
   ]
@@ -328,7 +360,7 @@ export function buildNvidiaAgentManifestAuthority(
       fingerprint: scopeFingerprint,
       approvalMode: privateScope.approvalMode,
       workspace: privateScope.workspace,
-      ragEnabled: privateScope.ragEnabled,
+        ragEnabled: privateScope.ragEnabled,
       ollamaHost: privateScope.ollamaHost,
       ragTopK: privateScope.ragTopK,
       allowedTools: [...allowedTools],
@@ -344,9 +376,13 @@ export function buildNvidiaAgentManifestAuthority(
         workspace: request.workspace,
         rag: request.rag,
         imagePrompt: request.image,
+        savedTodos,
+        myDb,
         toolResults: [...allowedTools],
         toolResultDetails: [
           ...(baseToolsSent ? ['설정에서 허용한 계획·시각 도구 호출과 결과'] : []),
+          ...(todoToolsSent ? ['Aiso에 저장된 문서 ToDo 목록'] : []),
+          ...(myDbToolsSent ? ['My DB의 코어·파일 메타데이터, 관계, 변경 이력 또는 휴지통 복구 결과'] : []),
           ...(workspaceToolsSent ? ['설정에서 허용한 작업 폴더·코드 도구 호출과 결과'] : []),
           ...(request.rag ? ['로컬 Ollama RAG 검색 결과'] : []),
           ...(request.image ? ['이미지 생성 성공 여부와 크기 정보'] : [])
@@ -355,7 +391,9 @@ export function buildNvidiaAgentManifestAuthority(
       scopeDetails: {
         workspacePath: request.workspace ? settings.workspace.trim() : null,
         rag: { enabled: request.rag, localOllama: true, topK: ragTopK },
-        image: { enabled: request.image, selectionMode }
+        image: { enabled: request.image, selectionMode },
+        savedTodos,
+        myDb
       },
       localOnly,
       allowedTools: [...allowedTools]

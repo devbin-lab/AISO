@@ -26,6 +26,7 @@ os.environ["AISO_AUTH_TOKEN"] = TOKEN
 
 import main  # noqa: E402  (토큰 심은 뒤 import — 미들웨어가 이 토큰으로 잠긴다)
 import comfy_client  # noqa: E402
+from document_todos import analyze_documents, save_todos  # noqa: E402
 
 try:
     from fastapi.testclient import TestClient  # noqa: E402
@@ -111,6 +112,70 @@ def test_agent_tools_returns_the_authenticated_builtin_catalog(client):
     by_name = {tool["name"]: tool for tool in r.json()["tools"]}
     assert {"update_plan", "search_docs", "discord_send", "generate_image"} <= set(by_name)
     assert by_name["generate_image"]["availability"] == "image"
+
+
+def test_saved_todos_are_read_and_updated_through_the_authenticated_api(client, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("AISO_DOCUMENT_TODO_DB_PATH", str(tmp_path / "todo-db.sqlite3"))
+    (tmp_path / "plan.md").write_text("핵심 전투 시스템 구현", encoding="utf-8")
+    candidate = analyze_documents(str(tmp_path), ["plan.md"])["candidates"][0]
+    item = save_todos(str(tmp_path), [candidate])["items"][0]
+    headers = {"X-Aiso-Token": TOKEN}
+
+    listed = client.get("/creator/todos", params={"workspace": str(tmp_path)}, headers=headers)
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["id"] == item["id"]
+
+    updated = client.patch(
+        f"/creator/todos/{item['id']}",
+        headers=headers,
+        json={"status": "done"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["item"]["status"] == "done"
+
+
+def test_saved_todos_can_be_listed_without_workspace_parameter(client, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("AISO_DOCUMENT_TODO_DB_PATH", str(tmp_path / "todo-db.sqlite3"))
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    (workspace / "plan.md").write_text("발표 자료 제작", encoding="utf-8")
+    candidate = analyze_documents(str(workspace), ["plan.md"])["candidates"][0]
+    saved = save_todos(str(workspace), [candidate])["items"][0]
+
+    listed = client.get("/creator/todos", headers={"X-Aiso-Token": TOKEN})
+
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["id"] == saved["id"]
+    assert listed.json()["items"][0]["workspace"] == str(workspace)
+
+
+def test_authenticated_api_previews_then_applies_a_missed_work_recovery_plan(client, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("AISO_DOCUMENT_TODO_DB_PATH", str(tmp_path / "todo-db.sqlite3"))
+    (tmp_path / "plan.md").write_text("전투 시스템 구현", encoding="utf-8")
+    candidate = analyze_documents(str(tmp_path), ["plan.md"])["candidates"][0]
+    item = save_todos(str(tmp_path), [candidate])["items"][0]
+    headers = {"X-Aiso-Token": TOKEN}
+    updated = client.patch(
+        f"/creator/todos/{item['id']}", headers=headers,
+        json={"startDate": "2026-08-18", "endDate": "2026-08-18", "estimatedMinutes": 120},
+    )
+    assert updated.status_code == 200
+
+    preview = client.post("/creator/todos/replan-preview", headers=headers, json={"asOf": "2026-08-18"})
+    assert preview.status_code == 200
+    assert preview.json()["plans"][0]["assignments"] == [
+        {"date": "2026-08-19", "minutes": 60},
+        {"date": "2026-08-20", "minutes": 60},
+    ]
+    # The preview itself is explicitly read-only.
+    assert client.get("/creator/todos", headers=headers).json()["items"][0]["scheduleBlocks"] == []
+
+    applied = client.post("/creator/todos/replan-apply", headers=headers, json={"asOf": "2026-08-18"})
+    assert applied.status_code == 200
+    assert applied.json()["items"][0]["scheduleBlocks"] == [
+        {"date": "2026-08-19", "minutes": 60},
+        {"date": "2026-08-20", "minutes": 60},
+    ]
 
 
 # ── /f/ 정적 미리보기는 예외(iframe은 헤더를 못 실음) ──────────

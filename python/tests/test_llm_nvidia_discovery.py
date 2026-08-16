@@ -7,7 +7,8 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 
-from llm import LlmFailureKind, LlmProviderError
+from llm import LlmFailureKind, LlmProviderError, ModelCapabilities
+from llm.providers import nvidia as nvidia_provider
 from llm.providers.nvidia import NVIDIA_BUILD_BASE_URL, NvidiaAdapter
 
 
@@ -140,6 +141,10 @@ def supported_probe_body() -> bytes:
     ])
 
 
+def basic_probe_body() -> bytes:
+    return sse({"choices": [{"delta": {"content": "OK"}, "finish_reason": "stop"}]}) + sse("[DONE]")
+
+
 def test_forced_tool_probe_reconstructs_split_delta_but_executes_no_aiso_tool():
     requests = []
     executed = 0
@@ -148,14 +153,21 @@ def test_forced_tool_probe_reconstructs_split_delta_but_executes_no_aiso_tool():
     def handler(request: httpx.Request):
         nonlocal executed
         requests.append(request)
+        assert request.extensions["timeout"]["read"] is None
         payload = json.loads(request.content)
         assert payload["stream"] is True
         assert payload["temperature"] == 0
-        assert payload["max_tokens"] == 32
+        if len(requests) == 1:
+            assert payload["max_tokens"] == 32
+            assert "tools" not in payload
+            assert "tool_choice" not in payload
+            return httpx.Response(200, stream=ChunkStream([basic_probe_body()]))
+        assert payload["max_tokens"] == 256
         assert payload["tool_choice"] == {
             "type": "function", "function": {"name": "aiso_capability_probe"}
         }
         assert payload["tools"][0]["function"]["name"] == "aiso_capability_probe"
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
         assert executed == 0
         return httpx.Response(200, stream=ChunkStream([body[index:index + 1] for index in range(len(body))]))
 
@@ -164,15 +176,122 @@ def test_forced_tool_probe_reconstructs_split_delta_but_executes_no_aiso_tool():
     assert result.stream == "supported"
     assert result.tools == "supported"
     assert executed == 0
-    assert len(requests) == 1
+    assert len(requests) == 2
 
 
 @pytest.mark.parametrize("status", [400, 422])
 def test_explicit_tool_probe_rejection_is_unsupported(status):
-    result = asyncio.run(adapter(lambda _request: httpx.Response(status)).inspect_capabilities("m"))
-    assert result.chat == "unknown"
-    assert result.stream == "unknown"
+    calls = 0
+
+    def handler(_request: httpx.Request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(200, stream=ChunkStream([basic_probe_body()]))
+        return httpx.Response(status)
+
+    result = asyncio.run(adapter(handler).inspect_capabilities("m"))
+    assert result.chat == "supported"
+    assert result.stream == "supported"
     assert result.tools == "unsupported"
+    assert calls == 3
+
+
+def test_tool_probe_retries_portable_shape_after_thinking_control_is_rejected():
+    payloads: list[dict] = []
+
+    def handler(request: httpx.Request):
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return httpx.Response(200, stream=ChunkStream([basic_probe_body()]))
+        if len(payloads) == 2:
+            assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+            return httpx.Response(422)
+        assert "chat_template_kwargs" not in payload
+        return httpx.Response(200, stream=ChunkStream([supported_probe_body()]))
+
+    result = asyncio.run(adapter(handler).inspect_capabilities("model/probe"))
+    assert result.chat == "supported"
+    assert result.stream == "supported"
+    assert result.tools == "supported"
+    assert len(payloads) == 3
+
+
+def test_tool_probe_failure_keeps_independently_confirmed_chat_and_stream():
+    calls = 0
+    ignored_tool = sse({"choices": [{"delta": {"content": "no function"}, "finish_reason": "stop"}]}) + sse("[DONE]")
+
+    def handler(_request: httpx.Request):
+        nonlocal calls
+        calls += 1
+        body = basic_probe_body() if calls == 1 else ignored_tool
+        return httpx.Response(200, stream=ChunkStream([body]))
+
+    result = asyncio.run(adapter(handler).inspect_capabilities("m"))
+    assert result.chat == "supported"
+    assert result.stream == "supported"
+    assert result.tools == "unknown"
+    assert calls == 2
+
+
+def test_capability_probe_uses_one_total_timeout_and_keeps_completed_basic_evidence(monkeypatch):
+    runtime = adapter(lambda _request: pytest.fail("the mocked probe helpers own this test"))
+
+    async def basic(_model: str):
+        return ModelCapabilities(chat="supported", stream="supported")
+
+    async def wait_for_tool(_model: str, *, disable_thinking: bool):
+        assert disable_thinking is True
+        await asyncio.Event().wait()
+        return ModelCapabilities()  # pragma: no cover
+
+    monkeypatch.setattr(runtime, "_inspect_basic_capabilities", basic)
+    monkeypatch.setattr(runtime, "_inspect_tool_capabilities", wait_for_tool)
+    monkeypatch.setattr(nvidia_provider, "_CAPABILITY_PROBE_TOTAL_TIMEOUT", 0.01)
+
+    result = asyncio.run(runtime.inspect_capabilities("m"))
+    assert result.chat == "supported"
+    assert result.stream == "supported"
+    assert result.tools == "unknown"
+
+
+def test_single_tool_call_without_index_is_normalized_but_parallel_missing_indexes_are_not():
+    single = b"".join([
+        sse({"choices": [{"delta": {"tool_calls": [{
+            "id": "probe",
+            "type": "function",
+            "function": {"name": "aiso_capability_probe", "arguments": "{\"value\":1}"},
+        }]}, "finish_reason": "tool_calls"}]}),
+        sse("[DONE]"),
+    ])
+    calls = 0
+
+    def single_handler(_request: httpx.Request):
+        nonlocal calls
+        calls += 1
+        body = basic_probe_body() if calls == 1 else single
+        return httpx.Response(200, stream=ChunkStream([body]))
+
+    result = asyncio.run(adapter(single_handler).inspect_capabilities("m"))
+    assert result.tools == "supported"
+
+    ambiguous = sse({"choices": [{"delta": {"tool_calls": [
+        {"id": "one", "function": {"name": "aiso_capability_probe", "arguments": "{\"value\":1}"}},
+        {"id": "two", "function": {"name": "aiso_capability_probe", "arguments": "{\"value\":1}"}},
+    ]}, "finish_reason": "tool_calls"}]}) + sse("[DONE]")
+    calls = 0
+
+    def ambiguous_handler(_request: httpx.Request):
+        nonlocal calls
+        calls += 1
+        body = basic_probe_body() if calls == 1 else ambiguous
+        return httpx.Response(200, stream=ChunkStream([body]))
+
+    result = asyncio.run(adapter(ambiguous_handler).inspect_capabilities("m"))
+    assert result.chat == "supported"
+    assert result.stream == "supported"
+    assert result.tools == "unknown"
 
 
 @pytest.mark.parametrize(

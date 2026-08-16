@@ -20,11 +20,14 @@ import type {
   Conversation,
   ConversationKind,
   ConversationMeta,
-  ConversationSave
+  ConversationSave,
+  AgentProject
 } from '../shared/conversation'
 import type { SkillMeta } from '../shared/skill'
 import type { DiscordStatus, DiscordSchedule } from '../shared/discord'
 import type { ComfyLaunchResult, ComfySurfaceRequest } from '../shared/comfy'
+import type { AttachmentDropEvent, AttachmentRef } from '../shared/attachments'
+import type { MyDbBridge } from '../shared/mydb'
 import type {
   ComfyModelImportProgress,
   ComfyModelImportRequest,
@@ -74,6 +77,13 @@ export interface AisoAPI {
     onStatus: (cb: (info: BackendInfo) => void) => () => void
   }
   pickWorkspace: () => Promise<string | null>
+  attachments: {
+    pickFiles: () => Promise<AttachmentRef[]>
+    pickFolder: () => Promise<AttachmentRef[]>
+    onDrop: (cb: (event: AttachmentDropEvent) => void) => () => void
+  }
+  /** Private, user-owned My DB library. This is intentionally not agent history. */
+  myDb?: MyDbBridge
   comfy: {
     pickInstall: () => Promise<string | null>
     start: () => Promise<ComfyLaunchResult>
@@ -101,7 +111,14 @@ export interface AisoAPI {
     get: (id: string) => Promise<Conversation | null>
     save: (c: ConversationSave) => Promise<Conversation>
     setPinned: (id: string, pinned: boolean) => Promise<ConversationMeta | null>
+    rename: (id: string, title: string) => Promise<ConversationMeta | null>
     remove: (id: string) => Promise<void>
+  }
+  projects: {
+    list: () => Promise<AgentProject[]>
+    create: (title: string) => Promise<AgentProject>
+    createConversation: (projectId: string, title?: string) => Promise<ConversationMeta | null>
+    start: (id: string) => Promise<AgentProject | null>
   }
   skills: {
     list: () => Promise<SkillMeta[]>

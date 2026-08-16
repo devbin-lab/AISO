@@ -21,6 +21,7 @@ from comfy_workflows import (
     build_workflow,
     inventory_folders,
     node_classes_for_profile,
+    refinement_node_classes_for_profile,
     normalize_profiles,
     primary_model_name,
     required_assets,
@@ -287,6 +288,40 @@ def _build_pipeline_snapshot(
     }
 
 
+def _delivered_dimensions(
+    workflow: Mapping[str, Mapping[str, Any]],
+    *,
+    fallback_width: int,
+    fallback_height: int,
+) -> tuple[int, int]:
+    """Return the dimensions of Aiso's final built-in latent output.
+
+    ``GenerationOptions`` describes the initial latent.  When optional latent
+    refinement is active, reporting that initial size as the delivered image
+    would be misleading to the user.  Only trust the exact built-in node shape
+    assembled by ``build_workflow``; user workflows retain their declared
+    option dimensions because their output geometry is arbitrary.
+    """
+    for node in workflow.values():
+        if not isinstance(node, Mapping) or node.get("class_type") != "LatentUpscale":
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, Mapping):
+            continue
+        width = inputs.get("width")
+        height = inputs.get("height")
+        if (
+            isinstance(width, int)
+            and not isinstance(width, bool)
+            and isinstance(height, int)
+            and not isinstance(height, bool)
+            and 1 <= width <= 2_048
+            and 1 <= height <= 2_048
+        ):
+            return width, height
+    return fallback_width, fallback_height
+
+
 async def generate_image(
     *,
     base_url: str,
@@ -365,10 +400,25 @@ async def generate_image(
             sampler=sampler,
             scheduler=scheduler,
         )
-        node_infos = await comfy_client.get_node_infos(
+        mandatory_node_infos = await comfy_client.get_node_infos(
             normalized_url, node_classes_for_profile(selected)
         )
-        validate_runtime_options(selected, options, node_infos)
+        # The optional quality node is intentionally fetched apart from the
+        # mandatory contract.  A normal ComfyUI install without it remains a
+        # valid base-generation environment.
+        optional_node_infos: dict[str, Mapping[str, Any]] = {}
+        optional_classes = refinement_node_classes_for_profile(selected)
+        if optional_classes:
+            try:
+                optional_node_infos = await comfy_client.get_node_infos(
+                    normalized_url, optional_classes
+                )
+            except comfy_client.ComfyAPIError:
+                logging.info(
+                    "ComfyUI optional latent refinement node is unavailable; using the base workflow."
+                )
+        node_infos = {**mandatory_node_infos, **optional_node_infos}
+        validate_runtime_options(selected, options, mandatory_node_infos)
     except WorkflowValidationError as exc:
         raise GenerationError(str(exc), kind="input") from exc
     except comfy_client.ComfyAPIError as exc:
@@ -380,7 +430,7 @@ async def generate_image(
 
     prompt_id = str(uuid.uuid4())
     client_id = str(uuid.uuid4())
-    workflow = build_workflow(selected, options, prompt_id=prompt_id)
+    workflow = build_workflow(selected, options, prompt_id=prompt_id, node_infos=node_infos)
     workflow_snapshot = snapshot_workflow(
         workflow, allow_user_template=selected.workflow_template is not None
     )
@@ -448,6 +498,11 @@ async def generate_image(
         negative_reaches_output = bool(
             pipeline and pipeline["negativeMode"] in ("conditioning", "connected-empty")
         )
+        delivered_width, delivered_height = _delivered_dimensions(
+            workflow,
+            fallback_width=options.width,
+            fallback_height=options.height,
+        )
         model_name = primary_model_name(selected)
         summary = f"이미지 생성 완료: {selected.name} ({model_name}), seed {options.seed}"
         if prompt_application["promptPolicy"]["id"] != "none":
@@ -478,11 +533,20 @@ async def generate_image(
                 options.negative_prompt if negative_reaches_output else ""
             ),
             "promptPolicy": prompt_application["promptPolicy"],
+            "promptNormalization": {
+                "positiveChanged": options.prompt != prompt_application["originalPrompt"],
+                "negativeChanged": options.negative_prompt != prompt_application["originalNegativePrompt"],
+                "positiveLength": len(options.prompt),
+                "negativeLength": len(options.negative_prompt),
+                "maxPromptLength": MAX_PROMPT_LENGTH,
+            },
             **({"pipeline": pipeline} if pipeline is not None else {}),
             "workflow": workflow_snapshot,
             "seed": str(options.seed),
-            "width": options.width,
-            "height": options.height,
+            "width": delivered_width,
+            "height": delivered_height,
+            "baseWidth": options.width,
+            "baseHeight": options.height,
             "steps": options.steps,
             "cfg": options.cfg,
             "sampler": options.sampler,

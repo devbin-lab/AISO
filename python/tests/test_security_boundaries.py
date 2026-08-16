@@ -54,6 +54,99 @@ def test_list_tree_skips_symlink_outside_workspace(tmp_path):
     assert "secret.txt" not in listing
 
 
+def test_file_search_and_listing_do_not_follow_symlink_outside_workspace(tmp_path):
+    root = tmp_path / "workspace"
+    outside = tmp_path / "outside.txt"
+    root.mkdir()
+    outside.write_text("OUTSIDE_CANARY", encoding="utf-8")
+    linked = root / "linked.html"
+    try:
+        linked.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this Windows configuration")
+
+    listing = tools.list_dir(root)
+    assert "linked.html" in listing and "링크/정션" in listing
+    assert "OUTSIDE_CANARY" not in tools.grep(root, "OUTSIDE_CANARY")
+    assert "linked.html" not in tools.glob(root, "**/*.html")
+
+
+def test_harness_html_inventory_is_complete_sorted_and_keeps_build_outputs(tmp_path):
+    root = tmp_path / "workspace"
+    (root / "dist").mkdir(parents=True)
+    (root / "app").mkdir()
+    (root / "node_modules").mkdir()
+    (root / "dist" / "index.html").write_text("dist", encoding="utf-8")
+    (root / "app" / "play.htm").write_text("app", encoding="utf-8")
+    (root / "node_modules" / "ignored.html").write_text("dependency", encoding="utf-8")
+
+    assert tools.find_html_entries(root) == ["app/play.htm", "dist/index.html"]
+
+
+def test_harness_html_inventory_fails_closed_on_cap_and_skips_links(tmp_path):
+    root = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (root / "a.html").write_text("a", encoding="utf-8")
+    (root / "b.html").write_text("b", encoding="utf-8")
+    (outside / "secret.html").write_text("outside", encoding="utf-8")
+    jump = root / "jump"
+    try:
+        jump.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this Windows configuration")
+
+    assert tools.find_html_entries(root, max_results=1) is None
+    assert tools.find_html_entries(root) == ["a.html", "b.html"]
+
+
+def test_harness_html_inventory_fails_closed_when_an_entry_cannot_be_inspected(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "index.html").write_text("ok", encoding="utf-8")
+    original = tools._link_or_reparse_status
+
+    def inaccessible(path):
+        if path.name == "index.html":
+            return None
+        return original(path)
+
+    monkeypatch.setattr(tools, "_link_or_reparse_status", inaccessible)
+    assert tools.find_html_entries(root) is None
+
+
+def test_harness_html_inventory_fails_closed_on_scanned_entry_budget(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    for index in range(5):
+        (root / f"note-{index}.txt").write_text("x", encoding="utf-8")
+
+    assert tools.find_html_entries(root, max_scanned_entries=3) is None
+
+
+def test_identity_containment_fails_closed_on_permission_or_network_error(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "workspace"
+    child = root / "nested" / "index.html"
+    child.parent.mkdir(parents=True)
+    child.write_text("ok", encoding="utf-8")
+    real_samefile = os.path.samefile
+
+    def indeterminate(left, right):
+        if str(left).endswith("index.html") or str(left).endswith("nested"):
+            raise PermissionError("identity unavailable")
+        return real_samefile(left, right)
+
+    monkeypatch.setattr(os.path, "samefile", indeterminate)
+    assert tools.is_path_within(child, root) is False
+
+
 def test_delete_fails_closed_when_recycle_bin_is_unavailable(tmp_path, monkeypatch):
     target = tmp_path / "data.txt"
     target.write_text("keep me", encoding="utf-8")

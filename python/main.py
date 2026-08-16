@@ -24,7 +24,10 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent import MAX_GEN_TOKENS, _chat_turn, resolve_approval, run_agent, run_research_chat
+from agent_prompting import final_response_language_prompt
 from agent_ledger import AgentExecutionLedger, LedgerError
+from attachments import AttachmentError, append_attachment_context
+from response_language import response_language_from_messages
 from toolspec import (
     BUILTIN_TOOL_NAMES,
     NVIDIA_AGENT_SUPPORTED_TOOLS,
@@ -39,10 +42,20 @@ from comfy_client import (
     get_checkpoints as get_comfy_checkpoints,
     get_health as get_comfy_health,
 )
+from comfy_generation import GenerationError, generate_image as generate_comfy_image
+from document_todos import delete_todo as delete_document_todo
+from document_todos import apply_reschedule as apply_document_todo_reschedule
+from document_todos import create_todo_item as create_document_todo_item
+from document_todos import list_todos as list_document_todos
+from document_todos import list_saved_todos as list_saved_document_todos
+from document_todos import preview_reschedule as preview_document_todo_reschedule
+from document_todos import update_todo as update_document_todo
+from qa_scenarios import run_scenario_pack
 from rag import RagError, build_index
 from rag import search as rag_search
 from rag import status as rag_status
 from tools import ToolError, validate_workspace
+from webcheck import run_web
 from llm import (
     NVIDIA_BUILD_BASE_URL,
     LlmFailureKind,
@@ -407,7 +420,7 @@ class NvidiaDiscordGrantRequest(NvidiaResearchGrantRequest):
 
 _NVIDIA_AGENT_SCOPE_TOOLS = NVIDIA_AGENT_SUPPORTED_TOOLS
 _NVIDIA_AGENT_WORKSPACE_TOOLS = frozenset({
-    "list_dir", "list_tree", "read_file", "grep", "glob", "create_dir", "move",
+    "list_dir", "list_tree", "read_file", "grep", "glob", "create_dir", "move", "convert_document", "analyze_document_calendar",
     "write_file", "edit_file", "multi_edit",
     "write_code_file", "edit_code_file", "multi_edit_code_file",
     "delete_file", "delete_dir", "run_web", "run_code", "run_command",
@@ -682,6 +695,9 @@ async def nvidia_capability_probe(body: NvidiaCapabilityProbeRequest):
 class ChatMessage(BaseModel):
     role: str
     content: str
+    # Opaque IDs only.  The Electron main process stages user selections in an
+    # app-managed store; the renderer never sends an arbitrary local path.
+    attachments: list[str] = Field(default_factory=list, max_length=16)
 
 
 class ChatRequest(BaseModel):
@@ -858,6 +874,45 @@ async def _prepare_model(host: str, model: str) -> LlmModelRuntime:
     return await create_runtime("ollama", host).prepare_model(model)
 
 
+def _messages_with_latest_attachments(
+    messages: list[ChatMessage], *, allow_images: bool
+) -> list[dict[str, Any]]:
+    """Attach bounded local material to the current request only.
+
+    Re-reading every historical attachment on each follow-up would silently
+    inflate small local-model contexts.  The current user turn is the explicit
+    attachment scope; conversation history still retains the ordinary text.
+    """
+    prepared = [{"role": message.role, "content": message.content} for message in messages]
+    if not messages:
+        return prepared
+    last_user = next((message for message in reversed(messages) if message.role == "user"), None)
+    if last_user and last_user.attachments:
+        return append_attachment_context(prepared, last_user.attachments, allow_images=allow_images)
+    return prepared
+
+
+def _original_user_message_dicts(messages: list[ChatMessage]) -> list[dict[str, str]]:
+    """Return typed user text only, before attachments are expanded for the model."""
+    return [
+        {"role": message.role, "content": message.content}
+        for message in messages
+        if message.role == "user"
+    ]
+
+
+def _latest_original_user_text(messages: list[ChatMessage]) -> str:
+    return next(
+        (message.content for message in reversed(messages) if message.role == "user"),
+        "",
+    )
+
+
+def _request_response_language(messages: list[ChatMessage]) -> str:
+    """Pick language before attachment/RAG/tool context can affect the decision."""
+    return response_language_from_messages(_original_user_message_dicts(messages), fallback="ko")
+
+
 @app.post("/chat")
 async def chat(req: ChatRequest):
     """NDJSON 스트리밍 채팅. think(추론 강도)는 지원 모델(gemma4·gpt-oss 등)에 적용된다."""
@@ -866,12 +921,23 @@ async def chat(req: ChatRequest):
         if req.provider == "nvidia" and req.research
         else (req.ollama_host or DEFAULT_OLLAMA).rstrip("/")
     )
+    response_language = _request_response_language(req.messages)
+    try:
+        prepared_messages = _messages_with_latest_attachments(
+            req.messages, allow_images=req.provider == "ollama"
+        )
+    except AttachmentError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     runtime: LlmRuntime | None = None
     if req.provider == "ollama":
         runtime = create_runtime("ollama", host)
+    chat_messages = [
+        {"role": "system", "content": final_response_language_prompt(response_language)},
+        *prepared_messages,
+    ]
     base = LlmRequest(
         model=req.model,
-        messages=[{"role": m.role, "content": m.content} for m in req.messages],
+        messages=chat_messages,
         temperature=req.temperature,
         max_output_tokens=MAX_GEN_TOKENS,
         provider_options={
@@ -908,13 +974,14 @@ async def chat(req: ChatRequest):
                     run_research_chat(
                         host=host,
                         model=req.model,
-                        messages=[{"role": m.role, "content": m.content} for m in req.messages],
+                        messages=prepared_messages,
                         reasoning_effort=req.reasoning_effort,
                         temperature=req.temperature,
                         context_length=req.context_length,
                         keep_alive=req.keep_alive,
                         runtime=nvidia_runtime,
                         strict_tool_protocol=True,
+                        response_language=response_language,
                     )
                     if req.research
                     else _stream_chat(nvidia_runtime, base)
@@ -954,11 +1021,12 @@ async def chat(req: ChatRequest):
             research_stream = run_research_chat(
                 host=host,
                 model=req.model,
-                messages=[{"role": m.role, "content": m.content} for m in req.messages],
+                messages=prepared_messages,
                 reasoning_effort=req.reasoning_effort,
                 temperature=req.temperature,
                 context_length=req.context_length,
                 keep_alive=req.keep_alive,
+                response_language=response_language,
             )
             research_completed = False
             try:
@@ -1125,8 +1193,9 @@ async def _discord_research(
     provider: Literal["ollama", "nvidia"] = "ollama",
     deployment_mode: Literal["build", "nim"] | None = None,
     endpoint: str | None = None,
+    response_language: str = "ko",
 ) -> str:
-    """브리핑 예약용 — 웹 조사 루프(run_research_chat)를 돌려 최종 본문 텍스트를 모아 돌려준다."""
+    """Discord 최신 질문·브리핑용 — 근거를 확보한 웹 조사 결과만 반환한다."""
     parts: list[str] = []
     runtime = None
     if provider == "nvidia":
@@ -1144,9 +1213,16 @@ async def _discord_research(
         messages=[{"role": m["role"], "content": m["content"]} for m in messages],
         context_length=context_length, keep_alive=keep_alive,
         runtime=runtime, strict_tool_protocol=provider == "nvidia",
+        response_language=response_language,
     )
     research_completed = False
     terminal_failure = False
+    evidence_succeeded = False
+    openai_question = any(
+        "openai" in str(item.get("content") or "").lower()
+        for item in messages if item.get("role") == "user"
+    )
+    openai_official_fetched = False
     try:
         async for ev in research_stream:
             t = ev.get("type")
@@ -1156,6 +1232,12 @@ async def _discord_research(
                 # 리서치 루프가 '스니펫만 본 임시 답'을 폐기하라는 신호 — 누적분을 버린다
                 # (안 그러면 서두·폐기 초안·최종답이 뒤섞인 브리핑이 자율 전송된다).
                 parts.clear()
+            elif t == "tool_result" and ev.get("ok") and ev.get("name") in ("web_search", "web_fetch"):
+                evidence_succeeded = True
+                if ev.get("name") == "web_fetch":
+                    output = str(ev.get("output") or "").lower()
+                    if any(domain in output for domain in ("openai.com", "help.openai.com", "status.openai.com")):
+                        openai_official_fetched = True
             elif t in ("error", "incomplete", "cancelled"):
                 terminal_failure = True
         research_completed = True
@@ -1166,6 +1248,10 @@ async def _discord_research(
             await research_stream.aclose()
     if terminal_failure:
         return "(브리핑 생성 실패: 선택한 모델의 조사 응답이 안전하게 완료되지 않았습니다.)"
+    if not evidence_succeeded:
+        return "(웹 조사 실패: 검색·원문 확인 근거를 확보하지 못해 모델의 기억으로 답하지 않았습니다.)"
+    if openai_question and not openai_official_fetched:
+        return "(웹 조사 실패: OpenAI 공식 원문을 확인하지 못해 비공식 자료만으로 답하지 않았습니다.)"
     return "".join(parts).strip() or "(빈 브리핑)"
 
 
@@ -1182,6 +1268,12 @@ class DiscordConfig(BaseModel):
     keep_alive: str = "30m"
     ollama_host: str | None = None
     nvidia_runtime_grant: str = Field(default="", max_length=256)
+    # Electron main process is the registry authority. The sidecar receives a
+    # snapshot only for this live bot configuration and cannot accept arbitrary
+    # workflows or model paths from a Discord message/LLM.
+    comfy_base_url: str = Field(default="", max_length=512)
+    comfy_profiles: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    allow_attachment_images: bool = False
 
 
 @app.post("/discord/config")
@@ -1233,7 +1325,7 @@ async def discord_config_ep(req: DiscordConfig):
             endpoint=exact_endpoint,
         )
 
-    async def research(messages: list) -> str:
+    async def research(messages: list, response_language: str | None = "ko") -> str:
         return await _discord_research(
             messages,
             model=req.model,
@@ -1243,12 +1335,82 @@ async def discord_config_ep(req: DiscordConfig):
             provider=req.provider,
             deployment_mode=req.deployment_mode,
             endpoint=exact_endpoint,
+            response_language=response_language or "ko",
         )
+
+    async def image(args: dict[str, Any]) -> dict[str, Any]:
+        if not req.comfy_base_url.strip() or not req.comfy_profiles:
+            raise GenerationError(
+                "Discord 이미지 생성에는 ComfyUI 연결과 준비된 Agent 모델이 필요합니다.", kind="input"
+            )
+
+        def text_arg(name: str, maximum: int) -> str:
+            value = args.get(name, "")
+            if value is None:
+                return ""
+            if not isinstance(value, str):
+                raise GenerationError(f"{name} 입력 형식이 올바르지 않습니다.", kind="input")
+            if len(value) > maximum:
+                raise GenerationError(f"{name} 입력이 너무 깁니다.", kind="input")
+            return value
+
+        def integer_arg(name: str) -> int | None:
+            value = args.get(name)
+            if value is None:
+                return None
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise GenerationError(f"{name} 입력 형식이 올바르지 않습니다.", kind="input")
+            return value
+
+        seed = args.get("seed")
+        if seed is not None and not isinstance(seed, (str, int)):
+            raise GenerationError("seed 입력 형식이 올바르지 않습니다.", kind="input")
+        result = await generate_comfy_image(
+            base_url=req.comfy_base_url,
+            profiles=req.comfy_profiles,
+            prompt=text_arg("prompt", 4_000),
+            negative_prompt=text_arg("negative_prompt", 4_000),
+            model_hint=text_arg("model_hint", 120),
+            # Discord does not expose a raw profile ID control. Only the same
+            # Agent-enabled candidates that desktop automatic mode may use are
+            # eligible, then the registry workflow/asset checks run again.
+            selected_profile_id=None,
+            selection_context="Discord에서 사용자가 요청한 이미지 생성",
+            width=integer_arg("width"),
+            height=integer_arg("height"),
+            seed=seed,
+        )
+        image_result = result.get("image")
+        if not isinstance(image_result, dict):
+            raise GenerationError("이미지 생성 결과 형식이 올바르지 않습니다.")
+        try:
+            data, media_type = await fetch_comfy_output_image(
+                str(image_result["baseUrl"]),
+                str(image_result["filename"]),
+                str(image_result.get("subfolder") or ""),
+                str(image_result["storageType"]),
+            )
+        except (KeyError, TypeError, ComfyAPIError) as error:
+            raise GenerationError("ComfyUI 생성 이미지를 가져오지 못했습니다.") from error
+        return {
+            "summary": str(result.get("summary") or "이미지를 생성했습니다."),
+            "data": data,
+            "filename": str(image_result["filename"]),
+            "content_type": media_type,
+        }
 
     # The one-use bearer authorizes this configuration only and is never kept
     # in the long-lived Discord bot state.
+    image_ready = bool(
+        req.comfy_base_url.strip()
+        and any(bool(profile.get("agentEnabled")) for profile in req.comfy_profiles)
+    )
     await discordbot.apply_config(
-        req.model_dump(exclude={"nvidia_runtime_grant"}), gen, step, research
+        req.model_dump(exclude={"nvidia_runtime_grant"}),
+        gen,
+        step,
+        research,
+        image if image_ready else None,
     )
     return {"ok": True, **discordbot.status()}
 
@@ -1313,7 +1475,13 @@ class AgentRequest(BaseModel):
     context_length: int = 16384  # /chat와 통일 — 모드 전환 시 num_ctx 변경으로 인한 재로드 방지
     approval_mode: str = Field(default="read", pattern="^(manual|read|auto)$")
     session_id: str = ""
+    # Client-side conversation correlation only. It never writes to My DB,
+    # changes tool scope, or grants file access.
+    conversation_id: str = Field(default="", max_length=160)
     assistant_turn_id: str = ""
+    # Renderer-only provenance bit: true solely after a persisted image_result
+    # card exists in this conversation.  It never expands tool permissions.
+    image_context_verified: bool = False
     nvidia_grant: str = ""
     deployment_mode: Literal["build", "nim"] | None = None
     endpoint: str = Field(default="", max_length=2048)
@@ -1346,6 +1514,14 @@ class ApprovalRequest(BaseModel):
 @app.post("/agent")
 async def agent(req: AgentRequest):
     """에이전트 하네스 — 파일 툴 콜링 루프. NDJSON 이벤트 스트림."""
+    response_language = _request_response_language(req.messages)
+    raw_user_request = _latest_original_user_text(req.messages)
+    try:
+        prepared_messages = _messages_with_latest_attachments(
+            req.messages, allow_images=req.provider == "ollama"
+        )
+    except AttachmentError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     runtime: LlmRuntime | None = None
     ledger: AgentExecutionLedger | None = None
     nvidia_execution_scope: dict[str, Any] | None = None
@@ -1421,12 +1597,13 @@ async def agent(req: AgentRequest):
             host=host,
             workspace=authoritative_workspace,
             model=req.model,
-            messages=[{"role": m.role, "content": m.content} for m in req.messages],
+            messages=prepared_messages,
             reasoning_effort=req.reasoning_effort,
             temperature=req.temperature,
             context_length=req.context_length,
             approval_mode=authoritative_approval_mode,
             session_id=req.session_id,
+            conversation_id=req.conversation_id,
             rag_enabled=authoritative_rag,
             rag_top_k=authoritative_rag_top_k,
             keep_alive=req.keep_alive,
@@ -1457,6 +1634,9 @@ async def agent(req: AgentRequest):
                 if nvidia_execution_scope is not None else None
             ),
             enabled_tools=local_enabled_tools,
+            user_request_text=raw_user_request,
+            image_context_verified=req.image_context_verified,
+            response_language=response_language,
         )
         agent_completed = False
         try:
@@ -1480,6 +1660,114 @@ async def agent_tools():
     도구만 읽기 전용으로 반환한다. 다른 Agent 경로와 동일하게 세션 토큰 인증이 적용된다.
     """
     return {"tools": get_builtin_tool_catalog()}
+
+
+# ---- Deterministic scenario QA ----
+
+
+class DocumentTodoPatchRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=110)
+    status: Literal["open", "done"] | None = None
+    priority: Literal["high", "medium", "low"] | None = None
+    dueDate: str | None = Field(default=None, max_length=32)
+    dueTime: str | None = Field(default=None, max_length=8, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    endTime: str | None = Field(default=None, max_length=8, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    startDate: str | None = Field(default=None, max_length=32)
+    endDate: str | None = Field(default=None, max_length=32)
+    estimatedMinutes: int | None = Field(default=None, ge=5, le=1440)
+    recurrence: dict[str, Any] | None = None
+
+
+class DocumentTodoCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=110)
+    priority: Literal["high", "medium", "low"] = "medium"
+    startDate: str | None = Field(default=None, max_length=32)
+    endDate: str | None = Field(default=None, max_length=32)
+    dueTime: str | None = Field(default=None, max_length=8, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    endTime: str | None = Field(default=None, max_length=8, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    estimatedMinutes: int | None = Field(default=30, ge=5, le=1440)
+    recurrence: dict[str, Any] | None = None
+
+
+class DocumentTodoReplanRequest(BaseModel):
+    """A reviewable recovery-plan request, never an autonomous write."""
+
+    asOf: str | None = Field(default=None, max_length=32)
+
+
+@app.get("/creator/todos")
+async def creator_todos_list(workspace: str | None = None):
+    """Read saved ToDos globally, or one workspace when explicitly requested."""
+    try:
+        result = list_document_todos(workspace) if workspace and workspace.strip() else list_saved_document_todos()
+        return {"ok": True, **result}
+    except ToolError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+
+
+@app.post("/creator/todos")
+async def creator_todos_create(req: DocumentTodoCreateRequest):
+    """Create one Aiso-owned planner item without requiring a workspace."""
+    try:
+        return {
+            "ok": True,
+            "item": create_document_todo_item(
+                title=req.title,
+                priority=req.priority,
+                start_date=req.startDate,
+                end_date=req.endDate,
+                start_time=req.dueTime,
+                end_time=req.endTime,
+                estimated_minutes=req.estimatedMinutes,
+                recurrence=req.recurrence,
+            ),
+        }
+    except ToolError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+
+
+@app.patch("/creator/todos/{item_id}")
+async def creator_todos_patch(item_id: str, req: DocumentTodoPatchRequest):
+    try:
+        # Explicit null clears an optional date/time/recurrence field.  Omitting
+        # the field leaves it unchanged.
+        patch = req.model_dump(exclude_unset=True)
+        return {"ok": True, "item": update_document_todo(item_id, patch)}
+    except ToolError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+
+
+@app.delete("/creator/todos/{item_id}")
+async def creator_todos_delete(item_id: str):
+    try:
+        delete_document_todo(item_id)
+        return {"ok": True, "id": item_id}
+    except ToolError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+
+
+@app.post("/creator/todos/replan-preview")
+async def creator_todos_replan_preview(req: DocumentTodoReplanRequest):
+    """Calculate a missed-work recovery proposal without modifying ToDos."""
+    try:
+        return {"ok": True, **preview_document_todo_reschedule(req.asOf)}
+    except ToolError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+
+
+@app.post("/creator/todos/replan-apply")
+async def creator_todos_replan_apply(req: DocumentTodoReplanRequest):
+    """Apply the current proposal only after an explicit UI confirmation."""
+    try:
+        return {"ok": True, **apply_document_todo_reschedule(req.asOf)}
+    except ToolError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+
+
+@app.post("/qa/scenarios/run")
+async def qa_scenarios_run():
+    """Run local contracts without consuming a configured LLM's token budget."""
+    return run_scenario_pack()
 
 
 # ---- RAG: 작업 폴더 의미 색인/검색 (임베딩 모델 = 채팅 모델과 독립) ----
@@ -1610,20 +1898,21 @@ async def rag_search_ep(req: RagSearchRequest):
 class VerifyRequest(BaseModel):
     workspace: str
     path: str
+    actions: list[dict] | None = None
+    steps: list[dict] | None = None
 
 
 @app.post("/verify")
 async def verify(req: VerifyRequest):
     """단일 HTML 파일을 헤드리스 실행해 검증 (수동 검증 / 진단용)."""
-    from tools import ToolError, validate_workspace
-    from webcheck import run_web
-
     try:
         root = validate_workspace(req.workspace)
-        report, shot = await run_web(root, req.path)
-        return {"ok": True, "report": report, "screenshot": shot}
+        report, shot = await run_web(root, req.path, actions=req.actions, steps=req.steps)
+        status_match = re.search(r"(?m)^status=(PASS|FAIL|INCONCLUSIVE)\b", report)
+        status = status_match.group(1) if status_match is not None else "INCONCLUSIVE"
+        return {"ok": status == "PASS", "status": status, "report": report, "screenshot": shot}
     except ToolError as e:
-        return {"ok": False, "report": f"[오류] {e}", "screenshot": None}
+        return {"ok": False, "status": "FAIL", "report": f"[오류] {e}", "screenshot": None}
 
 
 @app.post("/agent/approve")

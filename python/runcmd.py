@@ -4,8 +4,8 @@ runcode.py와 같은 이유로 동기 subprocess를 asyncio.to_thread에서 실�
 (Windows + uvicorn --reload 프로액터 루프에서 asyncio 서브프로세스는 NotImplementedError).
 
 보안: 셸 명령은 파일 툴처럼 경로로 가둘 수 없다(절대경로·cd ..로 작업 폴더를 벗어날 수 있음).
-따라서 실제 안전장치는 경로 confine이 아니라 상위(agent) 루프의 **승인 게이트**다.
-run_command는 모든 승인 모드에서 사용자의 명시적 승인을 요구한다(agent.needs_approval).
+따라서 실제 안전장치는 경로 confine이 아니라 상위(agent) 루프의 **권한 모드**다.
+run_command는 수동·읽기 모드에서 승인을 요구하고, 자동 모드에서는 사용자가 명시적으로 무승인 실행을 선택한다.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from pathlib import Path
 
 from runcode import _bundled_bin, _find_python, run_process_capped
 from process_env import sanitized_child_environment
-from tools import ToolError, _rel  # noqa: F401 — _rel은 향후 표시용
+from tools import ToolError
 
 CMD_TIMEOUT_DEFAULT = 60
 CMD_TIMEOUT_MAX = 300

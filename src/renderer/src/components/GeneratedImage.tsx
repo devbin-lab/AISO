@@ -389,6 +389,9 @@ function GeneratedImage({ image, backendPort }: Props): React.JSX.Element {
   const displayedPrompt = image.effectivePrompt ?? image.prompt
   const displayedNegativePrompt = image.effectiveNegativePrompt ?? image.negativePrompt
   const pipeline = useMemo(() => normalizePipeline(image.pipeline), [image.pipeline])
+  const hasRefinedDimensions = image.baseWidth != null && image.baseHeight != null && (
+    image.baseWidth !== image.width || image.baseHeight !== image.height
+  )
   const negativeModeLabel = pipeline?.negativeMode === 'conditioning'
     ? pipeline.source === 'user-workflow'
       ? '네거티브 입력 바인딩'
@@ -459,7 +462,11 @@ function GeneratedImage({ image, backendPort }: Props): React.JSX.Element {
         <div className="generated-image__loading">이미지를 불러오는 중…</div>
       )}
       <div className="generated-image__meta">
-        <span>{image.width} × {image.height}</span>
+        <span>
+          {hasRefinedDimensions
+            ? `${image.baseWidth} × ${image.baseHeight} → ${image.width} × ${image.height}`
+            : `${image.width} × ${image.height}`}
+        </span>
         <span>{image.steps} steps</span>
         <span>CFG {image.cfg}</span>
         <span>{image.sampler} · {image.scheduler}</span>

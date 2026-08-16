@@ -7,7 +7,7 @@ import codecs
 import email.utils
 import ipaddress
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -29,6 +29,8 @@ _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 _MAX_RETRY_AFTER_SECONDS = 2.0
 _CAPABILITY_PROBE_NAME = "aiso_capability_probe"
 _CAPABILITY_PROBE_ARGUMENT = 1
+_CAPABILITY_PROBE_TOTAL_TIMEOUT = 600.0
+_CAPABILITY_TOOL_MAX_OUTPUT_TOKENS = 256
 
 
 def canonicalize_nvidia_endpoint(deployment_mode: str, endpoint: str) -> str:
@@ -209,6 +211,16 @@ class NvidiaAdapter:
         tool_choice = request.provider_options.get("tool_choice")
         if isinstance(tool_choice, (str, dict)):
             payload["tool_choice"] = tool_choice
+        reasoning_effort = request.provider_options.get("reasoning_effort")
+        if reasoning_effort in ("low", "medium", "high"):
+            payload["reasoning_effort"] = reasoning_effort
+        # Keep the provider-options boundary narrow.  Reasoning NIMs can use
+        # this optional flag to avoid spending a short probe budget thinking.
+        template_options = request.provider_options.get("chat_template_kwargs")
+        if isinstance(template_options, Mapping):
+            enable_thinking = template_options.get("enable_thinking")
+            if isinstance(enable_thinking, bool):
+                payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
         return payload
 
     def _headers(self) -> dict[str, str]:
@@ -217,7 +229,12 @@ class NvidiaAdapter:
             headers["Authorization"] = f"Bearer {self._api_key}"
         return headers
 
-    async def _stream_once(self, request: LlmRequest) -> AsyncIterator[LlmEvent]:
+    async def _stream_once(
+        self,
+        request: LlmRequest,
+        *,
+        read_timeout: float | None,
+    ) -> AsyncIterator[LlmEvent]:
         parser = NvidiaSseParser()
         received_bytes = False
         done = False
@@ -225,7 +242,10 @@ class NvidiaAdapter:
         input_tokens: int | None = None
         total_tokens: int | None = None
         finish_reason: str | None = None
-        timeout = httpx.Timeout(60.0, connect=10.0, read=60.0, write=10.0, pool=10.0)
+        # NVIDIA reasoning and tool-use models can remain silent for a long time
+        # before the first streamed byte. Keep connection/write guards, but let
+        # chat generation wait until NVIDIA responds or the user cancels it.
+        timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=10.0, pool=10.0)
         try:
             async with httpx.AsyncClient(
                 timeout=timeout,
@@ -336,9 +356,25 @@ class NvidiaAdapter:
                                         )
                                     normalized: list[dict[str, Any]] = []
                                     for call in calls:
-                                        if not isinstance(call, dict) or not isinstance(call.get("index"), int):
+                                        if not isinstance(call, dict):
                                             raise _AttemptFailure(
                                                 _safe_error(502, LlmFailureKind.MALFORMED, "NVIDIA 도구 호출 조각이 올바르지 않습니다."),
+                                                False,
+                                                True,
+                                            )
+                                        raw_index = call.get("index")
+                                        if isinstance(raw_index, bool):
+                                            raw_index = None
+                                        if isinstance(raw_index, int) and raw_index >= 0:
+                                            index = raw_index
+                                        # OpenAI-compatible services sometimes omit an index
+                                        # for one streamed tool call.  Do not guess when a
+                                        # delta contains multiple/parallel calls.
+                                        elif len(calls) == 1:
+                                            index = 0
+                                        else:
+                                            raise _AttemptFailure(
+                                                _safe_error(502, LlmFailureKind.MALFORMED, "NVIDIA 도구 호출 조각이 모호합니다."),
                                                 False,
                                                 True,
                                             )
@@ -350,7 +386,7 @@ class NvidiaAdapter:
                                                 True,
                                             )
                                         normalized.append({
-                                            "index": call["index"],
+                                            "index": index,
                                             "id": call.get("id") if isinstance(call.get("id"), str) else "",
                                             "type": call.get("type") if isinstance(call.get("type"), str) else "function",
                                             "function": {
@@ -388,10 +424,21 @@ class NvidiaAdapter:
             )
 
     async def chat_stream(self, request: LlmRequest) -> AsyncIterator[LlmEvent]:
+        configured_read_timeout = request.provider_options.get("response_read_timeout")
+        if configured_read_timeout is None:
+            read_timeout = None
+        elif (
+            isinstance(configured_read_timeout, (int, float))
+            and not isinstance(configured_read_timeout, bool)
+            and configured_read_timeout > 0
+        ):
+            read_timeout = float(configured_read_timeout)
+        else:
+            raise ValueError("response_read_timeout must be a positive number or None")
         attempt = 0
         while True:
             try:
-                stream = self._stream_once(request)
+                stream = self._stream_once(request, read_timeout=read_timeout)
                 completed = False
                 try:
                     async for event in stream:
@@ -468,7 +515,12 @@ class NvidiaAdapter:
                 "NVIDIA 모델 목록 서버에 연결할 수 없습니다.",
             ) from exc
 
-    async def inspect_capabilities(self, model: str) -> ModelCapabilities:
+    async def _inspect_tool_capabilities(
+        self,
+        model: str,
+        *,
+        disable_thinking: bool,
+    ) -> ModelCapabilities:
         target_model = model.strip()
         if not target_model:
             raise ValueError("NVIDIA 모델명이 필요합니다.")
@@ -481,7 +533,7 @@ class NvidiaAdapter:
                 }
             ],
             temperature=0,
-            max_output_tokens=32,
+            max_output_tokens=_CAPABILITY_TOOL_MAX_OUTPUT_TOKENS,
             tools=[
                 {
                     "type": "function",
@@ -506,12 +558,13 @@ class NvidiaAdapter:
                 "tool_choice": {
                     "type": "function",
                     "function": {"name": _CAPABILITY_PROBE_NAME},
-                }
+                },
+                **({"chat_template_kwargs": {"enable_thinking": False}} if disable_thinking else {}),
             },
         )
         fragments: dict[int, dict[str, str]] = {}
         completed = False
-        stream = self._stream_once(probe)
+        stream = self._stream_once(probe, read_timeout=None)
         stream_consumed = False
         try:
             async for event in stream:
@@ -572,6 +625,98 @@ class NvidiaAdapter:
             return ModelCapabilities(chat="supported", stream="supported", tools="supported")
         return capabilities
 
+    async def _inspect_basic_capabilities(self, model: str) -> ModelCapabilities:
+        """Confirm the normal SSE route before probing a tool-only feature."""
+        probe = LlmRequest(
+            model=model,
+            messages=[{"role": "user", "content": "Reply with OK only."}],
+            temperature=0,
+            max_output_tokens=32,
+        )
+        completed = False
+        stream = self._stream_once(probe, read_timeout=None)
+        stream_consumed = False
+        try:
+            async for event in stream:
+                if event.kind == "done":
+                    completed = True
+                elif event.kind in ("error", "incomplete", "cancelled"):
+                    return ModelCapabilities()
+            stream_consumed = True
+        except _AttemptFailure as failure:
+            error = failure.public
+            # A bad credential, unavailable model, or invalid endpoint is an
+            # actionable configuration error; transient/provider failures are
+            # intentionally represented as an unconfirmed capability instead.
+            if error.kind in (
+                LlmFailureKind.AUTH,
+                LlmFailureKind.PAYMENT,
+                LlmFailureKind.NOT_FOUND,
+                LlmFailureKind.INVALID_REQUEST,
+            ):
+                raise error from None
+            return ModelCapabilities()
+        finally:
+            if not stream_consumed:
+                await stream.aclose()
+        if not completed:
+            return ModelCapabilities()
+        return ModelCapabilities(chat="supported", stream="supported")
+
+    async def _inspect_capabilities_with_budget(
+        self,
+        target_model: str,
+        partial: dict[str, ModelCapabilities],
+    ) -> ModelCapabilities:
+        """Confirm basic SSE and tool calls separately without executing a tool.
+
+        A forced function call is not a dependable chat probe for a reasoning
+        model: it may consume a short budget in hidden thinking or reject a
+        vendor-specific thinking flag.  The portable chat probe first proves
+        chat/streaming.  Tool validation then tries the reasoning-friendly
+        request shape and, only when that shape is rejected, retries once using
+        the portable OpenAI-compatible request shape.
+        """
+        basic = await self._inspect_basic_capabilities(target_model)
+        partial["result"] = basic
+        if basic.chat != "supported" or basic.stream != "supported":
+            return basic
+
+        tool_result = await self._inspect_tool_capabilities(
+            target_model,
+            disable_thinking=True,
+        )
+        if tool_result.tools == "supported":
+            return ModelCapabilities(chat="supported", stream="supported", tools="supported")
+        if tool_result.tools != "unsupported":
+            return basic
+
+        # ``chat_template_kwargs`` is optional.  A 400/422 on the first call
+        # can mean that option is unsupported, not that functions are.
+        portable_result = await self._inspect_tool_capabilities(
+            target_model,
+            disable_thinking=False,
+        )
+        if portable_result.tools == "supported":
+            return ModelCapabilities(chat="supported", stream="supported", tools="supported")
+        if portable_result.tools == "unsupported":
+            return ModelCapabilities(chat="supported", stream="supported", tools="unsupported")
+        return basic
+
+    async def inspect_capabilities(self, model: str) -> ModelCapabilities:
+        """Run all manual capability checks within one ten-minute model budget."""
+        target_model = model.strip()
+        if not target_model:
+            raise ValueError("NVIDIA model name is required.")
+        partial: dict[str, ModelCapabilities] = {"result": ModelCapabilities()}
+        try:
+            async with asyncio.timeout(_CAPABILITY_PROBE_TOTAL_TIMEOUT):
+                return await self._inspect_capabilities_with_budget(target_model, partial)
+        except TimeoutError:
+            # A basic SSE probe may already have completed.  Keep that evidence
+            # instead of turning a long tool call into three false negatives.
+            return partial["result"]
+
     async def prepare_model(self, model: str) -> LlmModelRuntime:
         return LlmModelRuntime(model=model)
 
@@ -581,8 +726,13 @@ class NvidiaAdapter:
         reasoning_effort: str,
         model_runtime: LlmModelRuntime,
     ) -> list[LlmRequest]:
-        del reasoning_effort, model_runtime
-        return [request]
+        del model_runtime
+        if reasoning_effort not in ("low", "medium", "high"):
+            return [request]
+        return [replace(request, provider_options={
+            **request.provider_options,
+            "reasoning_effort": reasoning_effort,
+        })]
 
     async def release_accelerator_memory(
         self,

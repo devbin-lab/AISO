@@ -165,3 +165,7 @@ __pycache__/
 
 # Local development documents
 /개발 관련 문서/
+
+# Local icon-design previews
+/tmp/
+/build/icon-render.png

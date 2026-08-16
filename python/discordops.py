@@ -7,8 +7,8 @@ discord 미설치 환경에서도 toolspec/agent가 스키마·검증(순수 파
 
 안전 규칙:
 - 명령 채널(#aiso)을 대상으로 하는 모든 작업은 거부 — 봇의 유일한 제어 통로 보호.
-- 한 번에 최대 MAX_OPS개. 삭제는 복구 불가이므로 호출 측이 반드시 승인을 받은 뒤 적용한다
-  (에이전트 탭=승인 다이얼로그(자동 모드 포함 강제), 디스코드=소유자 승인 버튼).
+- 한 번에 최대 MAX_OPS개. 에이전트 탭의 실행 권한은 사용자가 선택한 권한 모드를 따르고,
+  디스코드 명령 채널은 소유자 승인 버튼으로 별도 보호한다.
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ APPLY_SCHEMA = {
         "name": "discord_server_apply",
         "description": (
             "디스코드 서버의 채널 구조를 바꾸는 작업 목록(ops)을 순서대로 적용한다 — "
-            "카테고리/채널 생성·이름변경·이동·주제설정·삭제. 적용 전 사용자 승인이 필요하며, "
+            "카테고리/채널 생성·이름변경·이동·주제설정·삭제. 실행 권한은 선택한 권한 모드를 따르며, "
             "반드시 discord_server_map으로 현재 구조를 확인한 뒤 사용하라. "
             "같은 배치에서 먼저 만든 카테고리를 뒤의 채널 생성에서 바로 쓸 수 있다."
         ),
@@ -143,18 +143,18 @@ def _canonical_op(op) -> dict:
     return o
 
 
-# 서버 설계 기준 — 12B급 로컬 모델이 '얇은 구조'(카테고리 2개, 채널 5~6개)로 끝내지 않도록
-# 실제 팀이 바로 쓸 수 있는 업무용 구조의 구체적 체크리스트를 준다. 두 입구(에이전트 탭·디스코드) 공유.
+# Model-facing server-design checklist. Both the Agent tab and Discord tool prompt share it.
 DESIGN_GUIDE = (
-    "서버 설계 기준 — 실제 팀이 바로 쓸 수 있는 업무용 구조로 설계하라:\n"
-    "1) 「운영」 카테고리를 먼저: #공지(topic: 팀 공지사항), #회의록, #자유잡담.\n"
-    "2) 직군별 카테고리로 나눠라 — 게임 개발팀이면 기획 / 아트 / 프로그래밍 / 사운드 / QA·테스트 / 빌드·배포처럼 "
-    "실제 업무 직군을 모두 포함(다른 팀이면 그 팀의 직군으로).\n"
-    "3) 각 직군 카테고리에 최소 2개: #<직군>-소통(논의), #<직군>-자료실(산출물·레퍼런스 공유). "
-    "필요하면 작업 전용 채널을 추가(예: #버그-리포트, #빌드-알림).\n"
-    "4) 음성: 공용 「회의실」 음성 1개 + 필요한 직군에 작업/회의 음성.\n"
-    "5) 모든 텍스트 채널의 topic에 채널 용도를 한 줄로 적어라.\n"
-    "6) 이름은 특별한 요청이 없으면 한국어로. 총 채널 15~25개 수준(카테고리 5~7개)."
+    "Server-design guide — create a practical workspace a real team can use immediately:\n"
+    "1) Start with an Operations category: announcements (topic: team announcements), meeting-notes, and casual-chat.\n"
+    "2) Split work by actual disciplines. For a game team, include planning, art, programming, sound, QA/testing, "
+    "and build/release; adapt those disciplines for another kind of team.\n"
+    "3) Give every discipline at least two channels: <discipline>-discussion and <discipline>-resources for "
+    "deliverables and references. Add focused channels when useful, such as bug-reports or build-notices.\n"
+    "4) Add one shared meeting voice channel plus working or meeting voice channels for disciplines that need them.\n"
+    "5) Give every text channel a one-line topic explaining its purpose.\n"
+    "6) Unless the user explicitly chooses names, localize category and channel names to the user's requested "
+    "language. Aim for 5–7 categories and roughly 15–25 channels."
 )
 
 # 검증 실패 시 모델에게 돌려줄 올바른 형식 예시 — 약한 모델이 다음 턴에 스스로 교정하도록.
@@ -473,6 +473,11 @@ def _live_guild():
     return (guild, db.command_channel_id()), None
 
 
+def live_guild():
+    """Public read-only access to the currently bound guild and command channel id."""
+    return _live_guild()
+
+
 def snapshot_guild(guild, command_channel_id: str) -> dict:
     """라이브 길드 → 순수 dict 스냅샷(검증·렌더링이 이 형태만 다룬다)."""
     import discord  # noqa: PLC0415
@@ -607,7 +612,7 @@ SEND_SCHEMA = {
         "name": "discord_send",
         "description": (
             "연결된 디스코드 서버의 텍스트 채널에 메시지를 보낸다(예: #공지에 안내 올리기). "
-            "보내기 전 사용자 승인이 필요하다. 예약 전송이 필요하면 discord_schedule_add를 쓰라."
+            "실행 권한은 선택한 권한 모드를 따른다. 예약 전송이 필요하면 discord_schedule_add를 쓰라."
         ),
         "parameters": {
             "type": "object",
@@ -673,7 +678,7 @@ async def send_message_live(guild, channel_id: str, message: str) -> str:
 
 
 async def server_send(channel=None, message=None, **_ignored) -> str:
-    """에이전트 탭 핸들러 — 승인은 에이전트 루프가 처리(자동 모드 포함 강제)."""
+    """에이전트 탭 핸들러 — 실행 권한은 에이전트 루프의 선택 모드를 따른다."""
     a = canonical_send_args({"channel": channel, "message": message, **_ignored})
     got, err = validate_send(a["channel"], a["message"])
     if err:

@@ -27,6 +27,7 @@ import Dropdown from '../components/Dropdown'
 import { confirmDialog } from '../components/ConfirmDialog'
 import ComfyModelManager from '../components/ComfyModelManager'
 import AgentToolCatalog from '../components/AgentToolCatalog'
+import DiagnosticCenter from '../components/DiagnosticCenter'
 import { unloadModels } from '../lib/ollama'
 
 const ONOFF = [
@@ -99,9 +100,11 @@ function capabilityLabel(state: LlmCapabilityState): string {
 }
 
 type SectionId =
+  | 'diagnostics'
   | 'llm'
   | 'tools'
   | 'comfy'
+  | 'database'
   | 'appearance'
   | 'skills'
   | 'discord'
@@ -122,7 +125,7 @@ function SettingsView({
   const [dirtyFields, setDirtyFields] = useState<Set<keyof AppSettings>>(() => new Set())
   const dirtyFieldVersions = useRef<Map<keyof AppSettings, number>>(new Map())
   const [manualModel, setManualModel] = useState(false)
-  const [activeSection, setActiveSection] = useState<SectionId>('llm')
+  const [activeSection, setActiveSection] = useState<SectionId>('diagnostics')
   const [nvidiaApiKey, setNvidiaApiKey] = useState('')
   const [credentialStatus, setCredentialStatus] = useState<NvidiaCredentialStatus | null>(null)
   const [credentialBusy, setCredentialBusy] = useState(false)
@@ -136,6 +139,9 @@ function SettingsView({
   const [capabilityBusy, setCapabilityBusy] = useState(false)
   const [capabilityMessage, setCapabilityMessage] = useState('')
   const [settingsRecoveryMessage, setSettingsRecoveryMessage] = useState('')
+  const [myDbStorageRoot, setMyDbStorageRoot] = useState('')
+  const [myDbClearing, setMyDbClearing] = useState(false)
+  const [myDbClearMessage, setMyDbClearMessage] = useState('')
 
   const modelOptions = health?.models ?? []
   const useDropdown = modelOptions.length > 0 && !manualModel
@@ -178,6 +184,20 @@ function SettingsView({
     setSaved(false)
     setSaveError('')
   }
+
+  const refreshMyDbStorageRoot = async (): Promise<void> => {
+    try {
+      const root = await window.api.myDb?.storageRoot()
+      if (root) setMyDbStorageRoot(root)
+    } catch {
+      // My DB가 아직 초기화되지 않은 경우에도 설정 화면은 계속 사용할 수 있다.
+    }
+  }
+
+  useEffect(() => {
+    if (!active || activeSection !== 'database') return
+    void refreshMyDbStorageRoot()
+  }, [active, activeSection])
 
   const currentCredentialBinding = (): NvidiaCredentialBindingInput => ({
     deploymentMode: form.nvidiaDeploymentMode,
@@ -314,7 +334,7 @@ function SettingsView({
     }
     const confirmed = await confirmDialog({
       title: 'NVIDIA 기능 검사',
-      message: '선택한 모델에 작은 API 요청을 1회 보냅니다. 토큰·할당량 또는 비용이 발생할 수 있습니다. Aiso의 실제 도구는 실행하지 않습니다.',
+      message: '선택한 모델에 최대 3개의 작은 API 요청을 보냅니다. 채팅·스트리밍과 도구 호출을 각각 확인하며, 최대 10분 동안 응답을 기다립니다. Aiso의 실제 도구는 실행하지 않습니다.',
       confirmLabel: '검사 실행'
     })
     if (!confirmed) return
@@ -323,7 +343,13 @@ function SettingsView({
     try {
       const result = await window.api.nvidia.capabilities.probe(currentCapabilityTarget())
       setCapability(result)
-      setCapabilityMessage('기능 검사가 완료되었습니다.')
+      if (result.capabilities.chat === 'supported' && result.capabilities.stream === 'supported' && result.capabilities.tools === 'supported') {
+        setCapabilityMessage('채팅·스트리밍·도구 호출 기능을 확인했습니다.')
+      } else if (result.capabilities.chat === 'supported' && result.capabilities.stream === 'supported') {
+        setCapabilityMessage('채팅·스트리밍은 확인했지만 도구 호출 응답을 끝까지 확인하지 못했습니다. 잠시 후 다시 검사해 주세요.')
+      } else {
+        setCapabilityMessage('NVIDIA 응답을 완료하지 못해 기능을 확인하지 못했습니다. 연결 상태와 요청 한도를 확인한 뒤 다시 검사해 주세요.')
+      }
     } catch (error) {
       setCapability(null)
       setCapabilityMessage(error instanceof Error ? error.message : String(error))
@@ -354,6 +380,7 @@ function SettingsView({
     }
     setSaveError('')
     setDirtyFields(new Set())
+    if (dirtyFields.has('myDbStoragePath')) void refreshMyDbStorageRoot()
     setSaved(true)
     window.setTimeout(() => setSaved(false), 1800)
   }
@@ -364,6 +391,46 @@ function SettingsView({
       if (selected) set('comfyInstallPath', selected)
     } catch {
       // 대화상자 취소나 IPC 오류는 현재 입력값을 보존한다.
+    }
+  }
+
+  const pickMyDbStorageRoot = async (): Promise<void> => {
+    try {
+      const selected = await window.api.myDb?.pickStorageRoot()
+      if (selected) {
+        set('myDbStoragePath', selected)
+        setMyDbStorageRoot(selected)
+      }
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'My DB 저장소 폴더를 선택하지 못했습니다.')
+    }
+  }
+
+  const clearMyDb = async (): Promise<void> => {
+    if (!window.api.myDb?.clearAll || myDbClearing) return
+    const confirmed = await confirmDialog({
+      title: 'My DB 전체 삭제',
+      message: '현재 My DB의 코어, 보관 파일, 휴지통, 버전 기록과 히스토리를 모두 삭제합니다.\n외부 원본 파일과 선택한 저장소 폴더 자체는 삭제하지 않습니다.\n계속할까요?',
+      confirmLabel: '전체 삭제',
+      danger: true
+    })
+    if (!confirmed) return
+
+    setMyDbClearing(true)
+    setMyDbClearMessage('')
+    try {
+      await window.api.myDb.clearAll()
+      await refreshMyDbStorageRoot()
+      setMyDbClearMessage('My DB의 모든 데이터가 삭제되었습니다.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : ''
+      setMyDbClearMessage(
+        /No handler registered.*mydb:clear-all/i.test(message)
+          ? '전체 삭제 기능을 적용하려면 Aiso를 완전히 종료한 뒤 다시 실행해 주세요.'
+          : message || 'My DB 전체 삭제에 실패했습니다.'
+      )
+    } finally {
+      setMyDbClearing(false)
     }
   }
 
@@ -652,8 +719,10 @@ function SettingsView({
   })()
 
   const navItems: { id: SectionId; label: string }[] = [
+    { id: 'diagnostics', label: '진단 센터' },
     { id: 'llm', label: 'LLM' },
     { id: 'comfy', label: 'ComfyUI' },
+    { id: 'database', label: 'DB' },
     { id: 'discord', label: '디스코드' },
     { id: 'appearance', label: '화면' },
     { id: 'tools', label: '도구' },
@@ -661,6 +730,11 @@ function SettingsView({
     { id: 'updates', label: '업데이트' },
     ...(form.devMode ? [{ id: 'developer' as SectionId, label: '개발자' }] : [])
   ]
+  const myDbStorageLocationLabel = form.myDbStoragePath.trim() || (
+    form.myDbStoragePath !== settings.myDbStoragePath
+      ? '기본 위치: 문서\\Aiso My DB'
+      : myDbStorageRoot || '기본 위치: 문서\\Aiso My DB'
+  )
 
   return (
     <div className="view view--settings">
@@ -691,6 +765,9 @@ function SettingsView({
               저장
             </button>
           </div>
+        {activeSection === 'diagnostics' && (
+        <DiagnosticCenter backend={backend} health={health} settings={form} onSaveSettings={onSave} active={active} />
+        )}
         {activeSection === 'llm' && (
         <section>
           <div className="group__title">엔진</div>
@@ -946,8 +1023,8 @@ function SettingsView({
                       </p>
                       <ul>
                         <li><b>수동</b>: 읽기와 변경 작업을 실행하기 전에 확인합니다.</li>
-                        <li><b>읽기</b>: 선택한 작업 폴더·로컬 RAG의 읽기 결과가 모델에 자동 전달될 수 있으며, 생성·변경 작업은 확인합니다.</li>
-                        <li><b>자동</b>: 읽기와 일부 생성·변경 작업을 바로 실행하고, 실행·삭제·외부 발신은 확인합니다.</li>
+                        <li><b>읽기</b>: 선택한 작업 폴더·로컬 RAG의 읽기 결과가 모델에 자동 전달될 수 있으며, 생성·변경 작업과 로컬 문맥 뒤의 외부 웹 요청은 확인합니다.</li>
+                        <li><b>자동</b>: 사용자가 켠 모든 도구를 승인 없이 실행합니다. 실행·삭제·외부 발신도 포함되므로 선택 전에 전송 범위와 도구 구성을 확인하세요.</li>
                       </ul>
                       <p>
                         API 키와 Discord 토큰은 모델 입력에 포함하지 않고 각각 선택한 NVIDIA 서비스와 Discord의 인증에만 사용합니다.
@@ -1042,6 +1119,81 @@ function SettingsView({
             hasUnsavedInstallPathChange={comfyInstallPathDirty}
           />
         </section>
+        {activeSection === 'database' && (
+        <section>
+          <div className="group__title">My DB 저장소</div>
+          <div className="group">
+            <div className="row">
+              <div>
+                <div className="row__label">저장소 위치</div>
+                <div className="row__hint">
+                  My DB의 파일, 코어와 관계 데이터가 이 폴더에 보관됩니다. Agent 작업 폴더와는 분리된 개인 라이브러리입니다.
+                </div>
+              </div>
+              <div className="row__control comfy-setting-path">
+                <input
+                  className="input"
+                  value={myDbStorageLocationLabel}
+                  readOnly
+                  title={myDbStorageLocationLabel}
+                />
+                <button className="btn btn--ghost2 btn--sm" type="button" onClick={() => void pickMyDbStorageRoot()}>
+                  폴더 선택
+                </button>
+              </div>
+            </div>
+            <div className="row">
+              <div>
+                <div className="row__label">기본 위치</div>
+                <div className="row__hint">문서 폴더 안의 Aiso My DB를 다시 사용합니다.</div>
+              </div>
+              <button
+                className="btn btn--ghost2 btn--sm"
+                type="button"
+                disabled={!form.myDbStoragePath}
+                onClick={() => set('myDbStoragePath', '')}
+              >
+                기본 위치 사용
+              </button>
+            </div>
+            <div className="row">
+              <div>
+                <div className="row__label">전날 변경 보고 확인 간격</div>
+                <div className="row__hint">
+                  Aiso가 실행 중일 때 전날 보고서가 빠졌는지 확인하는 주기입니다. 이미 작성한 날짜의 보고서는 다시 만들지 않습니다.
+                </div>
+              </div>
+              <Select
+                value={`${form.myDbDailyReportCheckHours}시간마다`}
+                options={[1, 2, 3, 6, 12, 24].map((hours) => `${hours}시간마다`)}
+                onChange={(value) => set('myDbDailyReportCheckHours', Number.parseInt(value, 10))}
+                ariaLabel="전날 변경 보고 확인 간격"
+              />
+            </div>
+            <div className="row">
+              <div>
+                <div className="row__label">전체 DB 삭제</div>
+                <div className="row__hint">My DB 안의 코어, 보관 파일, 휴지통, 버전 기록과 히스토리를 비웁니다. 외부 원본 파일은 유지됩니다.</div>
+              </div>
+              <button
+                className="btn btn--ghost2 btn--sm settings-db-clear"
+                type="button"
+                disabled={myDbClearing}
+                onClick={() => void clearMyDb()}
+              >
+                {myDbClearing ? '삭제 중…' : '전체 삭제'}
+              </button>
+            </div>
+          </div>
+          {myDbClearMessage && <div className="comfy-setting-notice settings-db-clear-message">{myDbClearMessage}</div>}
+          {form.myDbStoragePath !== settings.myDbStoragePath && (
+            <div className="comfy-setting-notice">
+              저장을 누르면 새 위치를 사용합니다. 기존 My DB 자료는 자동으로 이동하지 않으므로,
+              기존 라이브러리를 계속 쓰려면 <b>library.sqlite3</b>와 <b>files</b> 폴더를 함께 옮겨 주세요.
+            </div>
+          )}
+        </section>
+        )}
         {activeSection === 'llm' && (
         <section>
           <div className="group__title">생성</div>
@@ -1510,14 +1662,18 @@ function SettingsView({
                     {schedules.map((j) => (
                       <li key={j.id} className="sched-item">
                         <div className="sched-item__main">
-                          <span className={`sched-item__tag${j.kind === 'briefing' ? ' sched-item__tag--brief' : ''}`}>
-                            {j.kind === 'briefing' ? '브리핑' : '메시지'}
+                          <span className={`sched-item__tag${j.kind !== 'message' ? ' sched-item__tag--brief' : ''}`}>
+                            {j.kind === 'briefing' ? '브리핑' : j.kind === 'channel_report' ? '채널 보고' : '메시지'}
                           </span>
                           <span className="sched-item__when">
-                            {j.repeat === 'daily' ? '매일 ' : ''}
+                            {j.repeat === 'daily' ? '매일 ' : j.repeat === 'interval' ? `${j.interval_hours ?? 1}시간마다 ` : ''}
                             {String(j.next_run ?? '').replace('T', ' ')} → #{j.channel_name}
                           </span>
-                          <div className="sched-item__text">{j.text}</div>
+                          <div className="sched-item__text">
+                            {j.kind === 'channel_report'
+                              ? `${(j.source_channels ?? []).map((source) => `#${source.name}`).join(', ')} → #${j.channel_name}${j.text ? ` · ${j.text}` : ''}`
+                              : j.text}
+                          </div>
                         </div>
                         <button className="btn btn--sm btn--stop" onClick={() => void removeSchedule(j.id)}>
                           삭제

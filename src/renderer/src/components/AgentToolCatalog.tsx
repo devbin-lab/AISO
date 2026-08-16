@@ -24,6 +24,7 @@ const CATEGORY_ORDER: AgentToolCategory[] = [
   'research',
   'automation',
   'rag',
+  'mydb',
   'discord',
   'image'
 ]
@@ -36,6 +37,7 @@ const CATEGORY_LABEL: Record<AgentToolCategory, string> = {
   research: '웹 조사',
   automation: '자동화 스킬',
   rag: 'RAG',
+  mydb: 'My DB',
   discord: '디스코드',
   image: '이미지 생성'
 }

@@ -15,10 +15,13 @@ export interface DiscordStatus {
 // 등록된 예약 1건 — 사이드카(discordsched.py)가 /discord/schedules로 돌려주는 형태.
 export interface DiscordSchedule {
   id: string
-  kind: 'message' | 'briefing'
+  kind: 'message' | 'briefing' | 'channel_report'
   channel_name: string
   text: string
-  repeat: 'once' | 'daily'
+  repeat: 'once' | 'daily' | 'interval'
+  interval_hours?: number
+  source_channels?: Array<{ id: string; name: string; last_message_id: string }>
+  last_reported_at?: string
   next_run: string // ISO(YYYY-MM-DDTHH:MM)
   created?: string
 }

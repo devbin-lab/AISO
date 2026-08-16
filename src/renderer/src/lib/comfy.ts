@@ -107,9 +107,12 @@ const IMAGE_REQUEST_SUBJECTS = [
   'image', 'picture', 'illustration', 'texture'
 ] as const
 
-export function looksLikeImageGenerationRequest(text: string, previousAssistant = ''): boolean {
+export function looksLikeImageGenerationRequest(
+  text: string,
+  _previousAssistant = '',
+  previousImageVerified = false
+): boolean {
   const normalized = text.toLocaleLowerCase().replace(/\s+/g, ' ').trim()
-  const previous = previousAssistant.toLocaleLowerCase().replace(/\s+/g, ' ').trim()
   let unquoted = normalized
   for (const quoted of [/"[^"\n]*"/g, /(?<!\w)'[^'\n]*'(?!\w)/g, /“[^”\n]*”/g, /‘[^’\n]*’/g]) {
     unquoted = unquoted.replace(quoted, ' ')
@@ -171,9 +174,10 @@ export function looksLikeImageGenerationRequest(text: string, previousAssistant 
   if (englishSoftwareRequest) return false
   if (hasSubject && englishRequests.some((word) => commandText.startsWith(word))) return true
 
-  // 자유 형식 prompt/API 설명은 신뢰하지 않고 Aiso가 남긴 결정론적 성공 기록만 승계한다.
-  const contextIsImage = previous.includes('이미지 생성을 완료했습니다. 결과 카드')
-    && previous.includes('실제 프롬프트:')
+  // Text is never provenance.  Only a rendered/persisted image-result event
+  // may unlock a visual correction request; completion-looking model prose is
+  // deliberately ignored here.
+  const contextIsImage = previousImageVerified
   const contextualActions = [
     '진행해줘', '진행해 줘', '그걸로 해줘', '그걸로 해 줘', '이걸로 해줘', '이걸로 해 줘',
     '그대로 해줘', '그대로 해 줘', '뽑아줘', '뽑아 줘', '한 장 부탁', '하나 더',
@@ -181,7 +185,24 @@ export function looksLikeImageGenerationRequest(text: string, previousAssistant 
     'go with that', 'use that one', 'one more', 'regenerate'
   ] as const
   const englishChange = /^(?:please\s+)?change\s+.+\s+to\s+.+[.!]*$/.test(commandText)
-  return contextIsImage && (contextualActions.some((word) => commandText.includes(word)) || englishChange)
+  // A correction can be phrased as visual feedback rather than an imperative
+  // ("the expression is too dark").  It is actionable only with the verified
+  // image-result provenance above; never let completion-looking prose alone
+  // turn this into a GPU request.
+  const visualSubjects = [
+    '표정', '얼굴', '눈', '눈동자', '머리', '헤어', '머리카락', '의상', '옷',
+    '포즈', '자세', '배경', '색', '색감', '색상', '체형', '구도', '스타일',
+    'expression', 'face', 'eyes', 'eye', 'hair', 'outfit', 'clothes', 'pose',
+    'background', 'color', 'colour', 'body', 'composition', 'style'
+  ] as const
+  const visualCorrection = visualSubjects.some((word) => commandText.includes(word))
+    && /(?:너무|더|덜|밝|어둡|같(?:은|아)|처럼|으로|했으면|원하|아니|다르게|too|more|less|brighter|darker|like|rather|instead|should)/i
+      .test(commandText)
+  return contextIsImage && (
+    contextualActions.some((word) => commandText.includes(word))
+    || englishChange
+    || visualCorrection
+  )
 }
 
 function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {

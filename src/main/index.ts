@@ -1,5 +1,5 @@
 import { app, shell, BrowserWindow, ipcMain, nativeTheme, dialog, Tray, Menu, nativeImage } from 'electron'
-import { join } from 'path'
+import { isAbsolute, join } from 'path'
 import { mkdirSync } from 'fs'
 import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -22,9 +22,39 @@ import {
   issueBackendNvidiaResearchGrant,
   clearBackendNvidiaResearchGrants,
   issueBackendNvidiaDiscordGrant,
-  clearBackendNvidiaDiscordGrants
+  clearBackendNvidiaDiscordGrants,
+  clearBackendTodoWorkspaceRegistry
 } from './backend'
 import { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
+import {
+  importDroppedAttachments,
+  pickAttachmentFiles,
+  pickAttachmentFolder
+} from './attachments'
+import {
+  closeMyDbStorage,
+  configureMyDbStorageRoot,
+  getMyDbStore,
+  myDbClearAll,
+  myDbCreateCore,
+  myDbCompareRevisions,
+  myDbDeleteNode,
+  myDbEnsurePreviousDayReport,
+  myDbExportCore,
+  myDbFileHistory,
+  myDbHistory,
+  myDbImportDropped,
+  myDbLink,
+  myDbRenameNode,
+  myDbRestoreGraphCheckpoint,
+  myDbRestoreRevision,
+  myDbRestoreNode,
+  myDbSetSourcePath,
+  myDbState,
+  myDbStorageRoot,
+  myDbTrash,
+  myDbUnlink
+} from './mydb'
 import { recordUsage, usageSummary, clearUsage } from './usage'
 import { listSkills, deleteSkill } from './skills'
 import {
@@ -87,7 +117,12 @@ import {
   saveConversation,
   setConversationPinned,
   deleteConversation,
-  clearAllConversations
+  listAgentProjects,
+  createAgentProject,
+  createAgentProjectConversation,
+  startAgentProject,
+  clearAllConversations,
+  renameConversation
 } from './conversations'
 import type { AppSettings } from '../shared/settings'
 import {
@@ -260,12 +295,19 @@ async function saveNvidiaCredentialWithTrustReset(
 
 async function mutateComfyRegistryWithTrustReset<T>(mutate: () => T | Promise<T>): Promise<T> {
   await invalidateNvidiaAgentDataTrust()
+  let changed = false
   try {
-    return await mutate()
+    const result = await mutate()
+    changed = true
+    return result
   } finally {
     // Imports may run for minutes. Revoke any approval created while the old
     // registry was still authoritative before publishing the changed registry.
     await invalidateNvidiaAgentDataTrust()
+    // Discord receives an immutable registry snapshot from Electron. Refresh
+    // it after a successful registry mutation so Discord image generation
+    // never uses a stale profile/workflow list.
+    if (changed) await applyTrustedDiscordConfig()
   }
 }
 
@@ -460,6 +502,7 @@ function createWindow(): void {
     show: false,
     autoHideMenuBar: true,
     title: 'Aiso',
+    icon: trayIconAsset,
     backgroundColor: tb.color,
     // 프레임리스 + 네이티브 창 버튼 오버레이 (커스텀 타이틀바)
     titleBarStyle: 'hidden',
@@ -527,6 +570,26 @@ function createWindow(): void {
   }
 }
 
+/**
+ * The models directory can be large. Import recovery is useful, but walking
+ * it before the first window is shown makes cold starts feel slower. Delay
+ * this best-effort maintenance work until the UI is ready.
+ */
+function deferStaleComfyModelPartialCleanup(): void {
+  const runCleanup = (): void => {
+    setTimeout(() => {
+      cleanupStaleComfyModelPartials(loadSettings().comfyInstallPath)
+    }, 0)
+  }
+
+  const win = mainWindow
+  if (win && !win.isDestroyed()) {
+    win.once('ready-to-show', runCleanup)
+    return
+  }
+  runCleanup()
+}
+
 // 단일 인스턴스 — 트레이 상주 중 아이콘을 다시 눌러 두 번째 인스턴스가 뜨면 사이드카·봇이
 // 중복 기동(같은 토큰으로 게이트웨이 충돌)된다. 두 번째 실행은 기존 창을 띄우고 종료한다.
 // 개발(npm run dev)에선 락을 걸지 않는다 — 사용자의 재실행 워크플로를 방해하지 않도록.
@@ -540,12 +603,48 @@ if (!gotSingleInstanceLock) {
   app.on('second-instance', () => showMainWindow())
 }
 
+function myDbStoragePathFor(settings: AppSettings): string {
+  const configured = settings.myDbStoragePath.trim()
+  return configured && isAbsolute(configured)
+    ? configured
+    : join(app.getPath('documents'), 'Aiso My DB')
+}
+
+function assertMyDbStoragePath(value: unknown): void {
+  if (typeof value !== 'string') throw new Error('My DB 저장소 위치를 확인할 수 없습니다.')
+  const path = value.trim()
+  if (path && !isAbsolute(path)) {
+    throw new Error('My DB 저장소 위치는 드라이브 또는 네트워크의 전체 경로여야 합니다.')
+  }
+}
+
+let myDbDailyReportTimer: ReturnType<typeof setInterval> | null = null
+let myDbDailyReportCheckMs = 0
+
+function writeMissingMyDbDailyReport(): void {
+  try {
+    myDbEnsurePreviousDayReport()
+  } catch (error) {
+    console.warn('[mydb] 전날 변경 보고서 생성 실패:', error)
+  }
+}
+
+function startMyDbDailyReportScheduler(settings = loadSettings()): void {
+  const nextCheckMs = settings.myDbDailyReportCheckHours * 60 * 60 * 1000
+  if (myDbDailyReportTimer && myDbDailyReportCheckMs === nextCheckMs) return
+  if (myDbDailyReportTimer) clearInterval(myDbDailyReportTimer)
+  writeMissingMyDbDailyReport()
+  myDbDailyReportTimer = setInterval(writeMissingMyDbDailyReport, nextCheckMs)
+  myDbDailyReportCheckMs = nextCheckMs
+}
+
 app.whenReady().then(() => {
   if (!gotSingleInstanceLock) return
   electronApp.setAppUserModelId('com.aiso.app')
-  // An interrupted SafeTensors copy can leave only Aiso-owned partial files.
-  // Clean those old files once at startup; ordinary model files are never touched.
-  cleanupStaleComfyModelPartials(loadSettings().comfyInstallPath)
+  // My DB is a user-owned library, intentionally outside Aiso's resettable
+  // application state and completely independent from Agent activity.
+  configureMyDbStorageRoot(myDbStoragePathFor(loadSettings()))
+  startMyDbDailyReportScheduler(loadSettings())
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
@@ -578,7 +677,15 @@ app.whenReady().then(() => {
     if (patch?.discordLlmProvider === 'nvidia' && previous.discordLlmProvider !== 'nvidia') {
       throw new Error('Discord NVIDIA는 전용 전송 범위 확인을 거쳐야 활성화할 수 있습니다.')
     }
+    if ('myDbStoragePath' in (patch ?? {})) assertMyDbStoragePath(patch.myDbStoragePath)
     const next = saveSettings(patch)
+    if ('myDbStoragePath' in patch && next.myDbStoragePath !== previous.myDbStoragePath) {
+      configureMyDbStorageRoot(myDbStoragePathFor(next))
+      writeMissingMyDbDailyReport()
+    }
+    if ('myDbDailyReportCheckHours' in patch && next.myDbDailyReportCheckHours !== previous.myDbDailyReportCheckHours) {
+      startMyDbDailyReportScheduler(next)
+    }
     if ('comfyInstallPath' in patch && next.comfyInstallPath !== previous.comfyInstallPath) {
       // 설치본이 바뀌면 이전 ComfyUI에만 있던 파일을 새 설치본에도 있다고 가정할 수 없다.
       // 실제 파일은 건드리지 않고, 재확인 전 Agent 자동 선택만 해제한다.
@@ -619,7 +726,8 @@ app.whenReady().then(() => {
     )
     const shouldApplyDiscordConfig = (
       'discordEnabled' in patch || 'discordLlmProvider' in patch || nvidiaTargetChanged ||
-      'model' in patch || 'ollamaHost' in patch
+      'model' in patch || 'ollamaHost' in patch || 'comfyBaseUrl' in patch ||
+      'comfyInstallPath' in patch || 'comfyModelSelectionMode' in patch
     )
     await fenceNvidiaAgentSettingsMutation(
       nvidiaDataScopeChanged,
@@ -673,6 +781,186 @@ app.whenReady().then(() => {
     })
     if (res.canceled || res.filePaths.length === 0) return null
     return res.filePaths[0]
+  })
+  ipcMain.handle('attachments:pick-files', async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win !== mainWindow) throw new Error('첨부 선택 창을 열 수 없습니다.')
+    return pickAttachmentFiles(win)
+  })
+  ipcMain.handle('attachments:pick-folder', async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win !== mainWindow) throw new Error('첨부 폴더 선택 창을 열 수 없습니다.')
+    return pickAttachmentFolder(win)
+  })
+  ipcMain.handle('attachments:import-dropped', async (e, paths: unknown) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win !== mainWindow) throw new Error('드래그한 첨부를 확인할 수 없습니다.')
+    return importDroppedAttachments(paths)
+  })
+
+  // ---- IPC: My DB — agent history와 분리된 사용자 개인 라이브러리 ----
+  const requireMyDbWindow = (sender: Electron.WebContents): BrowserWindow => {
+    const win = BrowserWindow.fromWebContents(sender)
+    if (!win || win !== mainWindow) throw new Error('My DB를 요청한 Aiso 창을 확인할 수 없습니다.')
+    return win
+  }
+  const myDbId = (value: unknown): string => {
+    if (!value || typeof value !== 'object' || typeof (value as { id?: unknown }).id !== 'string') {
+      throw new Error('My DB 항목을 확인할 수 없습니다.')
+    }
+    return (value as { id: string }).id
+  }
+  const myDbPaths = (value: unknown): string[] => {
+    if (!Array.isArray(value) || value.length === 0 || value.some((path) => typeof path !== 'string' || !path.trim())) {
+      throw new Error('가져올 파일 또는 폴더 경로를 확인할 수 없습니다.')
+    }
+    return value
+  }
+  const myDbParentId = (value: unknown): string | null => {
+    if (value === undefined || value === null) return null
+    if (typeof value !== 'string' || !value.trim()) throw new Error('대상 코어를 확인할 수 없습니다.')
+    return value
+  }
+  ipcMain.handle('mydb:state', (e) => {
+    requireMyDbWindow(e.sender)
+    return myDbState()
+  })
+  ipcMain.handle('mydb:history', (e) => {
+    requireMyDbWindow(e.sender)
+    return myDbHistory()
+  })
+  ipcMain.handle('mydb:restore-graph-checkpoint', (e, checkpointId: unknown) => {
+    requireMyDbWindow(e.sender)
+    if (typeof checkpointId !== 'string' || !checkpointId.trim()) throw new Error('복원할 그래프 시점을 확인할 수 없습니다.')
+    return myDbRestoreGraphCheckpoint(checkpointId)
+  })
+  ipcMain.handle('mydb:pick-source-for-file', async (e, itemId: unknown) => {
+    const win = requireMyDbWindow(e.sender)
+    const result = await dialog.showOpenDialog(win, {
+      title: 'My DB에 반영할 외부 원본 파일 선택',
+      properties: ['openFile']
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return myDbSetSourcePath(myDbId({ id: itemId }), result.filePaths[0]!)
+  })
+  ipcMain.handle('mydb:export-core', async (e, coreId: unknown) => {
+    const win = requireMyDbWindow(e.sender)
+    const result = await dialog.showOpenDialog(win, {
+      title: '포커스한 코어를 저장할 폴더 선택',
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return myDbExportCore(myDbId({ id: coreId }), result.filePaths[0]!)
+  })
+  ipcMain.handle('mydb:file-history', (e, itemId: unknown) => {
+    requireMyDbWindow(e.sender)
+    return myDbFileHistory(myDbId({ id: itemId }))
+  })
+  ipcMain.handle('mydb:compare-revisions', (e, itemId: unknown, beforeRevisionId: unknown, afterRevisionId: unknown) => {
+    requireMyDbWindow(e.sender)
+    return myDbCompareRevisions(
+      myDbId({ id: itemId }),
+      myDbId({ id: beforeRevisionId }),
+      myDbId({ id: afterRevisionId })
+    )
+  })
+  ipcMain.handle('mydb:restore-revision', (e, itemId: unknown, revisionId: unknown) => {
+    requireMyDbWindow(e.sender)
+    return myDbRestoreRevision(myDbId({ id: itemId }), myDbId({ id: revisionId }))
+  })
+  ipcMain.handle('mydb:storage-root', (e) => {
+    requireMyDbWindow(e.sender)
+    return myDbStorageRoot()
+  })
+  ipcMain.handle('mydb:pick-storage-root', async (e) => {
+    const win = requireMyDbWindow(e.sender)
+    const result = await dialog.showOpenDialog(win, {
+      title: 'My DB 저장소 폴더 선택',
+      defaultPath: myDbStorageRoot(),
+      properties: ['openDirectory', 'createDirectory']
+    })
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
+  ipcMain.handle('mydb:clear-all', async (e) => {
+    requireMyDbWindow(e.sender)
+    await myDbClearAll()
+  })
+  ipcMain.handle('mydb:trash', (e) => {
+    requireMyDbWindow(e.sender)
+    return myDbTrash()
+  })
+  ipcMain.handle('mydb:create-core', (e, title: unknown, parentCoreId?: unknown) => {
+    requireMyDbWindow(e.sender)
+    if (typeof title !== 'string') throw new Error('코어 이름을 입력해 주세요.')
+    return myDbCreateCore(title, myDbParentId(parentCoreId))
+  })
+  ipcMain.handle('mydb:rename-node', async (e, node: unknown, title: unknown) => {
+    requireMyDbWindow(e.sender)
+    if (typeof title !== 'string') throw new Error('새 이름을 입력해 주세요.')
+    return myDbRenameNode(myDbId(node), title)
+  })
+  ipcMain.handle('mydb:delete-node', (e, node: unknown, options?: unknown) => {
+    requireMyDbWindow(e.sender)
+    const cascade = Boolean(
+      options && typeof options === 'object' && (options as { cascade?: unknown }).cascade === true
+    )
+    myDbDeleteNode(myDbId(node), { cascade })
+  })
+  ipcMain.handle('mydb:restore-node', (e, node: unknown) => {
+    requireMyDbWindow(e.sender)
+    return myDbRestoreNode(myDbId(node))
+  })
+  ipcMain.handle('mydb:link', (e, source: unknown, target: unknown, relation?: unknown) => {
+    requireMyDbWindow(e.sender)
+    if (relation !== undefined && !['contains', 'related', 'references', 'depends_on'].includes(String(relation))) {
+      throw new Error('지원하지 않는 관계입니다.')
+    }
+    return myDbLink(myDbId(source), myDbId(target), relation as never)
+  })
+  ipcMain.handle('mydb:unlink-edge', (e, edgeId: unknown) => {
+    requireMyDbWindow(e.sender)
+    if (typeof edgeId !== 'string' || !edgeId) throw new Error('연결을 확인할 수 없습니다.')
+    myDbUnlink(edgeId)
+  })
+  ipcMain.handle('mydb:pick-files', async (e, parentCoreId?: unknown) => {
+    const win = requireMyDbWindow(e.sender)
+    const result = await dialog.showOpenDialog(win, {
+      title: 'My DB에 파일 추가',
+      properties: ['openFile', 'multiSelections']
+    })
+    if (result.canceled || result.filePaths.length === 0) {
+      return { createdNodes: [], createdEdges: [], skippedPaths: [] }
+    }
+    return myDbImportDropped(result.filePaths, myDbParentId(parentCoreId))
+  })
+  ipcMain.handle('mydb:pick-folder', async (e, parentCoreId?: unknown) => {
+    const win = requireMyDbWindow(e.sender)
+    const result = await dialog.showOpenDialog(win, {
+      title: 'My DB에 폴더 추가',
+      properties: ['openDirectory', 'multiSelections']
+    })
+    if (result.canceled || result.filePaths.length === 0) {
+      return { createdNodes: [], createdEdges: [], skippedPaths: [] }
+    }
+    return myDbImportDropped(result.filePaths, myDbParentId(parentCoreId))
+  })
+  ipcMain.handle('mydb:import-dropped', async (e, paths: unknown, parentCoreId?: unknown) => {
+    requireMyDbWindow(e.sender)
+    return myDbImportDropped(myDbPaths(paths), myDbParentId(parentCoreId))
+  })
+  ipcMain.handle('mydb:open-folder', async (e) => {
+    requireMyDbWindow(e.sender)
+    const error = await shell.openPath(myDbStorageRoot())
+    if (error) throw new Error(error)
+  })
+  ipcMain.handle('mydb:open-file', async (e, id: unknown) => {
+    requireMyDbWindow(e.sender)
+    const error = await shell.openPath(getMyDbStore().resolveItemPath(myDbId({ id })))
+    if (error) throw new Error(error)
+  })
+  ipcMain.handle('mydb:show-in-folder', (e, id: unknown) => {
+    requireMyDbWindow(e.sender)
+    shell.showItemInFolder(getMyDbStore().resolveItemPath(myDbId({ id })))
   })
 
   // ---- IPC: 사용자가 설치한 ComfyUI Windows Portable 선택·실행 ----
@@ -1060,7 +1348,14 @@ app.whenReady().then(() => {
   ipcMain.handle('conv:get', (_e, id: string) => getConversation(id))
   ipcMain.handle('conv:save', (_e, c: ConversationSave) => saveConversation(c))
   ipcMain.handle('conv:pin', (_e, id: string, pinned: boolean) => setConversationPinned(id, pinned))
+  ipcMain.handle('conv:rename', (_e, id: string, title: string) => renameConversation(id, title))
   ipcMain.handle('conv:delete', (_e, id: string) => deleteConversation(id))
+  ipcMain.handle('project:list', () => listAgentProjects())
+  ipcMain.handle('project:create', (_e, title: string) => createAgentProject(title))
+  ipcMain.handle('project:create-conversation', (_e, projectId: string, title?: string) =>
+    createAgentProjectConversation(projectId, title)
+  )
+  ipcMain.handle('project:start', (_e, id: string) => startAgentProject(id))
 
   // ---- IPC: 공장초기화 (개발자 모드) — userData의 앱 데이터 삭제(설정·대화·사용량) ----
   ipcMain.handle('app:factory-reset', async () => {
@@ -1074,6 +1369,7 @@ app.whenReady().then(() => {
     invalidateAllNvidiaCapabilities()
     resetSettings()
     clearAllConversations()
+    clearBackendTodoWorkspaceRegistry()
     clearUsage()
     clearComfyModelRegistry() // Aiso 메타데이터만 삭제하며 ComfyUI의 실제 모델 파일은 보존한다.
     // 디스코드 비밀·상태·예약도 지우고(리셋 후 설정은 기본값=봇 꺼짐), 실행 중 봇을 중지한다.
@@ -1101,6 +1397,7 @@ app.whenReady().then(() => {
   })
 
   createWindow()
+  deferStaleComfyModelPartialCleanup()
   ensureTray() // 상주/자동실행 켜져 있으면 트레이 생성
   applyStartupSettings() // 로그인 자동 실행 등록 상태를 설정과 동기화
 
@@ -1120,9 +1417,12 @@ app.on('before-quit', () => {
 })
 
 app.on('will-quit', () => {
+  if (myDbDailyReportTimer) clearInterval(myDbDailyReportTimer)
+  myDbDailyReportTimer = null
   destroyComfySurface()
   stopManagedComfyUI()
   stopBackend()
+  closeMyDbStorage()
 })
 
 app.on('window-all-closed', () => {

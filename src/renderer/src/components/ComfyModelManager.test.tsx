@@ -75,6 +75,32 @@ function profileWithUserWorkflow(): ComfyModelProfile {
       cfg: 5,
       sampler: 'euler'
     },
+    qualityMode: 'base',
+    agentEnabled: false,
+    priority: 0,
+    createdAt: 1,
+    updatedAt: 1
+  }
+}
+
+function profileWithAutomaticSdxl(): ComfyModelProfile {
+  return {
+    id: 'sdxl-profile-1',
+    name: 'Automatic SDXL',
+    family: 'sdxl',
+    capabilities: ['txt2img'],
+    tags: [],
+    assets: [asset],
+    workflowTemplateId: 'sdxl.txt2img.v1',
+    defaults: {
+      width: 1024,
+      height: 1024,
+      steps: 20,
+      cfg: 5,
+      sampler: 'euler',
+      scheduler: 'normal'
+    },
+    qualityMode: 'base',
     agentEnabled: false,
     priority: 0,
     createdAt: 1,
@@ -184,5 +210,37 @@ describe('ComfyModelManager', () => {
 
     finishImport?.({ canceled: true, imported: [], reused: [] })
     await waitFor(() => expect(screen.getByText('파일 연결을 취소했습니다.')).not.toBeNull())
+  })
+
+  it('persists high-quality refinement only for an automatic SDXL profile', async () => {
+    const user = userEvent.setup()
+    const profile = profileWithAutomaticSdxl()
+    const api = installApiStub([profile])
+    render(<ComfyModelManager installPath={'D:\\ComfyUI'} />)
+
+    await user.click(await screen.findByRole('button', { name: '\uC124\uC815 \uD3B8\uC9D1' }))
+    const radios = await screen.findAllByRole('radio')
+    expect(radios).toHaveLength(2)
+    expect((radios[1] as HTMLInputElement).disabled).toBe(false)
+    await user.click(radios[1])
+    await user.click(screen.getByRole('button', { name: '\uC124\uC815 \uC800\uC7A5' }))
+
+    await waitFor(() => expect(api.update).toHaveBeenCalledWith(
+      profile.id,
+      expect.objectContaining({ qualityMode: 'refine' })
+    ))
+  })
+
+  it('keeps user workflows on base generation and disables refinement', async () => {
+    const user = userEvent.setup()
+    const profile = profileWithUserWorkflow()
+    installApiStub([profile])
+    render(<ComfyModelManager installPath={'D:\\ComfyUI'} />)
+
+    await user.click(await screen.findByRole('button', { name: '\uC124\uC815 \uD3B8\uC9D1' }))
+    const radios = await screen.findAllByRole('radio')
+    expect(radios).toHaveLength(2)
+    expect((radios[0] as HTMLInputElement).checked).toBe(true)
+    expect((radios[1] as HTMLInputElement).disabled).toBe(true)
   })
 })

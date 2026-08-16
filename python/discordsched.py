@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """디스코드 예약 코어 — 등록·영속·발화 시각 계산. discord.py 미의존(순수 파이썬).
 
-- 예약은 '등록 시점'에 승인을 받는다(에이전트 탭=승인 다이얼로그, 디스코드=소유자 버튼).
-  발화 시각에는 사람이 없을 수 있으므로 발화 자체는 승인 없이 실행된다.
+- 예약 등록의 실행 권한은 에이전트 탭에서 선택한 권한 모드를 따른다.
+  디스코드 명령 채널의 소유자 승인과 실제 발화는 별도 흐름으로 처리한다.
 - 발화는 앱(사이드카)이 켜져 있는 동안만 일어난다. 꺼져 있던 동안 놓친 예약은
   다음 시작 때 명령 채널에 안내한다(일회성은 소진, 매일 반복은 다음 회차로).
 - 저장은 discord data_dir의 schedules.json — 임시파일에 쓰고 교체(원자적).
@@ -20,6 +20,10 @@ SCHEDULES_FILE = "schedules.json"
 MAX_JOBS = 20          # 등록 가능한 예약 수 상한(폭주 방지)
 TEXT_MAX = 2000        # 메시지 본문/브리핑 지시 길이 상한
 MISSED_GRACE_S = 600   # 이보다 오래 지난 발화는 '놓침'으로 처리(실행 대신 안내)
+MAX_REPORT_CHANNELS = 10
+MAX_REPORT_INSTRUCTION = 1000
+MIN_REPORT_INTERVAL_HOURS = 1
+MAX_REPORT_INTERVAL_HOURS = 168
 
 KINDS = ("message", "briefing")
 REPEATS = ("once", "daily")
@@ -83,6 +87,22 @@ def remove(job_id: str) -> bool:
     return False
 
 
+def update_job(job_id: str, changes: dict) -> bool:
+    """Persist runtime state for an existing schedule job."""
+    jid = str(job_id or "").strip()
+    if not jid or not isinstance(changes, dict):
+        return False
+    for index, job in enumerate(_JOBS):
+        if job.get("id") != jid:
+            continue
+        updated = dict(job)
+        updated.update(changes)
+        _JOBS[index] = updated
+        _save()
+        return True
+    return False
+
+
 # ── 시각 파싱·반복 계산 ─────────────────────────────────────────────────
 def parse_when(when, repeat: str, *, now: "datetime | None" = None) -> tuple["datetime | None", "str | None"]:
     """'HH:MM' 또는 'YYYY-MM-DD HH:MM' → 첫 발화 시각. 반환 (시각, 오류)."""
@@ -134,6 +154,15 @@ def advance_daily(next_run: datetime, now: datetime) -> datetime:
     return nr
 
 
+def advance_interval(next_run: datetime, now: datetime, interval_hours: int) -> datetime:
+    """Advance an hourly interval without replaying every missed tick."""
+    hours = max(MIN_REPORT_INTERVAL_HOURS, min(MAX_REPORT_INTERVAL_HOURS, int(interval_hours)))
+    nr = next_run + timedelta(hours=hours)
+    while nr <= now:
+        nr += timedelta(hours=hours)
+    return nr
+
+
 def pop_due(*, now: "datetime | None" = None) -> list[dict]:
     """발화 시각이 된 잡을 꺼낸다. 반복은 next_run을 갱신해 유지, 일회성은 제거(소진).
 
@@ -151,6 +180,16 @@ def pop_due(*, now: "datetime | None" = None) -> list[dict]:
         if nr is None:
             changed = True  # 깨진(비문자열·형식오류) next_run → 잡을 버린다
             continue
+        interval_hours: int | None = None
+        if j.get("repeat") == "interval" or j.get("kind") == "channel_report":
+            try:
+                interval_hours = int(j.get("interval_hours"))
+            except (TypeError, ValueError):
+                changed = True
+                continue
+            if not MIN_REPORT_INTERVAL_HOURS <= interval_hours <= MAX_REPORT_INTERVAL_HOURS:
+                changed = True
+                continue
         if nr > now:
             keep.append(j)
             continue
@@ -160,6 +199,12 @@ def pop_due(*, now: "datetime | None" = None) -> list[dict]:
         if j.get("repeat") == "daily":
             j2 = dict(j)
             j2["next_run"] = advance_daily(nr, now).isoformat(timespec="minutes")
+            keep.append(j2)
+        elif j.get("repeat") == "interval" and j.get("kind") == "channel_report":
+            j2 = dict(j)
+            j2["next_run"] = advance_interval(
+                nr, now, interval_hours or MIN_REPORT_INTERVAL_HOURS
+            ).isoformat(timespec="minutes")
             keep.append(j2)
         # once는 소진 — keep하지 않음
     if changed:
@@ -240,6 +285,153 @@ def add_job(**kwargs) -> tuple["dict | None", "str | None"]:
     return commit_job(draft, now=kwargs.get("now")), None
 
 
+def canonical_channel_report_args(args: dict) -> dict:
+    """Normalize common small-model aliases for the channel report tool."""
+    from discordops import pick_first  # noqa: PLC0415
+
+    raw = dict(args or {})
+    channels = raw.get("channels")
+    if channels is None:
+        channels = raw.get("source_channels")
+    if channels is None:
+        channels = raw.get("channel")
+    if isinstance(channels, str):
+        channels = [part.strip() for part in re.split(r"[,\n]", channels) if part.strip()]
+    elif isinstance(channels, (tuple, set)):
+        channels = list(channels)
+    if not isinstance(channels, list):
+        channels = []
+    return {
+        "channels": [str(value).strip() for value in channels if str(value).strip()],
+        "report_channel": pick_first(
+            raw, "report_channel", "destination", "target_channel", "output_channel"
+        ),
+        "interval_hours": raw.get("interval_hours", raw.get("hours", raw.get("interval", 1))),
+        "instruction": pick_first(raw, "instruction", "focus", "prompt", "text"),
+    }
+
+
+def build_channel_report_job(
+    *,
+    source_channels: list[dict],
+    report_channel_id: str,
+    report_channel_name: str,
+    interval_hours: int,
+    instruction: str = "",
+    now: "datetime | None" = None,
+) -> tuple["dict | None", "str | None"]:
+    """Validate and build a recurring new-message-only Discord report job."""
+    if len(_JOBS) >= MAX_JOBS:
+        return None, f"예약이 너무 많습니다(최대 {MAX_JOBS}개). 먼저 기존 예약을 삭제하세요."
+    if not source_channels:
+        return None, "수집할 텍스트 채널이 없습니다."
+    if len(source_channels) > MAX_REPORT_CHANNELS:
+        return None, f"한 보고서에서 최대 {MAX_REPORT_CHANNELS}개 채널까지 수집할 수 있습니다."
+    try:
+        hours = int(interval_hours)
+    except (TypeError, ValueError):
+        return None, "interval_hours는 시간 단위 정수여야 합니다."
+    if not MIN_REPORT_INTERVAL_HOURS <= hours <= MAX_REPORT_INTERVAL_HOURS:
+        return None, (
+            f"interval_hours는 {MIN_REPORT_INTERVAL_HOURS}~{MAX_REPORT_INTERVAL_HOURS} 사이여야 합니다."
+        )
+    note = str(instruction or "").strip()
+    if len(note) > MAX_REPORT_INSTRUCTION:
+        return None, f"보고서 지시는 최대 {MAX_REPORT_INSTRUCTION}자까지 입력할 수 있습니다."
+    seen: set[str] = set()
+    clean_sources: list[dict] = []
+    for source in source_channels:
+        channel_id = str(source.get("id") or "").strip()
+        channel_name = str(source.get("name") or "").strip()
+        if not channel_id or not channel_name or channel_id in seen:
+            continue
+        seen.add(channel_id)
+        clean_sources.append({
+            "id": channel_id,
+            "name": channel_name,
+            "last_message_id": str(source.get("last_message_id") or "0"),
+        })
+    if not clean_sources:
+        return None, "유효한 수집 채널이 없습니다."
+    current = now or datetime.now()
+    return {
+        "kind": "channel_report",
+        "channel_id": str(report_channel_id),
+        "channel_name": str(report_channel_name),
+        "source_channels": clean_sources,
+        "text": note,
+        "repeat": "interval",
+        "interval_hours": hours,
+        "next_run": (current + timedelta(hours=hours)).isoformat(timespec="minutes"),
+    }, None
+
+
+async def _latest_message_id(channel) -> str:
+    try:
+        async for message in channel.history(limit=1):
+            return str(message.id)
+    except Exception:  # noqa: BLE001 - permission and API errors are reported by the caller
+        raise
+    return "0"
+
+
+async def channel_report_add(
+    channels=None, report_channel=None, interval_hours=1, instruction="", **_kw
+) -> str:
+    """Register an interval report and baseline each source at its current newest message."""
+    import discordops  # noqa: PLC0415
+
+    args = canonical_channel_report_args({
+        "channels": channels,
+        "report_channel": report_channel,
+        "interval_hours": interval_hours,
+        "instruction": instruction,
+        **_kw,
+    })
+    if not args["channels"]:
+        return "[거부] 수집할 채널을 하나 이상 지정하세요."
+    destination = args["report_channel"] or args["channels"][0]
+    report_got, report_error = discordops.resolve_text_channel(destination)
+    if report_error:
+        return f"[거부] 보고 채널: {report_error}"
+    live, live_error = discordops.live_guild()
+    if live_error:
+        return live_error
+    guild, _command_channel_id = live
+    sources: list[dict] = []
+    for requested in args["channels"]:
+        got, error = discordops.resolve_text_channel(requested)
+        if error:
+            return f"[거부] 수집 채널 '{requested}': {error}"
+        channel_id, channel_name = got
+        channel = guild.get_channel(int(channel_id)) if channel_id.isdigit() else None
+        if channel is None:
+            return f"[거부] 수집 채널 '#{channel_name}'을 찾을 수 없습니다."
+        try:
+            baseline = await _latest_message_id(channel)
+        except Exception as error:  # noqa: BLE001
+            return f"[거부] #{channel_name}의 메시지 기록을 읽을 수 없습니다: {error}"
+        sources.append({"id": channel_id, "name": channel_name, "last_message_id": baseline})
+    report_id, report_name = report_got
+    draft, error = build_channel_report_job(
+        source_channels=sources,
+        report_channel_id=report_id,
+        report_channel_name=report_name,
+        interval_hours=args["interval_hours"],
+        instruction=args["instruction"],
+    )
+    if error:
+        return f"[거부] {error}"
+    job = commit_job(draft)
+    source_names = ", ".join(f"#{source['name']}" for source in sources)
+    return (
+        f"채널 대화 보고 예약을 등록했습니다.\n"
+        f"수집: {source_names}\n보고: #{report_name}\n"
+        f"주기: {job['interval_hours']}시간마다\n"
+        "등록 시점 이후의 새 메시지만 보고하며, 성공적으로 보고한 메시지는 다시 수집하지 않습니다."
+    )
+
+
 # ── 표시 ────────────────────────────────────────────────────────────────
 def _fmt_dt(iso: str) -> str:
     try:
@@ -249,6 +441,12 @@ def _fmt_dt(iso: str) -> str:
 
 
 def render_job(j: dict) -> str:
+    if j.get("kind") == "channel_report":
+        sources = ", ".join(f"#{item.get('name')}" for item in j.get("source_channels", []))
+        return (
+            f"[{j.get('id')}] {j.get('interval_hours', 1)}시간마다 · 다음 실행 "
+            f"{_fmt_dt(j.get('next_run', ''))} · {sources} → #{j.get('channel_name')} · 채널 대화 보고"
+        )
     rep = "매일" if j.get("repeat") == "daily" else "1회"
     kind = "브리핑(그 시각에 내용 생성)" if j.get("kind") == "briefing" else "메시지"
     return (
@@ -283,7 +481,7 @@ SCHEDULE_ADD_SCHEMA = {
         "description": (
             "디스코드 채널로 예약 전송을 등록한다. kind=message는 고정 문구를 그 시각에 보내고, "
             "kind=briefing은 그 시각에 웹 조사로 내용을 생성해 보낸다(아침 뉴스·날씨 브리핑 등). "
-            "등록에는 사용자 승인이 필요하다. 발화는 앱이 켜져 있는 동안만 일어난다."
+            "실행 권한은 선택한 권한 모드를 따르며, 발화는 앱이 켜져 있는 동안만 일어난다."
         ),
         "parameters": {
             "type": "object",
@@ -317,6 +515,46 @@ SCHEDULE_REMOVE_SCHEMA = {
             "type": "object",
             "properties": {"id": {"type": "string", "description": "삭제할 예약 ID"}},
             "required": ["id"],
+        },
+    },
+}
+
+CHANNEL_REPORT_ADD_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "discord_channel_report_add",
+        "description": (
+            "지정한 디스코드 텍스트 채널들의 새 대화만 시간 단위로 수집·요약하여 보고 채널에 전송하는 "
+            "반복 예약을 등록한다. 채널별 마지막 수집 메시지 ID를 저장하므로 이전에 성공적으로 보고한 "
+            "대화는 다음 보고서에 다시 포함하지 않는다. 최초 보고는 등록 이후의 메시지부터 시작한다."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "channels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": MAX_REPORT_CHANNELS,
+                    "description": "수집할 텍스트 채널 이름 또는 ID 목록",
+                },
+                "report_channel": {
+                    "type": "string",
+                    "description": "완성된 보고서를 보낼 텍스트 채널 이름 또는 ID",
+                },
+                "interval_hours": {
+                    "type": "integer",
+                    "minimum": MIN_REPORT_INTERVAL_HOURS,
+                    "maximum": MAX_REPORT_INTERVAL_HOURS,
+                    "description": "보고 주기(시간 단위). 예: 1=매시간, 6=6시간마다",
+                },
+                "instruction": {
+                    "type": "string",
+                    "description": "선택 사항. 보고서가 특히 추적할 주제나 형식",
+                    "maxLength": MAX_REPORT_INSTRUCTION,
+                },
+            },
+            "required": ["channels", "report_channel", "interval_hours"],
         },
     },
 }

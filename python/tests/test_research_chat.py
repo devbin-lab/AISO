@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 
 import agent
+import websearch
 from llm import LlmModelRuntime, LlmRequest
 from llm.providers import ollama as ollama_provider
 from toolspec import REGISTRY
@@ -322,3 +323,8 @@ def test_research_loop_plain_answer_no_tools(monkeypatch):
     assert "tool_call" not in types
     assert "content" not in types or True  # content는 _generate_turn 스트림에서 나오므로 여기선 검사 안 함
     assert types[-1] == "done"
+# 시변 검색어는 실제 현재 연도를 반드시 포함한다.
+def test_web_search_recency_query_is_anchored_to_current_year():
+    assert websearch.enrich_recency_query("OpenAI latest news", year=2026) == "OpenAI latest news 2026"
+    assert websearch.enrich_recency_query("OpenAI 최신 뉴스 2025", year=2026).endswith("2026")
+    assert websearch.enrich_recency_query("파이썬 리스트 정렬", year=2026) == "파이썬 리스트 정렬"

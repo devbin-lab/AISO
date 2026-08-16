@@ -12,8 +12,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agent  # noqa: E402
+import agent_prompting  # noqa: E402
+import agent_research  # noqa: E402
 import main  # noqa: E402
 from llm.providers import ollama as ollama_provider  # noqa: E402
+from toolspec import model_tool_schemas  # noqa: E402
 
 try:
     from fastapi.testclient import TestClient  # noqa: E402
@@ -133,7 +136,10 @@ def test_chat_endpoint_wire_payload_and_normalized_event_order(monkeypatch):
     assert [json.loads(line)["type"] for line in response.text.splitlines()] == ["thinking", "content", "done"]
     assert transport.payloads == [{
         "model": "m",
-        "messages": [{"role": "user", "content": "hello"}],
+        "messages": [
+            {"role": "system", "content": agent_prompting.final_response_language_prompt("en")},
+            {"role": "user", "content": "hello"},
+        ],
         "stream": True,
         "keep_alive": "5m",
         "think": "high",
@@ -168,7 +174,9 @@ def test_agent_execution_wire_payload_and_event_order(monkeypatch):
     assert payload[0]["options"] == {"temperature": 0.2, "num_predict": agent.MAX_GEN_TOKENS, "num_ctx": 4096}
     assert payload[0]["messages"][-1] == {"role": "user", "content": "hello"}
     assert [tool["function"]["name"] for tool in payload[0]["tools"]] == [
-        "update_plan", "get_system_time", "web_fetch", "web_search", "create_skill", "run_skill",
+        "update_plan", "get_system_time", "list_calendar_events",
+        "list_mydb_library", "list_mydb_history", "list_mydb_trash", "restore_mydb_trash_node",
+        "web_fetch", "web_search", "create_skill", "run_skill", "create_calendar_event", "manage_calendar_event",
     ]
 
 
@@ -190,17 +198,14 @@ def test_research_execution_wire_payload_and_event_order(monkeypatch):
     assert transport.payloads == [{
         "model": "m",
         "messages": [
-            {"role": "system", "content": agent.RESEARCH_SYSTEM_PROMPT},
+            {"role": "system", "content": agent_research.research_system_prompt("en")},
             {"role": "user", "content": "hello"},
         ],
         "stream": True,
         "keep_alive": "5m",
         "think": "medium",
         "options": {"temperature": 0.2, "num_predict": agent.MAX_GEN_TOKENS, "num_ctx": 4096},
-        "tools": [
-            agent.REGISTRY["web_search"].schema,
-            agent.REGISTRY["web_fetch"].schema,
-        ],
+        "tools": model_tool_schemas(("web_search", "web_fetch")),
     }]
 
 
@@ -258,6 +263,34 @@ def test_chat_endpoint_close_propagates_to_adapter_http_stream(monkeypatch):
 
     assert asyncio.run(close_after_first_chunk()) == {"type": "content", "text": "first"}
     assert (transport.chat_client_exit, transport.chat_response_exit) == (1, 1)
+
+
+def test_agent_uses_raw_typed_request_for_language_and_intent_not_attachment_text(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_prepared(_messages, *, allow_images):
+        assert allow_images is True
+        return [{"role": "user", "content": "한국어 요청\n\n[attachment]\nPlease generate an image."}]
+
+    async def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        yield {"type": "done"}
+
+    monkeypatch.setattr(main, "_messages_with_latest_attachments", fake_prepared)
+    monkeypatch.setattr(main, "run_agent", fake_run_agent)
+
+    async def run():
+        response = await main.agent(main.AgentRequest(
+            workspace="",
+            enabled_tools=[],
+            messages=[main.ChatMessage(role="user", content="현재 작업을 요약해줘")],
+        ))
+        return await anext(response.body_iterator)
+
+    assert json.loads(asyncio.run(run())) == {"type": "done"}
+    assert captured["user_request_text"] == "현재 작업을 요약해줘"
+    assert captured["response_language"] == "ko"
+    assert captured["messages"] == [{"role": "user", "content": "한국어 요청\n\n[attachment]\nPlease generate an image."}]
 
 
 def test_public_run_agent_close_stops_future_tool_and_closes_adapter_stream(monkeypatch):

@@ -4,7 +4,8 @@
 ALWAYS_APPROVE·_META_TOOLS·if/elif 디스패치)을 손봐야 했다. 이제 여기 REGISTRY에 한 줄
 등록하면 스키마·실행·승인등급·파일변경여부·스크린샷여부가 전부 따라온다.
 
-- `AGENT_TOOLS`: 모델에게 넘길 스키마 배열(순서 = KV 캐시 프리픽스에 결정적, 고정).
+- `AGENT_TOOLS`: 한국어 UI와 호환되는 원본 스키마 배열(순서 고정).
+- `MODEL_AGENT_TOOLS`: 원본을 바꾸지 않은 영문 LLM 요청용 스키마 배열.
 - `needs_approval(name, mode)`: 승인 필요 여부.
 - `execute(spec, root, host, args) -> (result, shot|None)`: 통일된 실행.
 - `is_meta(name)`: update_plan 같은 '실질 작업 아님' 판정.
@@ -26,18 +27,32 @@ from discordops import MAP_SCHEMA as DISCORD_MAP_SCHEMA
 from discordops import SEND_SCHEMA as DISCORD_SEND_SCHEMA
 from discordops import server_apply, server_map, server_send
 from discordsched import (
+    CHANNEL_REPORT_ADD_SCHEMA,
     SCHEDULE_ADD_SCHEMA,
     SCHEDULE_LIST_SCHEMA,
     SCHEDULE_REMOVE_SCHEMA,
+    channel_report_add,
     schedule_add,
     schedule_list,
     schedule_remove,
+)
+from document_todos import CREATE_TODO_EVENT_SCHEMA, MANAGE_TODO_SCHEMA, create_todo_event, manage_todo
+from mydb_agent import (
+    LIST_MYDB_HISTORY_SCHEMA,
+    LIST_MYDB_LIBRARY_SCHEMA,
+    LIST_MYDB_TRASH_SCHEMA,
+    RESTORE_MYDB_TRASH_NODE_SCHEMA,
+    list_mydb_history,
+    list_mydb_library,
+    list_mydb_trash,
+    restore_mydb_trash_node,
 )
 from rag import SEARCH_DOCS_SCHEMA, search_docs_tool
 from runcmd import RUN_COMMAND_SCHEMA, run_command
 from runcode import RUN_CODE_SCHEMA, run_code
 from runskill import CREATE_SKILL_SCHEMA, RUN_SKILL_SCHEMA, create_skill, run_skill
-from tools import TOOL_SCHEMAS, run_tool
+from tool_schema_language import model_schema_for, model_schemas_for
+from tools import TOOL_SCHEMAS, list_saved_todos, run_tool
 from webcheck import RUN_WEB_SCHEMA, run_web
 from webfetch import WEB_FETCH_SCHEMA, web_fetch
 from websearch import WEB_SEARCH_SCHEMA, web_search
@@ -125,6 +140,7 @@ async def get_system_time() -> str:
 # 파일 툴의 성질 — 쓰기/삭제 판정 (테스트가 승인 매트릭스로 고정)
 _FILE_MUTATES = {
     "write_file", "edit_file", "multi_edit",
+    "convert_document", "analyze_document_calendar",
     "write_code_file", "edit_code_file", "multi_edit_code_file",
     "delete_file", "delete_dir", "move",
 }
@@ -147,9 +163,44 @@ def _build_registry() -> dict[str, ToolSpec]:
     reg["get_system_time"] = ToolSpec(
         "get_system_time", GET_SYSTEM_TIME_SCHEMA, CallKind.ASYNC_PLAIN, handler=get_system_time
     )
+    # Saved document ToDos are indexed by Aiso's private app data. They remain
+    # available after a workspace-specific agent session is closed.
+    calendar_schema = next(schema for schema in TOOL_SCHEMAS if schema["function"]["name"] == "list_calendar_events")
+    reg["list_calendar_events"] = ToolSpec(
+        "list_calendar_events", calendar_schema, CallKind.ASYNC_PLAIN, handler=list_saved_todos
+    )
+    # Personal calendar entries are stored in Aiso's central ToDo database,
+    # not in a workspace and never in Discord.  Keep this conditional so the
+    # frozen base schema prefix stays stable while Settings can still govern it.
+    reg["create_calendar_event"] = ToolSpec(
+        "create_calendar_event", CREATE_TODO_EVENT_SCHEMA, CallKind.ASYNC_PLAIN,
+        approval=Approval.DESTRUCTIVE, mutates=True, handler=create_todo_event,
+    )
+    reg["manage_calendar_event"] = ToolSpec(
+        "manage_calendar_event", MANAGE_TODO_SCHEMA, CallKind.ASYNC_PLAIN,
+        approval=Approval.DESTRUCTIVE, mutates=True, handler=manage_todo,
+    )
+    # My DB is a separate personal library.  The Agent receives metadata only;
+    # it may inspect library/history/trash and restore a trashed node, but it
+    # is deliberately never given create/edit/delete/link/export access.
+    reg["list_mydb_library"] = ToolSpec(
+        "list_mydb_library", LIST_MYDB_LIBRARY_SCHEMA, CallKind.ASYNC_PLAIN, handler=list_mydb_library,
+    )
+    reg["list_mydb_history"] = ToolSpec(
+        "list_mydb_history", LIST_MYDB_HISTORY_SCHEMA, CallKind.ASYNC_PLAIN, handler=list_mydb_history,
+    )
+    reg["list_mydb_trash"] = ToolSpec(
+        "list_mydb_trash", LIST_MYDB_TRASH_SCHEMA, CallKind.ASYNC_PLAIN, handler=list_mydb_trash,
+    )
+    reg["restore_mydb_trash_node"] = ToolSpec(
+        "restore_mydb_trash_node", RESTORE_MYDB_TRASH_NODE_SCHEMA, CallKind.ASYNC_PLAIN,
+        approval=Approval.DESTRUCTIVE, handler=restore_mydb_trash_node,
+    )
     # 2) 파일 툴 12개 — TOOL_SCHEMAS 순서 그대로
     for sch in TOOL_SCHEMAS:
         name = sch["function"]["name"]
+        if name == "list_calendar_events":
+            continue
         reg[name] = ToolSpec(
             name, sch, CallKind.FILE,
             approval=_file_approval(name),
@@ -157,8 +208,8 @@ def _build_registry() -> dict[str, ToolSpec]:
         )
     # 3) 비동기 툴 — 기존 AGENT_TOOLS 순서(run_web, run_code, run_command, web_fetch)
     # Existing workspace code/HTML is not trusted merely because it is already on disk.
-    # These tools execute it with the user's browser/process permissions, so neither a
-    # read-only session nor auto mode may bypass the approval boundary.
+    # Read/manual modes retain their approval boundary; auto mode is the user's explicit
+    # opt-in to run every exposed tool without an approval card.
     reg["run_web"] = ToolSpec("run_web", RUN_WEB_SCHEMA, CallKind.ASYNC_ROOT,
                               approval=Approval.ALWAYS, returns_screenshot=True, handler=run_web)
     reg["run_code"] = ToolSpec("run_code", RUN_CODE_SCHEMA, CallKind.ASYNC_ROOT,
@@ -169,9 +220,9 @@ def _build_registry() -> dict[str, ToolSpec]:
     reg["web_search"] = ToolSpec("web_search", WEB_SEARCH_SCHEMA, CallKind.ASYNC_PLAIN, handler=web_search)
     # 3b) 스킬 — create_skill(재사용 자동화 저장, 쓰기 등급) / run_skill(임의 실행, 명령 등급)
     #     스킬은 workspace 밖(앱 skills 폴더)에 저장되므로 mutates=False(재색인 불필요).
-    # Skills persist executable code outside the selected workspace.  Treat creation
-    # and execution alike so a prompt-injected repository cannot plant a future
-    # executable in an unattended auto run.
+    # Skills persist executable code outside the selected workspace. Treat creation
+    # and execution alike in read/manual modes; auto is the user's explicit
+    # full-autonomy choice for enabled tools.
     reg["create_skill"] = ToolSpec("create_skill", CREATE_SKILL_SCHEMA, CallKind.ASYNC_PLAIN,
                                    approval=Approval.ALWAYS, handler=create_skill)
     reg["run_skill"] = ToolSpec("run_skill", RUN_SKILL_SCHEMA, CallKind.ASYNC_PLAIN,
@@ -180,20 +231,26 @@ def _build_registry() -> dict[str, ToolSpec]:
     reg["search_docs"] = ToolSpec("search_docs", SEARCH_DOCS_SCHEMA, CallKind.ASYNC_ROOT_HOST,
                                   handler=search_docs_tool)
     # 5) 디스코드 서버 구성 — 봇이 연결돼 있을 때만 조건부 노출(search_docs와 동일 패턴, AGENT_TOOLS 제외).
-    #    apply는 외부 공유 서버를 즉시 바꾸고 삭제는 복구 불가 → DELETE 등급
-    #    (+ agent 루프가 자동(auto) 모드에서도 승인을 강제한다).
+    #    apply는 외부 공유 서버를 즉시 바꾸고 삭제는 복구 불가 → DELETE 등급.
+    #    자동 모드는 사용자의 명시적 무승인 실행 선택을 따른다.
     reg["discord_server_map"] = ToolSpec("discord_server_map", DISCORD_MAP_SCHEMA,
                                          CallKind.ASYNC_PLAIN, handler=server_map)
     reg["discord_server_apply"] = ToolSpec("discord_server_apply", DISCORD_APPLY_SCHEMA,
                                            CallKind.ASYNC_PLAIN, approval=Approval.DELETE,
                                            handler=server_apply)
-    # 메시지 전송·예약 — 외부(공유 서버)로 발신되므로 쓰기 등급(send·add는 agent 루프가 auto에서도 승인 강제).
+    # 메시지 전송·예약 — 외부(공유 서버)로 발신되므로 쓰기 등급이다.
+    # 자동 모드는 사용자의 명시적 무승인 실행 선택을 따른다.
     reg["discord_send"] = ToolSpec("discord_send", DISCORD_SEND_SCHEMA,
                                    CallKind.ASYNC_PLAIN, approval=Approval.DESTRUCTIVE,
                                    handler=server_send)
     reg["discord_schedule_add"] = ToolSpec("discord_schedule_add", SCHEDULE_ADD_SCHEMA,
                                            CallKind.ASYNC_PLAIN, approval=Approval.DESTRUCTIVE,
                                            handler=schedule_add)
+    reg["discord_channel_report_add"] = ToolSpec(
+        "discord_channel_report_add", CHANNEL_REPORT_ADD_SCHEMA,
+        CallKind.ASYNC_PLAIN, approval=Approval.DESTRUCTIVE,
+        handler=channel_report_add,
+    )
     reg["discord_schedule_list"] = ToolSpec("discord_schedule_list", SCHEDULE_LIST_SCHEMA,
                                             CallKind.ASYNC_PLAIN, handler=schedule_list)
     reg["discord_schedule_remove"] = ToolSpec("discord_schedule_remove", SCHEDULE_REMOVE_SCHEMA,
@@ -211,8 +268,9 @@ PROGRAMMING_TOOLS = frozenset({
 BUILTIN_TOOL_NAMES = tuple([*REGISTRY, "generate_image"])
 DEFAULT_ENABLED_TOOLS = tuple(name for name in BUILTIN_TOOL_NAMES if name not in PROGRAMMING_TOOLS)
 NVIDIA_AGENT_SUPPORTED_TOOLS = frozenset({
-    "update_plan", "get_system_time",
-    "list_dir", "list_tree", "read_file", "grep", "glob", "create_dir", "move",
+    "update_plan", "get_system_time", "list_calendar_events", "create_calendar_event", "manage_calendar_event",
+    "list_mydb_library", "list_mydb_history", "list_mydb_trash", "restore_mydb_trash_node",
+    "list_dir", "list_tree", "read_file", "grep", "glob", "create_dir", "move", "convert_document", "analyze_document_calendar",
     "write_file", "edit_file", "multi_edit",
     "write_code_file", "edit_code_file", "multi_edit_code_file",
     "delete_file", "delete_dir", "run_web", "run_code", "run_command",
@@ -224,7 +282,13 @@ def normalize_enabled_tool_names(names: list[str] | tuple[str, ...] | None) -> f
     """저장 정책의 명시적 허용 목록을 카탈로그 순서와 무관한 실행 집합으로 검증한다."""
     from tools import ToolError
 
-    values = list(DEFAULT_ENABLED_TOOLS if names is None else names)
+    aliases = {
+        "list_saved_todos": "list_calendar_events",
+        "create_todo_event": "create_calendar_event",
+        "manage_todo": "manage_calendar_event",
+        "analyze_document_todos": "analyze_document_calendar",
+    }
+    values = [aliases.get(name, name) for name in (DEFAULT_ENABLED_TOOLS if names is None else names)]
     unknown = [name for name in values if not isinstance(name, str) or name not in BUILTIN_TOOL_NAMES]
     if unknown:
         raise ToolError(f"지원하지 않는 Agent 도구입니다: {unknown[0]}")
@@ -234,19 +298,35 @@ def normalize_enabled_tool_names(names: list[str] | tuple[str, ...] | None) -> f
 
 # 조건부 노출 툴 — 상황이 갖춰졌을 때만 agent 루프가 tools에 얹는다(KV 프리픽스 스냅샷 불변).
 _CONDITIONAL_TOOLS = {
-    "search_docs",
+    "search_docs", "create_calendar_event", "manage_calendar_event",
     "discord_server_map", "discord_server_apply", "discord_send",
-    "discord_schedule_add", "discord_schedule_list", "discord_schedule_remove",
+    "discord_schedule_add", "discord_channel_report_add",
+    "discord_schedule_list", "discord_schedule_remove",
 }
 
-# 모델에게 넘길 스키마 배열 — 조건부 툴 제외, 등록 순서 유지 (기존 AGENT_TOOLS와 바이트 동일)
+# Korean source schema array — conditional tools are omitted and registry order
+# stays frozen for Settings/catalog compatibility.
 AGENT_TOOLS: list[dict] = [spec.schema for name, spec in REGISTRY.items() if name not in _CONDITIONAL_TOOLS]
 
-# 외부 공유 서버에 영향을 주는 행위는 auto 모드여도 승인한다. Agent 실행 루프와 툴 목록이
-# 같은 정책을 보도록 여기에서 단일 상수로 관리한다.
-FORCE_APPROVAL_IN_AUTO = frozenset({
-    "discord_server_apply", "discord_send", "discord_schedule_add",
-})
+# The Korean source schemas above are also rendered in Settings > Tools.  Keep
+# that UI contract untouched and expose a separate English deep-copy for LLM
+# requests.  Model callers must use this collection (or ``model_tool_schemas``
+# for conditional tools), never mutate ``ToolSpec.schema`` in place.
+MODEL_AGENT_TOOLS: list[dict] = model_schemas_for(AGENT_TOOLS)
+
+
+def model_tool_schemas(names: tuple[str, ...] | list[str] | frozenset[str]) -> list[dict]:
+    """Return English LLM schemas for registered tools in the requested order.
+
+    This supports research and Discord's conditional tool sets without leaking
+    English-only schema descriptions back into the Korean Settings catalog.
+    Unknown names are skipped deliberately: the caller's execution boundary
+    remains responsible for rejecting unknown tool calls.
+    """
+    return [model_schema_for(REGISTRY[name].schema) for name in names if name in REGISTRY]
+
+# 호환용 이름이다. 자동 모드는 모든 노출 도구를 승인 없이 실행하므로 강제 예외는 없다.
+FORCE_APPROVAL_IN_AUTO = frozenset()
 
 
 def is_meta(name: str) -> bool:
@@ -257,8 +337,7 @@ def is_meta(name: str) -> bool:
 def needs_approval(name: str, mode: str) -> bool:
     """승인 모드별로 이 툴이 사용자 승인을 요구하는지.
 
-    - auto(자동):   SAFE와 되돌릴 수 있는 작업만 무승인 실행. 코드·명령·브라우저
-                    실행과 삭제는 항상 승인.
+    - auto(자동):   사용자가 노출·허용한 모든 도구를 승인 없이 실행.
     - read(읽기):   읽기(SAFE)는 통과, 쓰기·편집·삭제·명령은 승인.
     - manual(수동): 읽기 포함 모든 실질 행위를 승인(계획 갱신 같은 메타는 제외).
     """
@@ -268,9 +347,9 @@ def needs_approval(name: str, mode: str) -> bool:
         return mode in ("manual", "read")
     spec = REGISTRY.get(name)
     if mode == "auto":
-        # Auto is deliberately not a blanket bypass. Shell/code/browser execution,
-        # skill execution/creation, and deletion retain an explicit user gate.
-        return spec is not None and spec.approval in (Approval.ALWAYS, Approval.DELETE)
+        # Auto is the explicit full-autonomy mode. The renderer must never receive
+        # an approval_request for a tool that the user deliberately enabled.
+        return False
     if spec is None:
         return mode == "manual"  # 미등록 툴 → 수동에서만 승인(그 외 기존처럼 통과)
     if spec.kind is CallKind.META:
@@ -284,6 +363,12 @@ def _catalog_classification(name: str, spec: ToolSpec) -> tuple[str, str, tuple[
     """툴 목록 UI에 필요한 분류·노출 조건을 실제 실행 경계에 맞춰 만든다."""
     if spec.kind is CallKind.META:
         return "plan", "always", ()
+    if name == "analyze_document_calendar":
+        return "plan", "workspace", ("작업 폴더 선택",)
+    if name in {"create_calendar_event", "manage_calendar_event"}:
+        return "plan", "always", ("Aiso ToDo 중앙 저장소",)
+    if name in {"list_mydb_library", "list_mydb_history", "list_mydb_trash", "restore_mydb_trash_node"}:
+        return "mydb", "always", ("My DB 저장소",)
     if name == "search_docs":
         return "rag", "rag", ("작업 폴더 선택", "RAG 사용", "색인 완료")
     if name.startswith("discord_"):
@@ -294,9 +379,7 @@ def _catalog_classification(name: str, spec: ToolSpec) -> tuple[str, str, tuple[
         category = "files"
         return category, "workspace", ("작업 폴더 선택",)
     if name in {"web_search", "web_fetch"}:
-        return "research", "always", (
-            "작업 폴더 내용을 읽은 뒤 웹으로 전송할 때는 자동 모드도 승인 필요",
-        )
+        return "research", "always", ()
     if name in {"create_skill", "run_skill"}:
         return "automation", "always", ()
     return "automation", "always", ()
@@ -324,10 +407,7 @@ def _catalog_entry(
         for param_name, param in properties.items()
         if isinstance(param, dict)
     ] if isinstance(properties, dict) else []
-    approval = {
-        mode: needs_approval(name, mode) or (mode == "auto" and name in FORCE_APPROVAL_IN_AUTO)
-        for mode in ("manual", "read", "auto")
-    }
+    approval = {mode: needs_approval(name, mode) for mode in ("manual", "read", "auto")}
     return {
         "name": name,
         "description": str(function.get("description") or ""),

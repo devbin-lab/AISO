@@ -4,14 +4,17 @@ import type {
   ComfyModelFamily,
   ComfyModelImportProgress,
   ComfyModelProfile,
+  ComfyQualityMode,
   ComfyWorkflowBindingTarget
 } from '../../../shared/comfy-model'
 import {
   COMFY_ASSET_KIND_LABELS,
   COMFY_ASSET_SLOT_LABELS,
+  getEffectiveComfyQualityMode,
   getComfyAgentReadiness,
   getComfyGenerationDefaults,
-  getComfyRequiredSlots
+  getComfyRequiredSlots,
+  supportsComfyQualityRefinement
 } from '../../../shared/comfy-model'
 import { confirmDialog } from './ConfirmDialog'
 
@@ -31,6 +34,7 @@ interface EditorState {
   name: string
   family: ComfyModelFamily
   tags: string
+  qualityMode: ComfyQualityMode
   agentEnabled: boolean
   priority: number
   defaults: ComfyGenerationDefaults
@@ -65,6 +69,7 @@ function emptyEditor(): EditorState {
     name: '',
     family: 'custom',
     tags: '',
+    qualityMode: 'base',
     // 구성 파일을 완성한 뒤에만 명시적으로 Agent에 사용하도록 한다.
     agentEnabled: false,
     priority: 0,
@@ -79,6 +84,7 @@ function editorFromProfile(profile: ComfyModelProfile, mode: EditorMode): Editor
     name: profile.name,
     family: profile.family,
     tags: profile.tags.join(', '),
+    qualityMode: getEffectiveComfyQualityMode(profile),
     agentEnabled: profile.agentEnabled,
     priority: profile.priority,
     defaults: { ...profile.defaults }
@@ -182,6 +188,7 @@ function ComfyModelManager({
       return {
         ...current,
         family: profile.family,
+        qualityMode: getEffectiveComfyQualityMode(profile),
         agentEnabled: profile.agentEnabled,
         defaults: { ...profile.defaults }
       }
@@ -341,6 +348,7 @@ function ComfyModelManager({
         name: editor.name.trim(),
         capabilities: ['txt2img'],
         tags: normalizedTags(editor.tags),
+        qualityMode: editor.qualityMode,
         agentEnabled: editor.agentEnabled,
         priority: editor.priority,
         defaults: editor.defaults
@@ -404,6 +412,9 @@ function ComfyModelManager({
     ? profiles.find((profile) => profile.id === editor.profileId)
     : undefined
   const editorReadiness = editorProfile ? getComfyAgentReadiness(editorProfile) : null
+  const editorQualityRefinementSupported = Boolean(
+    editorProfile && supportsComfyQualityRefinement(editorProfile)
+  )
   const editorSupportsAgent = Boolean(
     editor && (isAgentWorkflowFamily(editor.family) || editorProfile?.workflowTemplate)
   )
@@ -537,6 +548,8 @@ function ComfyModelManager({
           <div className="comfy-model-empty">아직 Aiso에 연결한 모델이 없습니다.</div>
         ) : profiles.map((profile) => {
           const readiness = getComfyAgentReadiness(profile)
+          const qualityMode = getEffectiveComfyQualityMode(profile)
+          const qualityRefinementSupported = supportsComfyQualityRefinement(profile)
           const requiredSlots = profile.workflowTemplate ? [] : getComfyRequiredSlots(profile.family)
           const connectedSlots = new Set(profile.assets.map((asset) => asset.slot).filter(Boolean))
           const compatibleRequiredConnected = requiredSlots.filter((slot) => (
@@ -552,6 +565,9 @@ function ComfyModelManager({
                 <div className="comfy-model-card__identity">
                   <strong>{profile.name}</strong>
                   {profile.workflowTemplate && <span>사용자 워크플로</span>}
+                  <span className={`comfy-quality-badge ${qualityMode === 'refine' ? 'is-refine' : ''}`}>
+                    {qualityMode === 'refine' ? '고품질 보정' : '기본 생성'}
+                  </span>
                 </div>
                 <label
                   className="switch"
@@ -584,6 +600,13 @@ function ComfyModelManager({
               {readiness.notices.map((notice) => (
                 <div className="comfy-model-readiness" key={notice}>{notice}</div>
               ))}
+              <div className="comfy-model-quality-detail">
+                {qualityMode === 'refine'
+                  ? '\uACE0\uD488\uC9C8 \uBCF4\uC815 \uC120\uD0DD: \uC0DD\uC131 \uC2DC ComfyUI \uB0B4\uC7A5 latent \uB178\uB4DC \uACC4\uC57D\uC774 \uD655\uC778\uB418\uBA74 \uC801\uC6A9\uB429\uB2C8\uB2E4.'
+                  : qualityRefinementSupported
+                    ? '기본 생성: 설정 편집에서 고품질 보정을 선택할 수 있습니다.'
+                    : '기본 생성: 현재 모델의 원래 워크플로를 유지합니다.'}
+              </div>
               {profile.assets.length > 0 && (
                 <div className="comfy-model-assets">
                   {profile.assets.map((asset) => (
@@ -685,6 +708,48 @@ function ComfyModelManager({
                       </>
                     )}
                   </div>
+
+                  <fieldset className="comfy-quality-mode">
+                    <legend>생성 품질</legend>
+                    <p>
+                      모델별 생성 방식을 선택합니다. 고품질 보정은 외부 업스케일러가 아니라,
+                      지원되는 SDXL 자동 워크플로의 내장 latent 보정 단계만 사용합니다.
+                    </p>
+                    <div className="comfy-quality-mode__options">
+                      <label className={`comfy-quality-mode__option ${editor.qualityMode === 'base' ? 'is-selected' : ''}`}>
+                        <input
+                          type="radio"
+                          name={`comfy-quality-${profile.id}`}
+                          checked={editor.qualityMode === 'base'}
+                          onChange={() => setEditorField('qualityMode', 'base')}
+                        />
+                        <span>
+                          <b>기본 생성</b>
+                          <small>현재 모델의 기본 워크플로를 그대로 사용합니다.</small>
+                        </span>
+                      </label>
+                      <label
+                        className={`comfy-quality-mode__option ${editor.qualityMode === 'refine' ? 'is-selected' : ''}`}
+                        title={editorQualityRefinementSupported ? undefined : '현재 모델은 기본 생성만 지원합니다.'}
+                      >
+                        <input
+                          type="radio"
+                          name={`comfy-quality-${profile.id}`}
+                          checked={editor.qualityMode === 'refine'}
+                          disabled={!editorQualityRefinementSupported}
+                          onChange={() => setEditorField('qualityMode', 'refine')}
+                        />
+                        <span>
+                          <b>고품질 보정</b>
+                          <small>
+                            {editorQualityRefinementSupported
+                              ? 'SDXL 자동 워크플로의 내장 latent 보정을 사용합니다. 생성 시간과 VRAM 사용량이 늘 수 있습니다.'
+                              : '현재 모델은 기본 생성만 지원합니다. SD 1.5, FLUX, 사용자 워크플로는 원래 그래프를 유지합니다.'}
+                          </small>
+                        </span>
+                      </label>
+                    </div>
+                  </fieldset>
 
                   {!editorSupportsAgent && (
                     <p className="comfy-model-editor__intro">

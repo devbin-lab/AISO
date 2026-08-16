@@ -11,6 +11,8 @@ Edge 엔진을 동기 API로 별도 스레드에서 실행한다(Windows+uvicorn
 from __future__ import annotations
 
 import asyncio
+import re
+from datetime import datetime
 from urllib.parse import parse_qs, quote, urlparse
 
 from tools import ToolError
@@ -21,6 +23,21 @@ DEFAULT_COUNT = 8
 MAX_COUNT = 15
 MAX_SNIPPET = 320          # 결과 요약 문자 상한
 MAX_QUERY_CHARS = 512
+
+_RECENCY_QUERY_RE = re.compile(
+    r"(?:최신|최근|오늘|현재|뉴스|소식|업데이트|출시|가격|요금|정책|사용량|초기화|"
+    r"latest|recent|today|current|news|update|release|price|pricing|usage|reset)",
+    re.IGNORECASE,
+)
+
+
+def enrich_recency_query(query: str, *, year: int | None = None) -> str:
+    """Anchor time-sensitive searches to the actual current year."""
+    value = str(query or "").strip()
+    current_year = int(year or datetime.now().astimezone().year)
+    if value and _RECENCY_QUERY_RE.search(value) and str(current_year) not in value:
+        return f"{value} {current_year}"
+    return value
 
 WEB_SEARCH_SCHEMA = {
     "type": "function",
@@ -151,7 +168,7 @@ def _search_sync(query: str, count: int) -> str:
 async def web_search(query: str = "", count: int = DEFAULT_COUNT, **_ignore) -> str:
     if not isinstance(query, str) or not query.strip():
         raise ToolError("검색어가 비어 있습니다.")
-    q = query.strip()
+    q = enrich_recency_query(query)
     if len(q) > MAX_QUERY_CHARS:
         return (
             f"[차단] 검색어가 너무 깁니다({len(q)}자 > {MAX_QUERY_CHARS}자). "

@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections import OrderedDict
 from pathlib import Path
-from typing import AsyncGenerator, Callable
+from typing import AsyncGenerator
 
 import httpx
 import numpy as np
@@ -62,7 +63,18 @@ def _store_dir(root: Path) -> Path:
     return root / ".aiso" / "rag"
 
 
-_CACHE: dict[str, dict] = {}  # str(root) -> {"mtime":..., "store":...}
+# Search results are frequently requested repeatedly within one conversation,
+# but each cached store can hold a large vector matrix. Keep only the recently
+# used workspaces so changing projects cannot retain unbounded RAM.
+MAX_CACHED_STORES = 2
+_CACHE: OrderedDict[str, dict] = OrderedDict()  # str(root) -> {"mtime":..., "store":...}
+
+
+def _cache_store(key: str, mtime: float, store: dict) -> None:
+    _CACHE[key] = {"mtime": mtime, "store": store}
+    _CACHE.move_to_end(key)
+    while len(_CACHE) > MAX_CACHED_STORES:
+        _CACHE.popitem(last=False)
 
 
 def _load_store(root: Path) -> dict | None:
@@ -74,6 +86,7 @@ def _load_store(root: Path) -> dict | None:
     key = str(root)
     cached = _CACHE.get(key)
     if cached and cached["mtime"] == mtime:
+        _CACHE.move_to_end(key)
         return cached["store"]
     manifest = json.loads(man_p.read_text("utf-8"))
     chunks: list[dict] = []
@@ -88,7 +101,7 @@ def _load_store(root: Path) -> dict | None:
     else:
         vectors = np.zeros((0, int(manifest.get("dim", 0))), dtype=np.float32)
     store = {"manifest": manifest, "chunks": chunks, "vectors": vectors}
-    _CACHE[key] = {"mtime": mtime, "store": store}
+    _cache_store(key, mtime, store)
     return store
 
 
@@ -230,16 +243,29 @@ async def build_index(
 
     # 파일 상한: 명시값 > 이전 색인에 저장된 값 > 기본값 순 (재색인 시 같은 상한 유지)
     old_max = old["manifest"].get("max_files") if old else None
-    cap_files = max_files if max_files is not None else (old_max if old_max else MAX_FILES)
+    requested_cap = max_files if max_files is not None else (old_max if old_max else MAX_FILES)
+    try:
+        cap_files = max(1, int(requested_cap))
+    except (TypeError, ValueError):
+        cap_files = MAX_FILES
 
-    all_files = list(iter_indexable(root))
-    total_found = len(all_files)
+    # Stop discovery as soon as the selected file budget is known to be
+    # exceeded. The previous list() traversal still walked and retained every
+    # candidate in very large workspaces, even though only cap_files were ever
+    # indexed. One extra item is enough to report that the result is partial.
+    files: list[tuple[Path, str]] = []
+    file_limit_reached = False
+    for candidate in iter_indexable(root):
+        if len(files) >= cap_files:
+            file_limit_reached = True
+            break
+        files.append(candidate)
+    total_found = len(files) + (1 if file_limit_reached else 0)
     if total_found == 0:
         yield {"type": "error", "error": "색인할 파일이 없습니다 (코드·문서 파일을 찾지 못함)."}
         return
     # 대형 폴더 방어: 파일 수 상한 초과 시 잘라낸다 (부분 색인).
-    truncated = total_found > cap_files
-    files = all_files[:cap_files]
+    truncated = file_limit_reached
     total = len(files)
 
     new_chunks: list[dict] = []
@@ -316,7 +342,11 @@ async def build_index(
         "files": len(files_meta),
         "reused": reused,
         "truncated": truncated,      # 상한 초과로 일부만 색인했는가
-        "total_found": total_found,  # 실제로 발견된 색인 대상 파일 수
+        "file_limit_reached": file_limit_reached,
+        # File discovery stops after cap+1 for predictable latency. When the
+        # cap is reached this is a lower bound, not a full workspace count.
+        "total_found": total_found,
+        "total_found_exact": not file_limit_reached,
         "embed_model": embed_model,
         "dim": int(dim),
     }

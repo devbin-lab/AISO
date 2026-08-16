@@ -3,6 +3,10 @@ import type { AppSettings } from '../../../shared/settings'
 import type { BackendInfo } from '../../../shared/backend'
 import type { ComfyHealthInfo, ComfyLaunchResult } from '../../../shared/comfy'
 import type { ComfyModelProfile } from '../../../shared/comfy-model'
+import {
+  getEffectiveComfyQualityMode,
+  supportsComfyQualityRefinement
+} from '../../../shared/comfy-model'
 import { getComfyAgentReadiness } from '../../../shared/comfy-model'
 import { RefreshIcon } from '../components/icons'
 import {
@@ -325,10 +329,22 @@ function ComfyView({ settings, backend, active, onSaveSettings }: Props): React.
             ? <div>연결된 모델이 없습니다.</div>
             : registeredModels.map((profile) => {
                 const readiness = getComfyAgentReadiness(profile)
+                const qualityMode = getEffectiveComfyQualityMode(profile)
+                const refinementSupported = supportsComfyQualityRefinement(profile)
                 return (
                   <div className="comfy-model-panel__profile" key={profile.id}>
                     <b>{profile.name}</b>
                     <span>구성 파일 {profile.assets.length}개</span>
+                    <span className={`comfy-quality-badge ${qualityMode === 'refine' ? 'is-refine' : ''}`}>
+                      {qualityMode === 'refine' ? '고품질 보정' : '기본 생성'}
+                    </span>
+                    <small>
+                      {qualityMode === 'refine'
+                        ? '\uACE0\uD488\uC9C8 \uBCF4\uC815\uC774 \uC120\uD0DD\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uC0DD\uC131 \uC2DC ComfyUI \uB0B4\uC7A5 \uB178\uB4DC \uACC4\uC57D\uC774 \uD655\uC778\uB418\uBA74 \uC801\uC6A9\uB429\uB2C8\uB2E4.'
+                        : refinementSupported
+                          ? '설정에서 고품질 보정을 선택할 수 있습니다.'
+                          : '현재 워크플로는 기본 생성을 유지합니다.'}
+                    </small>
                     <small className={readiness.ready ? 'is-ready' : ''}>
                       {profile.agentEnabled
                         ? `${readiness.detail}${readiness.ready ? ' · Agent 자동 선택 사용 중' : ' · Agent 자동 선택에서 제외됨'}`

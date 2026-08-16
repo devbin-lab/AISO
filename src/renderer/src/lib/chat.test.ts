@@ -114,6 +114,26 @@ describe('streamChat NVIDIA execution boundary', () => {
     expect(body).not.toHaveProperty('ollama_host')
   })
 
+  it('serializes renderer attachment metadata as opaque IDs only', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamResponse(['{"type":"done"}\n']))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await streamChat(
+      8123,
+      nvidiaSettings(),
+      [{
+        role: 'user',
+        content: 'summarize this',
+        attachments: [{ id: '123e4567-e89b-42d3-a456-426614174000', name: 'private.pdf', kind: 'file', fileCount: 1, size: 3, mediaType: 'application/pdf' }]
+      }],
+      vi.fn()
+    )
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { messages: Array<Record<string, unknown>> }
+    expect(body.messages[0]?.attachments).toEqual(['123e4567-e89b-42d3-a456-426614174000'])
+    expect(JSON.stringify(body)).not.toContain('private.pdf')
+  })
+
   it('does not call /chat when Main refuses the NVIDIA research grant', async () => {
     prepareResearch.mockRejectedValueOnce(new Error('research capability expired'))
     const fetchMock = vi.fn()

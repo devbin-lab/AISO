@@ -19,7 +19,7 @@ import {
 } from './settings-storage.ts'
 
 function temporarySettings(t: test.TestContext): { dir: string; file: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'aiso-settings-v5-'))
+  const dir = mkdtempSync(join(tmpdir(), 'aiso-settings-v9-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   return { dir, file: join(dir, 'settings.json') }
 }
@@ -33,10 +33,12 @@ const realOps: SettingsFileOps = {
   writeExclusive: (path, contents) => writeFileSync(path, contents, { encoding: 'utf8', flag: 'wx' })
 }
 
-test('new install starts with schema 5 and provider-specific programming disabled', (t) => {
+test('new install starts with schema 10 and provider-specific programming disabled', (t) => {
   const { file } = temporarySettings(t)
   const result = loadSettingsFile(file)
-  assert.equal(result.settings.schemaVersion, 5)
+  assert.equal(result.settings.schemaVersion, 10)
+  assert.equal(result.settings.myDbStoragePath, '')
+  assert.equal(result.settings.myDbDailyReportCheckHours, 6)
   assert.equal(result.settings.activeLlmProvider, 'ollama')
   assert.equal(result.settings.model, DEFAULT_SETTINGS.model)
   assert.deepEqual(result.settings.agentToolPolicy.ollama, DEFAULT_ENABLED_AGENT_TOOL_IDS)
@@ -70,7 +72,7 @@ for (const marker of ['none', 'version', 'schema'] as const) {
 
     const result = loadSettingsFile(file)
     assert.equal(result.recovery.kind, 'migrated')
-    assert.equal(result.settings.schemaVersion, 5)
+    assert.equal(result.settings.schemaVersion, 10)
     assert.equal(result.settings.activeLlmProvider, 'ollama')
     assert.equal(result.settings.model, 'legacy-model')
     assert.equal(result.settings.ollamaHost, 'http://127.0.0.1:22434')
@@ -94,7 +96,7 @@ test('v4 migration adds independent safe tool policies without changing provider
 
   const result = loadSettingsFile(file)
   assert.equal(result.recovery.kind, 'migrated')
-  assert.equal(result.settings.schemaVersion, 5)
+  assert.equal(result.settings.schemaVersion, 10)
   assert.equal(result.settings.activeLlmProvider, 'nvidia')
   assert.equal(result.settings.nvidiaModel, 'model/migrated')
   assert.deepEqual(result.settings.agentToolPolicy.ollama, DEFAULT_ENABLED_AGENT_TOOL_IDS)
@@ -127,6 +129,102 @@ test('legacy migration never trusts a tool policy field that did not belong to t
     assert.equal(result.settings.agentToolPolicy.ollama.includes(toolId), false)
     assert.equal(result.settings.agentToolPolicy.nvidia.includes(toolId), false)
   }
+})
+
+test('v5 migration preserves policy choices and enables saved ToDo read and calendar registration', (t) => {
+  const { file } = temporarySettings(t)
+  const v5 = {
+    ...DEFAULT_SETTINGS,
+    schemaVersion: 5,
+    agentToolPolicy: {
+      ollama: ['list_dir'],
+      nvidia: ['read_file']
+    }
+  }
+  writeFileSync(file, JSON.stringify(v5))
+
+  const result = loadSettingsFile(file)
+
+  assert.equal(result.recovery.kind, 'migrated')
+  assert.equal(result.settings.schemaVersion, 10)
+  assert.deepEqual(result.settings.agentToolPolicy.ollama, ['list_calendar_events', 'create_calendar_event', 'manage_calendar_event', 'list_mydb_library', 'list_mydb_history', 'list_mydb_trash', 'restore_mydb_trash_node', 'list_dir'])
+  assert.deepEqual(result.settings.agentToolPolicy.nvidia, ['list_calendar_events', 'create_calendar_event', 'manage_calendar_event', 'list_mydb_library', 'list_mydb_history', 'list_mydb_trash', 'restore_mydb_trash_node', 'read_file'])
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), result.settings)
+})
+
+test('v6 migration keeps the saved ToDo reader and adds central calendar registration', (t) => {
+  const { file } = temporarySettings(t)
+  writeFileSync(file, JSON.stringify({
+    ...DEFAULT_SETTINGS,
+    schemaVersion: 6,
+    agentToolPolicy: {
+      ollama: ['list_saved_todos', 'list_dir'],
+      nvidia: ['list_saved_todos', 'read_file']
+    }
+  }))
+
+  const result = loadSettingsFile(file)
+
+  assert.equal(result.recovery.kind, 'migrated')
+  assert.equal(result.settings.schemaVersion, 10)
+  assert.deepEqual(result.settings.agentToolPolicy.ollama, ['list_calendar_events', 'create_calendar_event', 'manage_calendar_event', 'list_mydb_library', 'list_mydb_history', 'list_mydb_trash', 'restore_mydb_trash_node', 'list_dir'])
+  assert.deepEqual(result.settings.agentToolPolicy.nvidia, ['list_calendar_events', 'create_calendar_event', 'manage_calendar_event', 'list_mydb_library', 'list_mydb_history', 'list_mydb_trash', 'restore_mydb_trash_node', 'read_file'])
+})
+
+test('v7 migration retires the Agent change-history tool while preserving other choices', (t) => {
+  const { file } = temporarySettings(t)
+  writeFileSync(file, JSON.stringify({
+    ...DEFAULT_SETTINGS,
+    schemaVersion: 7,
+    agentToolPolicy: {
+      ollama: ['list_change_history', 'list_dir'],
+      nvidia: ['list_change_history', 'read_file']
+    }
+  }))
+
+  const result = loadSettingsFile(file)
+
+  assert.equal(result.recovery.kind, 'migrated')
+  assert.equal(result.settings.schemaVersion, 10)
+  assert.deepEqual(result.settings.agentToolPolicy.ollama, ['list_dir'])
+  assert.deepEqual(result.settings.agentToolPolicy.nvidia, ['read_file'])
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), result.settings)
+})
+
+test('v8 migration adds the independent My DB storage and report preferences', (t) => {
+  const { file } = temporarySettings(t)
+  const v8 = { ...DEFAULT_SETTINGS, schemaVersion: 8 } as Record<string, unknown>
+  delete v8.myDbStoragePath
+  delete v8.myDbDailyReportCheckHours
+  writeFileSync(file, JSON.stringify(v8))
+
+  const result = loadSettingsFile(file)
+
+  assert.equal(result.recovery.kind, 'migrated')
+  assert.equal(result.settings.schemaVersion, 10)
+  assert.equal(result.settings.myDbStoragePath, '')
+  assert.equal(result.settings.myDbDailyReportCheckHours, 6)
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), result.settings)
+})
+
+test('My DB storage preference is persisted through a normal settings patch', () => {
+  const result = applySettingsPatch(DEFAULT_SETTINGS, {
+    myDbStoragePath: 'D:\\Personal Library\\My DB',
+    myDbDailyReportCheckHours: 12
+  })
+  assert.equal(result.myDbStoragePath, 'D:\\Personal Library\\My DB')
+  assert.equal(result.myDbDailyReportCheckHours, 12)
+})
+
+test('My DB report check interval accepts only whole hours from 1 through 24', () => {
+  assert.throws(
+    () => applySettingsPatch(DEFAULT_SETTINGS, { myDbDailyReportCheckHours: 0 }),
+    /1~24/
+  )
+  assert.throws(
+    () => applySettingsPatch(DEFAULT_SETTINGS, { myDbDailyReportCheckHours: 1.5 }),
+    /1~24/
+  )
 })
 
 test('future schema is quarantined and never overwritten', (t) => {
@@ -167,7 +265,7 @@ test('failed atomic migration keeps the complete v3 source and blocks writes', (
   assert.equal(readFileSync(file, 'utf8'), original)
 })
 
-test('failed atomic save preserves the previous v5 file', (t) => {
+test('failed atomic save preserves the previous v9 file', (t) => {
   const { file } = temporarySettings(t)
   const previous = JSON.stringify(DEFAULT_SETTINGS)
   writeFileSync(file, previous)
@@ -186,7 +284,7 @@ test('renderer patches cannot smuggle credentials into normal settings', () => {
   )
 })
 
-test('a schema 5 file with an unknown plaintext credential field is quarantined', (t) => {
+test('a schema 9 file with an unknown plaintext credential field is quarantined', (t) => {
   const { dir, file } = temporarySettings(t)
   writeFileSync(file, JSON.stringify({ ...DEFAULT_SETTINGS, nvidiaApiKey: 'unexpected-secret' }))
   const result = loadSettingsFile(file)

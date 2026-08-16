@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { loadSettings } from './settings'
 import { backendInfo, backendToken } from './backend'
 import { canonicalizeNvidiaBinding } from '../shared/nvidia'
+import { discordTokenPath, hasUsableDiscordToken } from './discord-token-path'
+import { listComfyModelProfiles } from './comfy-models'
 
 /**
  * 디스코드 봇(MVP-1: 기본 채팅) — Electron 메인 측 배선.
@@ -14,7 +16,7 @@ import { canonicalizeNvidiaBinding } from '../shared/nvidia'
  * 사이드카 메모리에만 상주한다(env·디스크에 재기록하지 않음).
  */
 function tokenFile(): string {
-  return join(app.getPath('userData'), 'discord.token.enc')
+  return discordTokenPath(app.getPath('userData'), app.isPackaged)
 }
 
 /** 봇 토큰을 암호화 저장. 빈 값이면 파일을 지운다. */
@@ -52,7 +54,7 @@ function loadDiscordToken(): string {
 }
 
 export function hasDiscordToken(): boolean {
-  return existsSync(tokenFile())
+  return hasUsableDiscordToken(loadDiscordToken())
 }
 
 /** 공장초기화용 — 암호화 봇 토큰과 동적 상태(state.json)·예약(schedules.json)을 모두 삭제한다.
@@ -99,7 +101,10 @@ export async function disableDiscordConfig(): Promise<DiscordApplyResult> {
       model: s.model,
       context_length: s.contextLength,
       keep_alive: s.keepAlive,
-      ollama_host: s.ollamaHost
+      ollama_host: s.ollamaHost,
+      comfy_base_url: '',
+      comfy_profiles: [],
+      allow_attachment_images: false
     })
     return response.ok
       ? { ok: true }
@@ -116,6 +121,7 @@ export async function applyDiscordConfig(
   const info = backendInfo()
   if (info.state !== 'ready' || !info.port) return { ok: false, detail: '백엔드가 아직 준비되지 않았습니다.' }
   const s = loadSettings()
+  const comfyProfiles = listComfyModelProfiles().profiles
   let providerConfig: Record<string, unknown>
   if (s.discordLlmProvider === 'nvidia') {
     const binding = canonicalizeNvidiaBinding({
@@ -149,6 +155,13 @@ export async function applyDiscordConfig(
     }
   }
   const token = loadDiscordToken()
+  if (s.discordEnabled && !hasUsableDiscordToken(token)) {
+    return {
+      ok: false,
+      detail:
+        '현재 실행 환경에서 사용할 수 있는 Discord 봇 토큰이 없습니다. 봇 토큰을 다시 입력한 뒤 연결/적용을 눌러 주세요.'
+    }
+  }
   // 소유자·채널·허용목록은 봇이 런타임에 자동 판별/관리한다. 동적 상태는 이 폴더에 영속.
   const dataDir = join(app.getPath('userData'), 'discord')
   try {
@@ -164,7 +177,11 @@ export async function applyDiscordConfig(
       ...providerConfig,
       context_length: s.contextLength,
       keep_alive: s.keepAlive,
-      ollama_host: s.ollamaHost
+      ollama_host: s.ollamaHost,
+      comfy_base_url: s.comfyBaseUrl,
+      comfy_profiles: comfyProfiles,
+      allow_attachment_images: s.discordLlmProvider === 'ollama' &&
+        s.model.toLocaleLowerCase('en-US').includes('gemma4')
     })
     if (!r.ok) return { ok: false, detail: `사이드카 오류 HTTP ${r.status}` }
     return { ok: true }

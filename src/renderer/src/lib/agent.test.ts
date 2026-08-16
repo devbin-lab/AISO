@@ -74,6 +74,30 @@ describe('streamAgent ComfyUI model-selection payload', () => {
     expect(body.comfy_selection_mode).toBe('manual')
     expect(body.selected_comfy_model_id).toBe(profile.id)
     expect(body.comfy_profiles).toEqual([profile])
+    expect(body.image_context_verified).toBe(false)
+  })
+
+  it('forwards the verified image context flag independently of model prose', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamResponse())
+    vi.stubGlobal('fetch', fetchMock)
+
+    await streamAgent(
+      8123,
+      DEFAULT_SETTINGS,
+      '',
+      [{ role: 'user', content: 'make the previous image brighter' }],
+      'session-image-context-0001',
+      'assistant-turn-image-context-0001',
+      'read',
+      [],
+      vi.fn(),
+      undefined,
+      undefined,
+      true
+    )
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
+    expect(body.image_context_verified).toBe(true)
   })
 
   it('does not send a manual selection ID in automatic mode', async () => {
@@ -97,6 +121,26 @@ describe('streamAgent ComfyUI model-selection payload', () => {
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
     expect(body.comfy_selection_mode).toBe('auto')
     expect(body).not.toHaveProperty('selected_comfy_model_id')
+  })
+
+  it('serializes an attached file as an opaque ID instead of its display metadata', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamResponse())
+    vi.stubGlobal('fetch', fetchMock)
+
+    await streamAgent(
+      8123,
+      DEFAULT_SETTINGS,
+      '',
+      [{
+        role: 'user', content: 'read this',
+        attachments: [{ id: '123e4567-e89b-42d3-a456-426614174000', name: 'private.pptx', kind: 'file', fileCount: 1, size: 3, mediaType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' }]
+      }],
+      'session-attachment-0001', 'assistant-turn-attachment-0001', 'read', [], vi.fn()
+    )
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { messages: Array<Record<string, unknown>> }
+    expect(body.messages[0]?.attachments).toEqual(['123e4567-e89b-42d3-a456-426614174000'])
+    expect(JSON.stringify(body)).not.toContain('private.pptx')
   })
 
   it('sends only the active Ollama tool policy and derives optional local capabilities from it', async () => {

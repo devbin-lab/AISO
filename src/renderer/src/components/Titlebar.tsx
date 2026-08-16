@@ -35,10 +35,6 @@ function Titlebar({ backend, health, provider, convToggle }: Props): React.JSX.E
   return (
     <header className="titlebar">
       <div className="titlebar__left">
-        <div className="titlebar__brand">
-          <span className="titlebar__mark" />
-          Aiso
-        </div>
         {convToggle && (
           <button
             className="iconbtn titlebar__convtoggle"

@@ -1,15 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AppSettings, ReasoningEffort } from '../../../shared/settings'
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
-import type { ConversationMeta } from '../../../shared/conversation'
 import { streamChat, type ChatPayloadMessage } from '../lib/chat'
 import { newConversationId, titleFromText } from '../lib/conversations'
 import { modelInstalled } from '../lib/ollama'
 import { ChatIcon, SearchIcon, GlobeIcon } from '../components/icons'
 import { TOOL_LABEL } from '../../../shared/agent'
 import Markdown from '../components/Markdown'
-import ConversationList from '../components/ConversationList'
+import type { ConversationRequest } from '../components/Sidebar'
 import Dropdown, { type DropdownOption } from '../components/Dropdown'
+import AttachmentPicker from '../components/AttachmentPicker'
+import type { AttachmentRef } from '../../../shared/attachments'
 
 const EFFORT_OPTIONS: DropdownOption[] = [
   { value: 'low', label: '낮음', hint: '빠름' },
@@ -31,6 +32,7 @@ const finalizeTools = (tools: ToolAct[] | undefined, to: 'stopped' | 'error'): T
   tools?.map((t) => (t.status === 'running' ? { ...t, status: to } : t))
 
 interface ChatMsg {
+  attachments?: AttachmentRef[]
   role: 'user' | 'assistant'
   content: string
   thinking?: string
@@ -59,12 +61,21 @@ interface Props {
   backend: BackendInfo
   health: HealthInfo | null
   onSaveSettings: (patch: Partial<AppSettings>) => Promise<boolean>
-  convCollapsed: boolean
+  conversationRequest?: ConversationRequest | null
+  onConversationActive?: (id: string | null) => void
 }
 
-function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: Props): React.JSX.Element {
+function ChatView({
+  settings,
+  backend,
+  health,
+  onSaveSettings,
+  conversationRequest,
+  onConversationActive = () => {}
+}: Props): React.JSX.Element {
   const [messages, setMessages] = useState<ChatMsg[]>([])
   const [input, setInput] = useState('')
+  const [attachments, setAttachments] = useState<AttachmentRef[]>([])
   const [streaming, setStreaming] = useState(false)
   const [note, setNote] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -74,13 +85,7 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
   // ── 대화방 ──
   const [convId, setConvId] = useState<string | null>(null)
   const [convTitle, setConvTitle] = useState('새 대화')
-  const [convList, setConvList] = useState<ConversationMeta[]>([])
   const convIdRef = useRef<string | null>(null) // send() 클로저에서 최신 id 참조
-
-  const refreshConvs = (): void => {
-    window.api.conversations.list('chat').then(setConvList).catch(() => {})
-  }
-  useEffect(() => refreshConvs(), [])
 
   // 스트리밍이 끝나면(메시지 확정 시) 활성 대화를 저장 — 목록/제목/시각 갱신
   useEffect(() => {
@@ -88,19 +93,30 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
     if (!id || streaming || messages.length === 0) return
     window.api.conversations
       .save({ id, kind: 'chat', title: convTitle, data: messages })
-      .then(refreshConvs)
+      .then(() => window.dispatchEvent(new Event('aiso:conversations-changed')))
       .catch(() => {})
   }, [messages, streaming, convTitle])
 
-  const newConv = (): void => {
+  const newConv = (announce = true): void => {
     if (streaming) return
     convIdRef.current = null
     setConvId(null)
     setConvTitle('새 대화')
     setMessages([])
     setNote(null)
+    if (announce) onConversationActive(null)
   }
-  const selectConv = async (id: string): Promise<void> => {
+  useEffect(() => {
+    const onRenamed = (event: Event): void => {
+      const detail = (event as CustomEvent<{ id?: unknown; title?: unknown }>).detail
+      if (detail?.id === convIdRef.current && typeof detail.title === 'string') {
+        setConvTitle(detail.title)
+      }
+    }
+    window.addEventListener('aiso:conversation-renamed', onRenamed)
+    return () => window.removeEventListener('aiso:conversation-renamed', onRenamed)
+  }, [])
+  const selectConv = async (id: string, announce = true): Promise<void> => {
     if (streaming || id === convId) return
     const c = await window.api.conversations.get(id)
     if (!c) return
@@ -109,22 +125,15 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
     setConvTitle(c.title)
     setMessages((c.data as ChatMsg[]) ?? [])
     setNote(null)
+    if (announce) onConversationActive(id)
   }
-  const renameConv = async (id: string, title: string): Promise<void> => {
-    const c = await window.api.conversations.get(id)
-    if (!c) return
-    await window.api.conversations.save({ id, kind: 'chat', title, data: c.data })
-    if (convIdRef.current === id) setConvTitle(title)
-    refreshConvs()
-  }
-  const pinConv = (id: string, pinned: boolean): void => {
-    window.api.conversations.setPinned(id, pinned).then(refreshConvs).catch(() => {})
-  }
-  const deleteConv = async (id: string): Promise<void> => {
-    await window.api.conversations.remove(id)
-    if (convIdRef.current === id) newConv()
-    refreshConvs()
-  }
+  const consumedRequestRef = useRef(0)
+  useEffect(() => {
+    if (conversationRequest?.kind !== 'chat' || conversationRequest.nonce === consumedRequestRef.current) return
+    consumedRequestRef.current = conversationRequest.nonce
+    if (conversationRequest.id) void selectConv(conversationRequest.id, false)
+    else newConv(false)
+  }, [conversationRequest])
 
   // 새 청크마다 하단으로 스크롤
   useEffect(() => {
@@ -159,23 +168,26 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
       convIdRef.current = id
       setConvId(id)
       setConvTitle(titleFromText(text))
+      onConversationActive(id)
     }
     setInput('')
     if (taRef.current) taRef.current.style.height = 'auto'
 
+    const pendingAttachments = attachments
     const history: ChatPayloadMessage[] = [
       // 오류 메시지, 그리고 내용이 빈 어시스턴트 턴(조기 중지·리셋 후 중단 등)은 요청 히스토리에서 제외
       ...messages
         .filter((m) => !m.error && !m.incomplete && (m.role === 'user' || m.content.trim() !== ''))
-        .map((m) => ({ role: m.role, content: m.content })),
-      { role: 'user' as const, content: text }
+        .map((m) => ({ role: m.role, content: m.content, attachments: m.attachments })),
+      { role: 'user' as const, content: text, attachments: pendingAttachments }
     ]
     setMessages((prev) => [
       ...prev,
-      { role: 'user', content: text },
+      { role: 'user', content: text, attachments: pendingAttachments },
       { role: 'assistant', content: '', streaming: true }
     ])
     setStreaming(true)
+    setAttachments([])
     setNote(null)
     const ac = new AbortController()
     abortRef.current = ac
@@ -320,17 +332,6 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
 
   return (
     <div className="convshell">
-      {!convCollapsed && (
-        <ConversationList
-          items={convList}
-          activeId={convId}
-          onSelect={selectConv}
-          onNew={newConv}
-          onRename={renameConv}
-          onPin={pinConv}
-          onDelete={deleteConv}
-        />
-      )}
       <div className="view view--chat">
         <header className="view__head">
           <h1>채팅</h1>
@@ -409,7 +410,12 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
                   )}
                 </>
               ) : (
-                <div className="msg__bubble">{m.content}</div>
+                <div className="msg__bubble">
+                  {m.content}
+                  {m.attachments && m.attachments.length > 0 && (
+                    <div className="msg__attachments">첨부: {m.attachments.map((item) => item.name).join(', ')}</div>
+                  )}
+                </div>
               )}
             </div>
           ))
@@ -420,6 +426,7 @@ function ChatView({ settings, backend, health, onSaveSettings, convCollapsed }: 
       {notice && <div className={`notice notice--${notice.kind}`}>{notice.text}</div>}
 
       <div className="composer">
+        <AttachmentPicker value={attachments} onChange={setAttachments} disabled={!backendReady || streaming} />
         <textarea
           ref={taRef}
           className="input composer__ta"

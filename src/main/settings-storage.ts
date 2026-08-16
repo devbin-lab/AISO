@@ -16,7 +16,9 @@ import {
 import { canonicalizeNvidiaNimEndpoint } from '../shared/nvidia.ts'
 import {
   canonicalizeAgentToolPolicy,
-  createDefaultAgentToolPolicy
+  createDefaultAgentToolPolicy,
+  addSavedTodoToolToPolicy,
+  removeRetiredAgentTools
 } from '../shared/tool-policy.ts'
 
 export interface SettingsFileOps {
@@ -67,6 +69,8 @@ export const APP_SETTING_KEYS = new Set<keyof AppSettings>([
   'autoLaunch',
   'comfyBaseUrl',
   'comfyInstallPath',
+  'myDbStoragePath',
+  'myDbDailyReportCheckHours',
   'comfyModelSelectionMode'
 ])
 
@@ -125,7 +129,7 @@ function agentToolPolicyValue(raw: Record<string, unknown>): AppSettings['agentT
   return value === undefined ? createDefaultAgentToolPolicy() : canonicalizeAgentToolPolicy(value)
 }
 
-/** Convert a validated v3/v4/v5 record into the single v5 settings contract. */
+/** Convert a validated v3-v9 record into the single v9 settings contract. */
 export function normalizeSettingsRecord(
   rawValue: unknown,
   legacy: boolean,
@@ -160,7 +164,7 @@ export function normalizeSettingsRecord(
   }
 
   return {
-    schemaVersion: 5,
+    schemaVersion: 10,
     activeLlmProvider,
     model: textValue(raw, 'model', DEFAULT_SETTINGS.model),
     ollamaHost: textValue(raw, 'ollamaHost', DEFAULT_SETTINGS.ollamaHost),
@@ -190,6 +194,14 @@ export function normalizeSettingsRecord(
     autoLaunch: boolValue(raw, 'autoLaunch', DEFAULT_SETTINGS.autoLaunch),
     comfyBaseUrl: textValue(raw, 'comfyBaseUrl', DEFAULT_SETTINGS.comfyBaseUrl),
     comfyInstallPath: textValue(raw, 'comfyInstallPath', DEFAULT_SETTINGS.comfyInstallPath),
+    myDbStoragePath: textValue(raw, 'myDbStoragePath', DEFAULT_SETTINGS.myDbStoragePath).trim(),
+    myDbDailyReportCheckHours: (() => {
+      const hours = numberValue(raw, 'myDbDailyReportCheckHours', DEFAULT_SETTINGS.myDbDailyReportCheckHours)
+      if (!Number.isInteger(hours) || hours < 1 || hours > 24) {
+        throw new Error('myDbDailyReportCheckHours는 1~24 사이의 정수여야 합니다.')
+      }
+      return hours
+    })(),
     comfyModelSelectionMode: enumValue(raw, 'comfyModelSelectionMode', ['auto', 'manual'] as const, DEFAULT_SETTINGS.comfyModelSelectionMode)
   }
 }
@@ -201,10 +213,10 @@ export function applySettingsPatch(current: AppSettings, patchValue: unknown): A
       throw new Error(`허용되지 않은 설정 항목입니다: ${key}`)
     }
   }
-  if (patch.schemaVersion !== undefined && patch.schemaVersion !== 5) {
+  if (patch.schemaVersion !== undefined && patch.schemaVersion !== 10) {
     throw new Error('설정 스키마 버전은 변경할 수 없습니다.')
   }
-  return normalizeSettingsRecord({ ...current, ...patch, schemaVersion: 5 }, false)
+  return normalizeSettingsRecord({ ...current, ...patch, schemaVersion: 10 }, false)
 }
 
 export function atomicWriteSettings(
@@ -269,7 +281,7 @@ export function loadSettingsFile(
     const obj = record(raw)
     const schema = obj.schemaVersion
     const legacyVersion = obj.version
-    if (typeof schema === 'number' && schema > 5) {
+    if (typeof schema === 'number' && schema > 10) {
       const result = quarantine(file, 'future', ops)
       return {
         settings: freshDefaults(),
@@ -288,10 +300,22 @@ export function loadSettingsFile(
       schema === undefined && (legacyVersion === undefined || legacyVersion === '0.3.1')
     )
     const previousSchema = schema === 4
-    if (!legacy && !previousSchema && schema !== 5) throw new Error('지원하지 않는 설정 스키마입니다.')
+    const todoToolSchema = schema === 5
+    const calendarToolSchema = schema === 6
+    const retiredChangeHistorySchema = schema === 7
+    const myDbStorageSchema = schema === 8
+    const myDbAgentToolSchema = schema === 9
+    if (!legacy && !previousSchema && !todoToolSchema && !calendarToolSchema && !retiredChangeHistorySchema && !myDbStorageSchema && !myDbAgentToolSchema && schema !== 10) throw new Error('지원하지 않는 설정 스키마입니다.')
 
-    const settings = normalizeSettingsRecord(obj, legacy, legacy || previousSchema)
-    if (!legacy && !previousSchema) return { settings, recovery: none, writeBlocked: false }
+    const normalizedSource = retiredChangeHistorySchema
+      ? { ...obj, agentToolPolicy: removeRetiredAgentTools(obj.agentToolPolicy) }
+      : obj
+    let settings = normalizeSettingsRecord(normalizedSource, legacy, legacy || previousSchema)
+    if (todoToolSchema || calendarToolSchema || myDbAgentToolSchema) settings = {
+      ...settings,
+      agentToolPolicy: addSavedTodoToolToPolicy(settings.agentToolPolicy)
+    }
+    if (!legacy && !previousSchema && !todoToolSchema && !calendarToolSchema && !retiredChangeHistorySchema && !myDbStorageSchema && !myDbAgentToolSchema) return { settings, recovery: none, writeBlocked: false }
 
     try {
       atomicWriteSettings(file, settings, ops)
@@ -299,7 +323,7 @@ export function loadSettingsFile(
         settings,
         recovery: {
           kind: 'migrated',
-          message: `${legacy ? 'v3' : 'v4'} 설정을 v5 형식으로 안전하게 변환했습니다.`
+          message: `${legacy ? 'v3' : previousSchema ? 'v4' : todoToolSchema ? 'v5' : calendarToolSchema ? 'v6' : retiredChangeHistorySchema ? 'v7' : myDbStorageSchema ? 'v8' : 'v9'} 설정을 v10 형식으로 안전하게 변환했습니다.`
         },
         writeBlocked: false
       }
@@ -308,7 +332,7 @@ export function loadSettingsFile(
         settings,
         recovery: {
           kind: 'blocked',
-          message: `${legacy ? 'v3' : 'v4'} 설정 변환본을 원자적으로 저장하지 못했습니다. 원본을 보존하고 설정 저장을 차단했습니다.`
+          message: `${legacy ? 'v3' : previousSchema ? 'v4' : todoToolSchema ? 'v5' : calendarToolSchema ? 'v6' : retiredChangeHistorySchema ? 'v7' : myDbStorageSchema ? 'v8' : 'v9'} 설정 변환본을 원자적으로 저장하지 못했습니다. 원본을 보존하고 설정 저장을 차단했습니다.`
         },
         writeBlocked: true
       }

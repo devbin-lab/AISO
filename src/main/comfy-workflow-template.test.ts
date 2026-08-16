@@ -145,6 +145,7 @@ test('직접 연결 모델도 검증된 사용자 워크플로가 있을 때만 
     workflowTemplateId: template.id,
     workflowTemplate: template,
     defaults: getComfyGenerationDefaults('custom'),
+    qualityMode: 'base',
     agentEnabled: false,
     priority: 0,
     createdAt: 1,

@@ -8,7 +8,7 @@
 
 파일과 문서를 내 PC에서 다루고, 필요한 작업은 실행 결과로 확인합니다.
 
-[![version](https://img.shields.io/badge/version-0.4.0--rc.4-F16522?style=flat-square)](docs/V0.4.0_RC4_RELEASE_NOTES.md)
+[![version](https://img.shields.io/badge/version-1.0.0-F16522?style=flat-square)](docs/V1.0.0_RELEASE_NOTES.md)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-47848F?style=flat-square&logo=electron&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama-local%20LLM-black?style=flat-square&logo=ollama)
@@ -21,7 +21,7 @@
 
 ## 프로젝트 소개
 
-Aiso는 로컬 Ollama를 기본으로 사용하고 NVIDIA Build API 또는 사용자가 운영하는 NIM 엔드포인트를 선택적으로 연결할 수 있는 Windows 데스크톱 에이전트입니다. 대화만 제공하는 챗봇을 넘어, 사용자가 지정한 작업 폴더를 탐색하고 파일을 정리하며 문서를 분석하고 반복 작업을 자동화합니다. v0.4.0-rc.4는 기존 v0.3.1 기능을 유지하면서 NVIDIA 연결과 공급자별 도구 정책을 검증하는 사전 후보 버전입니다.
+Aiso는 로컬 Ollama를 기본으로 사용하고 NVIDIA Build API 또는 사용자가 운영하는 NIM 엔드포인트를 선택적으로 연결할 수 있는 Windows 데스크톱 에이전트입니다. 대화만 제공하는 챗봇을 넘어, 사용자가 지정한 작업 폴더를 탐색하고 파일을 정리하며 문서를 분석하고 반복 작업을 자동화합니다. v1.0.0은 도구 라우팅, 문서·캘린더 작업, 독립형 My DB 라이브러리와 이미지 생성을 하나의 안정 릴리스로 정리한 첫 정식 버전입니다.
 
 이 프로젝트는 개인용 GPU에서 구동할 수 있는 약 8B~20B급 모델의 장점과 한계를 함께 고려해 설계했습니다. 프론티어 AI를 대체하거나 작은 모델에 대규모 프로그램의 설계와 수정을 맡기는 것이 목표가 아닙니다. 가벼운 작업을 로컬에서 처리해 클라우드 AI 사용량과 외부 정보 노출을 줄이고, 파일 시스템·검색·실행·웹 브라우저 같은 결정적 도구로 결과를 확인하는 보조 에이전트를 지향합니다.
 
@@ -44,7 +44,7 @@ Aiso는 로컬 Ollama를 기본으로 사용하고 NVIDIA Build API 또는 사�
 
 기본 LLM 공급자는 Ollama입니다. 기본값인 `http://localhost:11434`를 사용하면 프롬프트와 임베딩 처리가 이 PC에서 이루어집니다. 원격 Ollama 주소를 설정하면 대화 내용과 임베딩할 문서 조각이 해당 서버로 전송될 수 있습니다. 대화 기록·설정·사용량은 사용자 PC에, RAG 색인은 각 작업 폴더의 `.aiso/rag`에 저장됩니다.
 
-NVIDIA 공급자는 사용자가 명시적으로 선택하는 실험 기능입니다. NVIDIA Build를 선택하면 요청이 NVIDIA가 호스팅하는 API로 전송되고, 사용자 NIM을 선택하면 해당 NIM 운영자에게 전송됩니다. Agent·웹 조사·Discord처럼 도구 결과나 로컬 데이터가 추가될 수 있는 경로는 모델의 최신 도구 지원 확인과 기능별 전송 승인 또는 동의를 요구합니다.
+NVIDIA 공급자는 사용자가 명시적으로 선택하는 선택 기능입니다. NVIDIA Build를 선택하면 요청이 NVIDIA가 호스팅하는 API로 전송되고, 사용자 NIM을 선택하면 해당 NIM 운영자에게 전송됩니다. Agent·웹 조사·Discord처럼 도구 결과나 로컬 데이터가 추가될 수 있는 경로는 모델의 최신 도구 지원 확인과 기능별 전송 범위를 설정에서 확인할 수 있습니다.
 
 채팅 웹 조사, 모델 다운로드, 업데이트 확인, Discord 연동처럼 외부 연결이 필요한 기능은 해당 기능을 사용할 때만 네트워크를 사용합니다. 채팅 웹 조사는 설정에서 비활성화할 수 있고 Discord 연동은 기본적으로 꺼져 있습니다. Discord 예약 브리핑은 실행 시점에 별도로 공개 웹을 조사할 수 있습니다.
 
@@ -84,7 +84,7 @@ Aiso는 범용 코딩 에이전트를 목표로 하지 않습니다. 프로젝�
 - 설정 화면에서 NVIDIA 데이터 전송 범위를 상시 고지하고, Main 프로세스가 저장된 NVIDIA 도구 정책으로 실행 범위를 고정
 - 웹 조사와 Discord NVIDIA 경로에 별도 일회성 실행 허가 적용
 
-NVIDIA 연동은 NIM을 설치하거나 배포하지 않습니다. 사용자는 NVIDIA Build API 키를 직접 준비하거나, NVIDIA 공식 요구사항에 따라 별도의 NIM 서버를 운영해야 합니다. 사용자 NIM의 TLS·접근 제어·방화벽·로그·모델 라이선스는 해당 서버 운영자의 책임입니다. 자세한 최신 변경과 이용 범위는 [v0.4.0-rc.4 릴리스 노트](docs/V0.4.0_RC4_RELEASE_NOTES.md)를 참고하십시오.
+NVIDIA 연동은 NIM을 설치하거나 배포하지 않습니다. 사용자는 NVIDIA Build API 키를 직접 준비하거나, NVIDIA 공식 요구사항에 따라 별도의 NIM 서버를 운영해야 합니다. 사용자 NIM의 TLS·접근 제어·방화벽·로그·모델 라이선스는 해당 서버 운영자의 책임입니다. 자세한 최신 변경과 이용 범위는 [v1.0.0 릴리스 노트](docs/V1.0.0_RELEASE_NOTES.md)를 참고하십시오.
 
 ### 작업 폴더 에이전트
 
@@ -250,12 +250,10 @@ Aiso는 이미지 모델과 워크플로를 배포·판매·추천하거나 해�
 
 ## 다운로드
 
-현재 저장소 버전은 **v0.4.0-rc.4**(2026-08-03)이며, NVIDIA 호환과 공급자별 도구 정책을 검증하기 위한 Release Candidate입니다. 현재 안정 배포 버전은 [v0.3.1](https://github.com/devbin-lab/AISO/releases/tag/v0.3.1)(2026-07-22)입니다.
+현재 저장소 버전은 **v1.0.0**(2026-08-17)입니다. Windows 설치 파일은 검증된 로컬 빌드 후 `dist/Aiso-1.0.0-Setup.exe`로 생성됩니다.
 
-- Windows 설치 파일: [Aiso-0.3.1-Setup.exe](https://github.com/devbin-lab/AISO/releases/download/v0.3.1/Aiso-0.3.1-Setup.exe)
+- Windows 설치 파일: `dist/Aiso-1.0.0-Setup.exe`
 - 전체 릴리스: [GitHub Releases](https://github.com/devbin-lab/AISO/releases)
-
-RC 설치 파일은 QA 완료 후 별도 사전 릴리스로 게시합니다. 게시 전에는 안정판 다운로드 링크가 v0.3.1을 유지합니다.
 
 ### 시스템 요구사항
 
@@ -423,7 +421,7 @@ python/.venv/Scripts/python.exe -m pytest python/tests -q
 
 - Windows 10/11만 공식 대상으로 합니다.
 - Ollama는 별도로 설치해야 하며 모델 파일은 설치 프로그램에 포함하지 않습니다.
-- NVIDIA 연동은 v0.4.0-rc.4의 실험 기능입니다. 모델별 스트리밍·도구 호출 지원과 실제 Build·사용자 NIM 상호운용성은 대상 환경에서 확인해야 합니다.
+- NVIDIA 연동의 모델별 스트리밍·도구 호출 지원과 실제 Build·사용자 NIM 상호운용성은 대상 환경에서 확인해야 합니다.
 - Aiso는 NIM 컨테이너를 설치·구성·업데이트하지 않습니다. 사용자 NIM의 운영 보안과 지원 가능 하드웨어·소프트웨어 조합은 운영자가 NVIDIA 최신 문서에서 확인해야 합니다.
 - NVIDIA Build의 모델 목록, 사용량 한도, 비용, 데이터 처리 조건과 이용 권한은 NVIDIA 및 모델 제공자의 최신 조건에 따라 변경될 수 있습니다.
 - 결과 품질과 도구 호출 안정성은 선택한 모델에 영향을 받습니다.
@@ -477,7 +475,18 @@ Aiso는 공개 웹 페이지를 읽을 때 내부 네트워크 주소와 로컬 
 
 ## 버전 변천사
 
-아래 기록은 저장소의 현재 Release Candidate와 Git 릴리스 태그를 기준으로 정리했습니다.
+아래 기록은 저장소의 정식 릴리스와 Git 태그를 기준으로 정리했습니다.
+
+### v1.0.0 — 2026-08-17
+
+첫 정식 릴리스입니다.
+
+- 요청별 최소 도구 노출·단계형 실행·도구 호출 검증으로 로컬 및 NVIDIA 모델의 호출 정확성 강화
+- PDF·PPTX 등 첨부 문서 분석, 근거 기반 일정·캘린더 저장과 전용 캘린더 화면 추가
+- 독립 저장소 기반 My DB: 코어·파일 그래프, 파일 가져오기, 이력·복구·일일 변경 보고와 선택적 Agent 조회 연동
+- ComfyUI 이미지 생성의 모델 프로필, 프롬프트 정책, 고품질 보정과 실패 복구 흐름 개선
+- 프로젝트·대화 사이드바, 반응형 설정·캘린더·My DB 화면과 Windows NAS 아이콘 정비
+- 자세한 범위와 검증은 [v1.0.0 릴리스 노트](docs/V1.0.0_RELEASE_NOTES.md)에 기록
 
 ### v0.4.0-rc.4 — 2026-08-03
 

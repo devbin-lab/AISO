@@ -55,6 +55,8 @@ def test_discord_research_discards_reset_content(monkeypatch):
     """브리핑 생성이 reset_content(폐기 신호) 이후 누적분을 버려, 폐기 초안이 자율 전송되지 않는다."""
     async def fake_research(**_kw):
         for ev in [
+            {"type": "tool_result", "name": "web_search", "ok": True, "output": "검색 결과"},
+            {"type": "tool_result", "name": "web_fetch", "ok": True, "output": "[https://openai.com/news/] 공식 원문"},
             {"type": "content", "text": "먼저 검색하겠습니다"},   # 서두
             {"type": "content", "text": "임시 초안(스니펫만 봄)"},  # 폐기 대상
             {"type": "reset_content"},                              # ← 여기서 위 누적 폐기
@@ -70,6 +72,40 @@ def test_discord_research_discards_reset_content(monkeypatch):
         )
     )
     assert out == "실제 최종 브리핑"  # 서두·폐기초안이 섞이지 않음
+
+
+def test_discord_research_refuses_memory_only_answer(monkeypatch):
+    async def fake_research(**_kw):
+        yield {"type": "content", "text": "검색하지 않은 오래된 답변"}
+        yield {"type": "done"}
+
+    monkeypatch.setattr(main, "run_research_chat", fake_research)
+    out = asyncio.run(
+        main._discord_research(
+            [{"role": "user", "content": "최신 뉴스"}],
+            model="m", context_length=4096, keep_alive="30m", host="h",
+        )
+    )
+    assert "오래된 답변" not in out
+    assert "근거" in out and "답하지 않았습니다" in out
+
+
+def test_openai_research_requires_an_official_fetched_page(monkeypatch):
+    async def fake_research(**_kw):
+        yield {"type": "tool_result", "name": "web_search", "ok": True, "output": "검색 결과"}
+        yield {"type": "tool_result", "name": "web_fetch", "ok": True, "output": "[https://example.com/news] 비공식 기사"}
+        yield {"type": "content", "text": "비공식 답변"}
+        yield {"type": "done"}
+
+    monkeypatch.setattr(main, "run_research_chat", fake_research)
+    out = asyncio.run(
+        main._discord_research(
+            [{"role": "user", "content": "최신 OpenAI 뉴스"}],
+            model="m", context_length=4096, keep_alive="30m", host="h",
+        )
+    )
+    assert "비공식 답변" not in out
+    assert "OpenAI 공식 원문" in out
 
 
 def test_discord_step_retries_on_tool_parse_error(monkeypatch):

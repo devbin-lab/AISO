@@ -8,11 +8,29 @@ from __future__ import annotations
 
 import re
 import zlib
+import zipfile
+from dataclasses import dataclass
+from html import escape
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 
 class ExtractError(Exception):
     """문서 추출 실패 — 사유는 모델에게 그대로 전달된다."""
+
+
+@dataclass(frozen=True)
+class ExtractSegment:
+    """A small, addressable piece of a document.
+
+    ``text`` remains the original extracted wording.  The evidence-ToDo flow
+    stores this wording verbatim rather than asking a model to recreate it,
+    which makes every generated task traceable to a page, slide, paragraph or
+    spreadsheet row.
+    """
+
+    location: str
+    text: str
 
 
 # ---------- PDF ----------
@@ -37,6 +55,26 @@ def extract_pdf(target: Path) -> str:
         except Exception:  # noqa: BLE001
             parts.append("")
     return "\n\n".join(parts)
+
+
+def extract_pdf_segments(target: Path) -> list[ExtractSegment]:
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        raise ExtractError("PDF 읽기 라이브러리(pypdf)가 설치되어 있지 않습니다.")
+    try:
+        reader = PdfReader(str(target))
+    except Exception as error:  # noqa: BLE001
+        raise ExtractError(f"PDF를 열 수 없습니다: {error}") from error
+    segments: list[ExtractSegment] = []
+    for index, page in enumerate(reader.pages[:60], 1):
+        try:
+            text = (page.extract_text() or "").strip()
+        except Exception:  # noqa: BLE001
+            text = ""
+        if text:
+            segments.append(ExtractSegment(location=f"{index}쪽", text=text))
+    return segments
 
 
 # ---------- 엑셀 (XLSX/XLSM) ----------
@@ -66,6 +104,30 @@ def extract_xlsx(target: Path) -> str:
     return "\n".join(out)
 
 
+def extract_xlsx_segments(target: Path) -> list[ExtractSegment]:
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        raise ExtractError("엑셀 읽기 라이브러리(openpyxl)가 설치되어 있지 않습니다.")
+    try:
+        workbook = load_workbook(str(target), read_only=True, data_only=True)
+    except Exception as error:  # noqa: BLE001
+        raise ExtractError(f"엑셀을 열 수 없습니다: {error}") from error
+    segments: list[ExtractSegment] = []
+    try:
+        for worksheet in workbook.worksheets:
+            for row_number, row in enumerate(worksheet.iter_rows(values_only=True), 1):
+                if row_number > 500:
+                    break
+                values = [("" if value is None else str(value)).strip() for value in row]
+                text = "\t".join(values).strip()
+                if text:
+                    segments.append(ExtractSegment(location=f"{worksheet.title} · {row_number}행", text=text))
+    finally:
+        workbook.close()
+    return segments
+
+
 def extract_xls(target: Path) -> str:
     raise ExtractError("구형 .xls 형식은 지원하지 않습니다. 엑셀에서 .xlsx로 저장 후 다시 시도하세요.")
 
@@ -86,6 +148,150 @@ def extract_docx(target: Path) -> str:
         for row in tbl.rows:
             parts.append("\t".join(c.text for c in row.cells))
     return "\n".join(parts)
+
+
+def extract_docx_segments(target: Path) -> list[ExtractSegment]:
+    try:
+        import docx
+    except ImportError:
+        raise ExtractError("워드 읽기 라이브러리(python-docx)가 설치되어 있지 않습니다.")
+    try:
+        document = docx.Document(str(target))
+    except Exception as error:  # noqa: BLE001
+        raise ExtractError(f"워드 문서를 열 수 없습니다: {error}") from error
+    segments: list[ExtractSegment] = []
+    for index, paragraph in enumerate(document.paragraphs, 1):
+        text = paragraph.text.strip()
+        if text:
+            segments.append(ExtractSegment(location=f"문단 {index}", text=text))
+    for table_index, table in enumerate(document.tables, 1):
+        for row_index, row in enumerate(table.rows, 1):
+            text = "\t".join(cell.text.strip() for cell in row.cells).strip()
+            if text:
+                segments.append(ExtractSegment(location=f"표 {table_index} · {row_index}행", text=text))
+    return segments
+
+
+# ---------- PowerPoint (PPTX/PPTM) ----------
+
+_PPT_DRAWING_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+
+
+def _ppt_slide_number(name: str) -> int:
+    match = re.search(r"slide(\d+)\.xml$", name, re.IGNORECASE)
+    return int(match.group(1)) if match else 0
+
+
+def extract_pptx(target: Path) -> str:
+    """Extract visible text from OOXML PowerPoint slides without LibreOffice.
+
+    A PPTX is a ZIP package.  Reading the slide XML directly keeps the Agent's
+    document-reading path available in the portable Python runtime and gives
+    each source location a stable slide number for later citation.
+    """
+    try:
+        with zipfile.ZipFile(target) as archive:
+            slide_names = sorted(
+                (
+                    name for name in archive.namelist()
+                    if re.fullmatch(r"ppt/slides/slide\d+\.xml", name, re.IGNORECASE)
+                ),
+                key=_ppt_slide_number,
+            )
+            if not slide_names:
+                raise ExtractError("PowerPoint 슬라이드 XML을 찾을 수 없습니다.")
+
+            slides: list[str] = []
+            paragraph_tag = f"{{{_PPT_DRAWING_NS}}}p"
+            text_tag = f"{{{_PPT_DRAWING_NS}}}t"
+            for slide_name in slide_names:
+                try:
+                    root = ET.fromstring(archive.read(slide_name))
+                except (ET.ParseError, KeyError) as error:
+                    raise ExtractError(f"PowerPoint 슬라이드를 읽을 수 없습니다: {slide_name}") from error
+
+                paragraphs: list[str] = []
+                for paragraph in root.iter(paragraph_tag):
+                    text = "".join((node.text or "") for node in paragraph.iter(text_tag)).strip()
+                    if text:
+                        paragraphs.append(text)
+                number = _ppt_slide_number(slide_name)
+                body = "\n".join(paragraphs) or "[텍스트가 없는 슬라이드]"
+                slides.append(f"# 슬라이드 {number}\n{body}")
+    except zipfile.BadZipFile as error:
+        raise ExtractError("PPTX/PPTM 파일이 올바른 Office 문서 형식이 아닙니다.") from error
+    except OSError as error:
+        raise ExtractError(f"PowerPoint 파일을 열 수 없습니다: {error}") from error
+    return "\n\n".join(slides)
+
+
+def extract_pptx_segments(target: Path) -> list[ExtractSegment]:
+    """Return every slide as a separately addressable evidence segment."""
+    try:
+        with zipfile.ZipFile(target) as archive:
+            slide_names = sorted(
+                (name for name in archive.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", name, re.IGNORECASE)),
+                key=_ppt_slide_number,
+            )
+            if not slide_names:
+                raise ExtractError("PowerPoint 슬라이드 XML을 찾을 수 없습니다.")
+            segments: list[ExtractSegment] = []
+            paragraph_tag = f"{{{_PPT_DRAWING_NS}}}p"
+            text_tag = f"{{{_PPT_DRAWING_NS}}}t"
+            for slide_name in slide_names:
+                try:
+                    root = ET.fromstring(archive.read(slide_name))
+                except (ET.ParseError, KeyError) as error:
+                    raise ExtractError(f"PowerPoint 슬라이드를 읽을 수 없습니다: {slide_name}") from error
+                paragraphs = []
+                for paragraph in root.iter(paragraph_tag):
+                    text = "".join((node.text or "") for node in paragraph.iter(text_tag)).strip()
+                    if text:
+                        paragraphs.append(text)
+                if paragraphs:
+                    segments.append(ExtractSegment(location=f"슬라이드 {_ppt_slide_number(slide_name)}", text="\n".join(paragraphs)))
+            return segments
+    except zipfile.BadZipFile as error:
+        raise ExtractError("PPTX/PPTM 파일이 올바른 Office 문서 형식이 아닙니다.") from error
+    except OSError as error:
+        raise ExtractError(f"PowerPoint 파일을 열 수 없습니다: {error}") from error
+
+
+def pptx_to_html(target: Path, destination: Path) -> None:
+    """Create a safe, text-first HTML rendition for offline review.
+
+    This is intentionally a faithful *reading* rendition rather than a layout
+    clone.  It gives the Agent and the user a durable HTML fallback when a
+    PowerPoint renderer is unavailable, while preserving slide boundaries.
+    """
+    extracted = extract_pptx(target)
+    sections: list[str] = []
+    current_title = ""
+    current_lines: list[str] = []
+    for line in extracted.splitlines():
+        if line.startswith("# 슬라이드 "):
+            if current_title:
+                sections.append(
+                    f"<section><h2>{escape(current_title)}</h2><pre>{escape(chr(10).join(current_lines))}</pre></section>"
+                )
+            current_title = line[2:]
+            current_lines = []
+        else:
+            current_lines.append(line)
+    if current_title:
+        sections.append(
+            f"<section><h2>{escape(current_title)}</h2><pre>{escape(chr(10).join(current_lines))}</pre></section>"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        "<!doctype html><html lang=\"ko\"><meta charset=\"utf-8\">"
+        f"<title>{escape(target.name)} - 텍스트 보기</title>"
+        "<style>body{font-family:system-ui,sans-serif;max-width:960px;margin:40px auto;padding:0 20px;}"
+        "section{border-bottom:1px solid #ddd;padding:0 0 24px;margin:0 0 24px;}"
+        "pre{white-space:pre-wrap;font:inherit;line-height:1.6;}</style>"
+        f"<h1>{escape(target.name)}</h1><p>PowerPoint 텍스트 추출 보기</p>{''.join(sections)}</html>",
+        encoding="utf-8",
+    )
 
 
 # ---------- 한글 HWPX (ZIP + XML) ----------
@@ -204,6 +410,8 @@ def extract_hwp(target: Path) -> str:
 # 확장자 → (추출기, 라벨)
 EXTRACTORS = {
     ".pdf": (extract_pdf, "PDF"),
+    ".pptx": (extract_pptx, "PowerPoint"),
+    ".pptm": (extract_pptx, "PowerPoint"),
     ".xlsx": (extract_xlsx, "엑셀"),
     ".xlsm": (extract_xlsx, "엑셀"),
     ".xls": (extract_xls, "엑셀"),
@@ -211,3 +419,43 @@ EXTRACTORS = {
     ".hwp": (extract_hwp, "한글 HWP"),
     ".hwpx": (extract_hwpx, "한글 HWPX"),
 }
+
+
+def extract_document_segments(target: Path) -> list[ExtractSegment]:
+    """Extract document text with a stable location for each source chunk.
+
+    This complements ``EXTRACTORS`` instead of replacing it: the existing
+    ``read_file`` tool keeps its compact string response, while creator tools
+    get page/slide/paragraph-level evidence that can be shown to a user.
+    """
+    ext = target.suffix.lower()
+    if ext == ".pdf":
+        return extract_pdf_segments(target)
+    if ext in {".pptx", ".pptm"}:
+        return extract_pptx_segments(target)
+    if ext in {".docx"}:
+        return extract_docx_segments(target)
+    if ext in {".xlsx", ".xlsm"}:
+        return extract_xlsx_segments(target)
+    if ext in {".txt", ".md", ".csv"}:
+        try:
+            lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as error:
+            raise ExtractError(f"텍스트 파일을 열 수 없습니다: {error}") from error
+        segments: list[ExtractSegment] = []
+        for start in range(0, min(len(lines), 3000), 80):
+            chunk = "\n".join(lines[start:start + 80]).strip()
+            if chunk:
+                end = min(start + 80, len(lines))
+                segments.append(ExtractSegment(location=f"{start + 1}~{end}줄", text=chunk))
+        return segments
+    if ext in EXTRACTORS:
+        extractor, _label = EXTRACTORS[ext]
+        try:
+            text = (extractor(target) or "").strip()
+        except ExtractError:
+            raise
+        except Exception as error:  # noqa: BLE001
+            raise ExtractError(f"문서 텍스트를 추출하지 못했습니다: {error}") from error
+        return [ExtractSegment(location="본문", text=text)] if text else []
+    raise ExtractError(f"지원하지 않는 문서 형식입니다: {target.suffix or '확장자 없음'}")

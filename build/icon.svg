@@ -1,0 +1,11 @@
+<svg width="512" height="512" viewBox="0 0 180 180" xmlns="http://www.w3.org/2000/svg">
+  <!-- Final Aiso NAS mark: two internal storage rails and orange status lights. -->
+  <rect width="180" height="180" rx="34" fill="#ffffff"/>
+  <g transform="translate(-19.8 -19.8) scale(1.22)">
+    <path d="M38 58 91 31l51 28v66l-51 28-53-28z" fill="#ffffff" stroke="#20242b" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M38 58 91 87l51-28M91 87v66" fill="none" stroke="#20242b" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M105 71v49M121 63v49" fill="none" stroke="#20242b" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="112" cy="126" r="4" fill="#f16522"/>
+    <circle cx="128" cy="117" r="4" fill="#f16522"/>
+  </g>
+</svg>
