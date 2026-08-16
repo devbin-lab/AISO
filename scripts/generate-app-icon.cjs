@@ -12,6 +12,7 @@ const root = join(__dirname, '..')
 const input = join(root, 'build', 'icon.svg')
 const pngOutput = join(root, 'build', 'icon.png')
 const icoOutput = join(root, 'build', 'icon.ico')
+const readmeLogoOutput = join(root, 'docs', 'logo.png')
 const edge = [
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe'
@@ -34,6 +35,11 @@ const png = existsSync(pngOutput) ? readFileSync(pngOutput) : Buffer.alloc(0)
 if (png.length < 100 || png.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') {
   throw new Error('SVG 아이콘을 PNG로 렌더링하지 못했습니다.')
 }
+
+// README must use the same current visual identity as the app, installer, and
+// taskbar.  Keeping this generated copy here prevents the documentation logo
+// from silently remaining on an older design.
+writeFileSync(readmeLogoOutput, png)
 
 // A PNG-backed ICO is supported by modern Windows and preserves the sharp
 // 512px source when Windows scales the app, taskbar, installer, or shortcut.
