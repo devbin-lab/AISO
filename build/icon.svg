@@ -1,11 +1,26 @@
-<svg width="512" height="512" viewBox="0 0 180 180" xmlns="http://www.w3.org/2000/svg">
-  <!-- Final Aiso NAS mark: two internal storage rails and orange status lights. -->
-  <rect width="180" height="180" rx="34" fill="#ffffff"/>
-  <g transform="translate(-19.8 -19.8) scale(1.22)">
-    <path d="M38 58 91 31l51 28v66l-51 28-53-28z" fill="#ffffff" stroke="#20242b" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M38 58 91 87l51-28M91 87v66" fill="none" stroke="#20242b" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M105 71v49M121 63v49" fill="none" stroke="#20242b" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
-    <circle cx="112" cy="126" r="4" fill="#f16522"/>
-    <circle cx="128" cy="117" r="4" fill="#f16522"/>
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Aiso 1.0 NAS: a compact two-bay local storage appliance. -->
+  <rect width="512" height="512" rx="72" fill="#ffffff"/>
+  <rect x="14" y="14" width="484" height="484" rx="68" fill="none" stroke="#171a1f" stroke-width="4"/>
+
+  <!-- Status / power panel -->
+  <rect x="74" y="55" width="108" height="402" rx="20" fill="none" stroke="#171a1f" stroke-width="4"/>
+  <circle cx="128" cy="158" r="13" fill="#f16522"/>
+  <circle cx="128" cy="206" r="13" fill="#8b9098"/>
+  <circle cx="128" cy="393" r="36" fill="none" stroke="#f16522" stroke-width="7"/>
+  <path d="M128 369v32" fill="none" stroke="#f16522" stroke-width="7" stroke-linecap="round"/>
+
+  <!-- Two storage bays -->
+  <g fill="none" stroke="#171a1f" stroke-width="4">
+    <rect x="212" y="55" width="104" height="402" rx="20"/>
+    <rect x="354" y="55" width="104" height="402" rx="20"/>
+  </g>
+  <g fill="#90939a">
+    <rect x="239" y="96" width="50" height="14" rx="7"/>
+    <rect x="381" y="96" width="50" height="14" rx="7"/>
+  </g>
+  <g fill="#f16522">
+    <circle cx="264" cy="413" r="12"/>
+    <circle cx="406" cy="413" r="12"/>
   </g>
 </svg>

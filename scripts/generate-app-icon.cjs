@@ -41,18 +41,53 @@ if (png.length < 100 || png.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a
 // from silently remaining on an older design.
 writeFileSync(readmeLogoOutput, png)
 
-// A PNG-backed ICO is supported by modern Windows and preserves the sharp
-// 512px source when Windows scales the app, taskbar, installer, or shortcut.
-const header = Buffer.alloc(22)
-  header.writeUInt16LE(0, 0)
-  header.writeUInt16LE(1, 2)
-header.writeUInt16LE(1, 4)
-header.writeUInt8(0, 6)
-header.writeUInt8(0, 7)
-header.writeUInt8(0, 8)
-header.writeUInt8(0, 9)
-header.writeUInt16LE(1, 10)
-header.writeUInt16LE(32, 12)
-header.writeUInt32LE(png.length, 14)
-header.writeUInt32LE(22, 18)
-writeFileSync(icoOutput, Buffer.concat([header, png]))
+// Windows picks the closest image inside an ICO for a taskbar, shortcut, or
+// Explorer surface. A single 512px PNG makes the shell downscale fine strokes
+// too aggressively at 16-48px, so package the usual small sizes as well.
+const icoSizes = [16, 20, 24, 32, 40, 48, 64, 128, 256]
+const icoWorkDir = mkdtempSync(join(tmpdir(), 'aiso-icon-ico-'))
+let icoImages
+try {
+  icoImages = icoSizes.map((size) => {
+    const output = join(icoWorkDir, `icon-${size}.png`)
+    const source = pngOutput.replaceAll("'", "''")
+    const target = output.replaceAll("'", "''")
+    const resize = [
+      '$ErrorActionPreference = "Stop"',
+      'Add-Type -AssemblyName System.Drawing',
+      `$source = [System.Drawing.Image]::FromFile('${source}')`,
+      `$bitmap = New-Object System.Drawing.Bitmap(${size}, ${size})`,
+      '$graphics = [System.Drawing.Graphics]::FromImage($bitmap)',
+      '$graphics.Clear([System.Drawing.Color]::White)',
+      '$graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic',
+      '$graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality',
+      '$graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality',
+      `$graphics.DrawImage($source, 0, 0, ${size}, ${size})`,
+      `$bitmap.Save('${target}', [System.Drawing.Imaging.ImageFormat]::Png)`,
+      '$graphics.Dispose(); $bitmap.Dispose(); $source.Dispose()'
+    ].join('; ')
+    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', resize], { stdio: 'inherit' })
+    return { size, bytes: readFileSync(output) }
+  })
+} finally {
+  rmSync(icoWorkDir, { recursive: true, force: true, maxRetries: 3 })
+}
+
+const directory = Buffer.alloc(6 + (16 * icoImages.length))
+directory.writeUInt16LE(0, 0)
+directory.writeUInt16LE(1, 2)
+directory.writeUInt16LE(icoImages.length, 4)
+let offset = directory.length
+for (const [index, image] of icoImages.entries()) {
+  const entry = 6 + (index * 16)
+  directory.writeUInt8(image.size === 256 ? 0 : image.size, entry)
+  directory.writeUInt8(image.size === 256 ? 0 : image.size, entry + 1)
+  directory.writeUInt8(0, entry + 2)
+  directory.writeUInt8(0, entry + 3)
+  directory.writeUInt16LE(1, entry + 4)
+  directory.writeUInt16LE(32, entry + 6)
+  directory.writeUInt32LE(image.bytes.length, entry + 8)
+  directory.writeUInt32LE(offset, entry + 12)
+  offset += image.bytes.length
+}
+writeFileSync(icoOutput, Buffer.concat([directory, ...icoImages.map((image) => image.bytes)]))

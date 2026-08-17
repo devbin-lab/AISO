@@ -8,7 +8,7 @@
 
 개인 파일, 문서, 일정, 지식 라이브러리와 로컬 AI를 한 곳에서 다루고, 필요한 작업은 실제 도구 실행 결과로 확인합니다.
 
-[![version](https://img.shields.io/badge/version-1.0.0-F16522?style=flat-square)](docs/V1.0.0_RELEASE_NOTES.md)
+[![version](https://img.shields.io/badge/version-1.0.1-F16522?style=flat-square)](docs/V1.0.1_RELEASE_NOTES.md)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6?style=flat-square)
 ![desktop](https://img.shields.io/badge/desktop-Electron%2043-47848F?style=flat-square&logo=electron&logoColor=white)
 ![default%20LLM](https://img.shields.io/badge/default%20LLM-Ollama-black?style=flat-square&logo=ollama)
@@ -438,6 +438,12 @@ npm run dist:win
 - 이미지 생성 연결: ComfyUI
 
 ## 버전 변천사
+
+### v1.0.1 — 2026-08-17
+
+안정 업데이트 채널용 버전입니다. Windows 업데이트 비교에서 프리릴리스 표기로 인해 새 설치본이 감지되지 않던 문제를 피하기 위해 정식 SemVer `1.0.1`로 배포하며, 2베이 NAS 앱·작업표시줄 아이콘을 함께 갱신했습니다.
+
+자세한 변경 목록은 [v1.0.1 릴리스 노트](docs/V1.0.1_RELEASE_NOTES.md)에서 확인할 수 있습니다.
 
 ### v1.0.0 — 2026-08-17
 
