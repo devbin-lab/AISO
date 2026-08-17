@@ -24,7 +24,7 @@ const iconUrl = `file:///${input.replaceAll('\\', '/')}`
 const edgeProfile = mkdtempSync(join(tmpdir(), 'aiso-icon-edge-'))
 try {
   execFileSync(edge, [
-    '--headless', '--disable-gpu', '--hide-scrollbars', '--no-first-run', '--force-device-scale-factor=1',
+    '--headless', '--disable-gpu', '--hide-scrollbars', '--no-first-run', '--force-device-scale-factor=1', '--default-background-color=00000000',
     `--user-data-dir=${edgeProfile}`, '--window-size=512,512', `--screenshot=${pngOutput}`, iconUrl
   ], { stdio: 'inherit' })
 } finally {
@@ -56,9 +56,9 @@ try {
       '$ErrorActionPreference = "Stop"',
       'Add-Type -AssemblyName System.Drawing',
       `$source = [System.Drawing.Image]::FromFile('${source}')`,
-      `$bitmap = New-Object System.Drawing.Bitmap(${size}, ${size})`,
+      `$bitmap = New-Object System.Drawing.Bitmap(${size}, ${size}, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)`,
       '$graphics = [System.Drawing.Graphics]::FromImage($bitmap)',
-      '$graphics.Clear([System.Drawing.Color]::White)',
+      '$graphics.Clear([System.Drawing.Color]::Transparent)',
       '$graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic',
       '$graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality',
       '$graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality',
