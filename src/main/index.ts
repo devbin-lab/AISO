@@ -27,9 +27,11 @@ import {
 } from './backend'
 import { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
 import {
+  clearAttachmentStore,
   importDroppedAttachments,
   pickAttachmentFiles,
-  pickAttachmentFolder
+  pickAttachmentFolder,
+  sweepUnreferencedAttachments
 } from './attachments'
 import {
   closeMyDbStorage,
@@ -117,6 +119,7 @@ import {
   saveConversation,
   setConversationPinned,
   deleteConversation,
+  listReferencedAttachmentIds,
   listAgentProjects,
   createAgentProject,
   createAgentProjectConversation,
@@ -575,6 +578,37 @@ function createWindow(): void {
  * it before the first window is shown makes cold starts feel slower. Delay
  * this best-effort maintenance work until the UI is ready.
  */
+/**
+ * 참조되지 않은 첨부 폴더를 정리한다.
+ *
+ * 첨부는 지우는 코드가 없어 무한히 쌓였다 — 대화를 지워도, 공장초기화를 해도,
+ * 첨부 칩을 ×로 지워도 남는다. 실측(개발 PC): 23MB가 전부 어떤 대화에서도 참조되지
+ * 않는 고아였다.
+ *
+ * 참조 수집에 실패하면 스윕을 건너뛴다. 빈 집합으로 진행하면 저장소를 통째로 지운다.
+ */
+function deferUnreferencedAttachmentSweep(): void {
+  const runSweep = (): void => {
+    setTimeout(() => {
+      let live: ReadonlySet<string>
+      try {
+        live = listReferencedAttachmentIds()
+      } catch {
+        return // 참조를 못 읽으면 아무것도 지우지 않는다
+      }
+      void sweepUnreferencedAttachments(live).catch(() => undefined)
+    }, 0)
+  }
+
+  const win = mainWindow
+  if (win && !win.isDestroyed()) {
+    win.once('ready-to-show', runSweep)
+    return
+  }
+  runSweep()
+}
+
+
 function deferStaleComfyModelPartialCleanup(): void {
   const runCleanup = (): void => {
     setTimeout(() => {
@@ -1349,7 +1383,11 @@ app.whenReady().then(() => {
   ipcMain.handle('conv:save', (_e, c: ConversationSave) => saveConversation(c))
   ipcMain.handle('conv:pin', (_e, id: string, pinned: boolean) => setConversationPinned(id, pinned))
   ipcMain.handle('conv:rename', (_e, id: string, title: string) => renameConversation(id, title))
-  ipcMain.handle('conv:delete', (_e, id: string) => deleteConversation(id))
+  ipcMain.handle('conv:delete', (_e, id: string) => {
+    deleteConversation(id)
+    // 이 대화만 참조하던 첨부를 회수한다. best-effort — 실패해도 삭제는 이미 끝났다.
+    deferUnreferencedAttachmentSweep()
+  })
   ipcMain.handle('project:list', () => listAgentProjects())
   ipcMain.handle('project:create', (_e, title: string) => createAgentProject(title))
   ipcMain.handle('project:create-conversation', (_e, projectId: string, title?: string) =>
@@ -1369,6 +1407,9 @@ app.whenReady().then(() => {
     invalidateAllNvidiaCapabilities()
     resetSettings()
     clearAllConversations()
+    // "처음 설치 상태로 돌아갑니다"를 지키려면 첨부도 지워야 한다. 참조 스윕이 아니라
+    // 통째 삭제이며 유예 기간을 적용하지 않는다 — 초기화의 약속이 그렇다.
+    await clearAttachmentStore()
     clearBackendTodoWorkspaceRegistry()
     clearUsage()
     clearComfyModelRegistry() // Aiso 메타데이터만 삭제하며 ComfyUI의 실제 모델 파일은 보존한다.
@@ -1398,6 +1439,7 @@ app.whenReady().then(() => {
 
   createWindow()
   deferStaleComfyModelPartialCleanup()
+  deferUnreferencedAttachmentSweep()
   ensureTray() // 상주/자동실행 켜져 있으면 트레이 생성
   applyStartupSettings() // 로그인 자동 실행 등록 상태를 설정과 동기화
 

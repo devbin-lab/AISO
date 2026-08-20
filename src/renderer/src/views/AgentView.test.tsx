@@ -821,4 +821,20 @@ describe('AgentView NVIDIA capability gate', () => {
     // 새 사용자 발화는 도구 기록 뒤에 온다.
     expect(messages[messages.length - 1].role).toBe('user')
   })
+  it('keeps the preview iframe sandboxed against popups and top-level navigation', () => {
+    // /f/ 응답의 PREVIEW_CSP는 window.open을 막지 못한다 — CSP에 그 지시어가 없다
+    // (navigate-to는 스펙 폐기). 그 마지막 유출 채널을 닫는 것이 이 sandbox 속성이고,
+    // 값이 조용히 넓어지면 방어가 사라지므로 여기서 고정한다.
+    installApiStub(vi.fn().mockResolvedValue(null))
+    const { container } = render(
+      <AgentView {...commonProps} settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'ollama' }} />
+    )
+    const iframes = Array.from(container.querySelectorAll('iframe'))
+    for (const frame of iframes) {
+      const sandbox = frame.getAttribute('sandbox') ?? ''
+      expect(sandbox).not.toContain('allow-popups')
+      expect(sandbox).not.toContain('allow-top-navigation')
+      expect(sandbox).not.toContain('allow-modals')
+    }
+  })
 })
