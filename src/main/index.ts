@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, nativeTheme, dialog, Tray, Menu, nativeImage } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, nativeTheme, dialog, session, Tray, Menu, nativeImage } from 'electron'
 import { isAbsolute, join } from 'path'
 import { mkdirSync } from 'fs'
 import { pathToFileURL } from 'url'
@@ -25,6 +25,7 @@ import {
   clearBackendNvidiaDiscordGrants,
   clearBackendTodoWorkspaceRegistry
 } from './backend'
+import { buildRendererCsp } from './renderer-csp'
 import { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
 import {
   clearAttachmentStore,
@@ -565,6 +566,12 @@ function createWindow(): void {
   win.webContents.on('will-navigate', blockOffAppNav)
   win.webContents.on('will-redirect', blockOffAppNav)
 
+  // 렌더러 CSP — 세션 헤더로 붙인다. 사이드카 포트가 매 기동마다 달라지므로 정적 meta로는
+  // 127.0.0.1:* 와일드카드를 써야 하는데, 헤더면 실제 포트만 정확히 열 수 있다.
+  // (prod는 file:// 로드지만 Electron 43의 onHeadersReceived가 file:// 문서 요청에
+  //  실제로 발동하는 것을 측정으로 확인했다.)
+  applyRendererCsp()
+
   // dev: Vite dev 서버 URL / prod: 빌드된 html
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     win.loadURL(process.env['ELECTRON_RENDERER_URL'])
@@ -587,6 +594,45 @@ function createWindow(): void {
  *
  * 참조 수집에 실패하면 스윕을 건너뛴다. 빈 집합으로 진행하면 저장소를 통째로 지운다.
  */
+let rendererCspInstalled = false
+
+/** 현재 사이드카 포트를 반영해 렌더러 응답에 CSP 헤더를 붙인다. */
+function applyRendererCsp(): void {
+  if (rendererCspInstalled) return
+  rendererCspInstalled = true
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    // 렌더러 문서·자산에만 붙인다. 사이드카(/f/ 미리보기)는 자체 PREVIEW_CSP를 갖고 있고,
+    // 여기서 덮어쓰면 그 정책이 사라진다.
+    const url = String(details.url || '')
+    if (!url.startsWith('file://') && !isDevRendererUrl(url)) {
+      callback({})
+      return
+    }
+    const policy = buildRendererCsp({
+      sidecarPort: backendInfo().port,
+      isDev: is.dev,
+      devRendererUrl: process.env['ELECTRON_RENDERER_URL'] ?? null
+    })
+    const headers = { ...details.responseHeaders }
+    // 대소문자 변형으로 중복 헤더가 생기지 않도록 기존 값을 지우고 새로 넣는다.
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === 'content-security-policy') delete headers[key]
+    }
+    headers['Content-Security-Policy'] = [policy]
+    callback({ responseHeaders: headers })
+  })
+}
+
+function isDevRendererUrl(url: string): boolean {
+  const dev = process.env['ELECTRON_RENDERER_URL']
+  if (!dev) return false
+  try {
+    return new URL(url).origin === new URL(dev).origin
+  } catch {
+    return false
+  }
+}
+
 function deferUnreferencedAttachmentSweep(): void {
   const runSweep = (): void => {
     setTimeout(() => {

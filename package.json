@@ -21,7 +21,7 @@
     "test:gate5": "node --experimental-strip-types --test src/main/nvidia-agent-authorization.test.ts",
     "test:gate6": "node --experimental-strip-types --test src/main/nvidia-agent-data-approval.test.ts src/main/nvidia-runtime-demand.test.ts src/main/nvidia-grant-ttl.test.ts src/main/nvidia-discord-apply.test.ts",
     "test:mydb": "node --experimental-strip-types --test src/main/mydb.test.ts src/main/mydb-agent-bridge.test.ts",
-    "test:attachments": "node --experimental-strip-types --test src/main/attachment-gc.test.ts",
+    "test:attachments": "node --experimental-strip-types --test src/main/attachment-gc.test.ts src/main/renderer-csp.test.ts",
     "test:renderer": "vitest run --config vitest.config.ts",
     "test:python": "python\\.venv\\Scripts\\python.exe -m pytest python\\tests -q",
     "test": "npm run test:comfy-model-analysis && npm run test:gate2 && npm run test:gate3 && npm run test:gate4 && npm run test:gate5 && npm run test:gate6 && npm run test:mydb && npm run test:attachments && npm run test:renderer",
