@@ -25,6 +25,7 @@ MAX_GREP_FILES = 5000             # 스캔 파일 수 상한
 MAX_GREP_FILE_BYTES = 5 * 1024 * 1024  # 이보다 큰 파일은 스캔 제외
 MAX_MATCH_LINE_LEN = 300          # 매치 라인 표시 길이
 MAX_GLOB_RESULTS = 300            # glob 결과 파일 수 상한
+MAX_DELETE_DIR_SCAN = 20_000      # delete_dir 안내 문구용 파일 개수 세기 상한
 MAX_CODE_FILE_BYTES = 2 * 1024 * 1024
 MAX_HTML_SCAN_ENTRIES = 50_000
 MAX_HTML_SCAN_SECONDS = 2.0
@@ -908,9 +909,19 @@ def delete_dir(root: Path, path: str) -> str:
         raise ToolError(f"파일입니다. delete_file을 사용하세요: {path}")
     if not target.is_dir():
         raise ToolError(f"폴더가 없습니다: {path}")
-    n_files = sum(1 for p in target.rglob("*") if p.is_file())
+    # 개수는 안내 문구에만 쓰인다. 그것 때문에 거대한 폴더에서 트리 전체를 순회하는
+    # 것은 값이 맞지 않는다 — 상한까지만 세고 넘으면 '이상'으로 표시한다.
+    n_files = 0
+    capped = False
+    for entry in target.rglob("*"):
+        if entry.is_file():
+            n_files += 1
+            if n_files >= MAX_DELETE_DIR_SCAN:
+                capped = True
+                break
     how = _trash_or_remove(target, is_dir=True)
-    return f"{_rel(root, target)}/ 폴더를 {how} (하위 파일 {n_files}개 포함)."
+    counted = f"{n_files}개 이상" if capped else f"{n_files}개"
+    return f"{_rel(root, target)}/ 폴더를 {how} (하위 파일 {counted} 포함)."
 
 
 def move(root: Path, src: str, dst: str) -> str:

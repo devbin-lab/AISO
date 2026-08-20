@@ -16,6 +16,7 @@ REGISTRY에는 넣어 실행 디스패치에 쓴다.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -461,7 +462,16 @@ def get_builtin_tool_catalog() -> list[dict[str, Any]]:
 async def execute(spec: ToolSpec, root: Path, host: str, args: dict) -> tuple[str, str | None]:
     """툴을 성질(kind)에 맞게 실행하고 (결과문자열, 스크린샷|None)을 돌려준다."""
     if spec.kind is CallKind.FILE:
-        return run_tool(root, spec.name, args), None
+        # 파일 도구는 순수 동기 I/O다. 이벤트 루프에서 직접 돌리면 실행 시간 내내
+        # 루프가 멈춰 SSE 스트림·다른 요청·취소 신호가 전부 대기한다.
+        # 실측(파일 3000개/151MB): grep 452ms, glob 516ms, list_tree 304ms 정지.
+        # 실제 작업 폴더는 이보다 크므로 사용자에게는 앱이 멈춘 것으로 보인다.
+        #
+        # 취소 의미: to_thread는 취소되지 않으므로, 취소 시 코루틴은 즉시 풀리지만
+        # 파일 작업 자체는 끝까지 진행된다. 이건 하네스가 이미 전제한 상황이다 —
+        # agent_runner가 변경 도구의 dirty 표시를 '실행 전에' 찍는 이유가 정확히
+        # "취소·예외 종료에서도 워크스페이스와 RAG 색인을 맞추기" 위해서다.
+        return await asyncio.to_thread(run_tool, root, spec.name, args), None
     if spec.kind is CallKind.ASYNC_ROOT:
         res = await spec.handler(root, **args)  # type: ignore[misc]
         if spec.returns_screenshot:
