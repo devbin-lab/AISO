@@ -1553,6 +1553,21 @@ async def agent(req: AgentRequest):
             local_enabled_tools = list(normalize_enabled_tool_names(req.enabled_tools))
         except ToolError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        # 로컬(Ollama)도 '정확히 한 번' 실행 보장을 받는다. 예전에는 원장이 NVIDIA
+        # 블록 안에서만 만들어져서, 사용자 대부분이 쓰는 기본 경로에는 아예 없었다 —
+        # 파괴적 도구가 취소·재시도·크래시에서 중복 실행돼도 막을 것이 없었다.
+        #
+        # 키 3요소는 이미 전부 있다: 화면이 로컬 실행에도 session_id·assistant_turn_id를
+        # UUID로 보내고, _normalize_tool_calls가 툴콜 ID를 합성한다.
+        #
+        # NVIDIA와 달리 fail-closed로 만들지 않는다. NVIDIA는 선택 기능이라 원장이
+        # 없으면 503이 맞지만, 로컬은 제품의 기본 경로다. 원장 파일 하나 때문에 앱
+        # 전체가 멈추는 편이 더 나쁘다 — 보장을 얻지 못할 뿐 실행은 계속한다.
+        if AGENT_LEDGER_PATH and not _agent_ledger_startup_error and req.session_id and req.assistant_turn_id:
+            try:
+                ledger = AgentExecutionLedger(AGENT_LEDGER_PATH)
+            except (LedgerError, OSError):
+                ledger = None
     host = (
         _require_local_ollama_host(str(nvidia_execution_scope.get("ollamaHost") or DEFAULT_OLLAMA))
         if nvidia_execution_scope is not None and nvidia_execution_scope.get("ragEnabled")
