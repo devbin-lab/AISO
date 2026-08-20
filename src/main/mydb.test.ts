@@ -531,3 +531,79 @@ test('My DB clear removes only library-owned data and starts a fresh library', a
     ])
   }
 })
+
+// ── 보존 정책 — 무한 누적 차단 ─────────────────────────────────────────
+
+test('My DB keeps graph checkpoints bounded and drops the restore button for pruned ones', async () => {
+  // 구조 변경마다 전체 그래프 JSON을 저장하므로 정리가 없으면 라이브러리가 커질수록
+  // 저장량이 2차로 증가한다. 복원 버튼은 히스토리 목록에서만 노출되므로 한도 밖
+  // 시점은 UI에서 도달할 수 없다 — 지워도 잃는 기능이 없다.
+  const library = await temporaryLibrary()
+  try {
+    const core = library.store.createCore('보존 테스트')
+    for (let index = 0; index < 240; index += 1) {
+      await library.store.renameNode(core.id, `이름 ${index}`)
+    }
+
+    const db = new DatabaseSync(join(library.root, 'library.sqlite3'), { readOnly: true })
+    try {
+      const total = db.prepare('SELECT COUNT(*) AS n FROM mydb_graph_checkpoints').get() as { n: number }
+      assert.ok(total.n <= 200, `체크포인트가 한도를 넘었다: ${total.n}`)
+      assert.ok(total.n > 0, '전부 지워졌다 — 최신 시점은 남아야 한다')
+
+      // 잘려나간 시점을 가리키던 히스토리 행은 버튼이 사라져야 한다(id가 NULL).
+      const dangling = db.prepare(
+        `SELECT COUNT(*) AS n FROM mydb_history
+          WHERE graph_checkpoint_id IS NOT NULL
+            AND graph_checkpoint_id NOT IN (SELECT id FROM mydb_graph_checkpoints)`
+      ).get() as { n: number }
+      assert.equal(dangling.n, 0, '없는 시점을 가리키는 복원 버튼이 남았다')
+    } finally {
+      db.close()
+    }
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('My DB keeps every item first revision while bounding the rest', async () => {
+  // "수정되면 어떻게 수정되었는지 기록이 남아서 복구할 수 있으면 좋겠다"가 요구사항이다.
+  // 초기본으로 되돌리기는 한도와 무관하게 언제나 보장돼야 한다.
+  const library = await temporaryLibrary()
+  try {
+    const sourceFile = join(library.source, 'note.md')
+    await writeFile(sourceFile, 'v0\n', 'utf8')
+    const imported = await library.store.importPaths([sourceFile])
+    const file = imported.createdNodes[0]!
+
+    for (let index = 1; index <= 40; index += 1) {
+      await writeFile(library.store.resolveItemPath(file.id), `v${index}\n`, 'utf8')
+      await library.store.fileHistory(file.id)   // 변경을 감지해 리비전을 남긴다
+    }
+
+    const db = new DatabaseSync(join(library.root, 'library.sqlite3'), { readOnly: true })
+    try {
+      const rows = db.prepare(
+        'SELECT sequence FROM mydb_revisions WHERE item_id = ? ORDER BY sequence'
+      ).all(file.id) as Array<{ sequence: number }>
+      assert.ok(rows.length <= 31, `리비전이 한도를 넘었다: ${rows.length}`)
+      assert.equal(rows[0]?.sequence, 1, '초기본이 사라졌다 — 처음 상태로 복구할 수 없다')
+
+      // 남은 리비전의 스냅샷 파일이 실제로 존재해야 한다(행만 남고 파일이 없으면
+      // 복구 버튼이 있는데 열 수 없다).
+      const kept = db.prepare(
+        'SELECT snapshot_relative_path FROM mydb_revisions WHERE item_id = ?'
+      ).all(file.id) as Array<{ snapshot_relative_path: string }>
+      for (const row of kept) {
+        assert.ok(
+          existsSync(join(library.root, row.snapshot_relative_path)),
+          `남은 리비전의 파일이 없다: ${row.snapshot_relative_path}`
+        )
+      }
+    } finally {
+      db.close()
+    }
+  } finally {
+    await library.dispose()
+  }
+})

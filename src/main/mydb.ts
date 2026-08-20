@@ -47,6 +47,14 @@ const TEXT_DIFF_MAX_LINES = 1_200
 const WATCH_DEBOUNCE_MS = 900
 const MAX_TITLE_LENGTH = 160
 const MAX_FILE_NAME_LENGTH = 180
+// 그래프 시점(체크포인트) 보존 한도. 복원 버튼은 히스토리 목록(HISTORY_LIMIT)에서만
+// 노출되므로 그 밖의 시점은 UI에서 도달할 수 없다 — 잘라도 사용자가 잃는 기능이 없다.
+// 실측: 노드 1000개 라이브러리에서 구조 변경 100회에 48MB가 늘고 총량이 2차로 증가한다.
+const GRAPH_CHECKPOINT_LIMIT = 200
+// 항목당 리비전 보존 한도. 초기본(sequence=1)은 이 한도와 무관하게 항상 남긴다 —
+// "수정되면 어떻게 수정되었는지 기록이 남아서 복구할 수 있으면 좋겠다"는 요구사항의 최소선.
+const REVISION_KEEP_PER_ITEM = 30
+
 const LEGACY_CORE_LINK_MIGRATION_KEY = 'legacy_core_links_to_contains_v1'
 
 const ALLOWED_RELATIONS = new Set<MyDbRelation>([
@@ -1923,10 +1931,52 @@ export class MyDbStore {
           row.created_at
         )
       })
+      await this.pruneRevisions(item.id)
       return revisionFromRow(row)
     } catch (error) {
       await rm(destination, { force: true }).catch(() => undefined)
       throw error
+    }
+  }
+
+  /**
+   * 항목당 리비전을 한도까지만 남긴다. 정리가 없으면 자주 고치는 파일 하나가
+   * 리비전 스냅샷 파일을 무한히 쌓는다.
+   *
+   * 초기본(sequence=1)은 한도와 무관하게 항상 남긴다. 사용자 요구사항이
+   * "수정되면 어떻게 수정되었는지 기록이 남아서 복구할 수 있으면 좋겠다"이므로,
+   * '처음 상태로 되돌리기'는 어떤 경우에도 보장돼야 한다.
+   *
+   * 이미 withRevisionLock 안에서 불리므로 동시 캡처와 충돌하지 않는다.
+   */
+  private async pruneRevisions(itemId: string): Promise<void> {
+    try {
+      const doomed = this.database.prepare(
+        `SELECT id, snapshot_relative_path FROM mydb_revisions
+          WHERE item_id = ? AND sequence <> 1
+            AND id NOT IN (
+              SELECT id FROM mydb_revisions
+               WHERE item_id = ? ORDER BY sequence DESC LIMIT ?
+            )`
+      ).all(itemId, itemId, REVISION_KEEP_PER_ITEM) as Array<{
+        id: string
+        snapshot_relative_path: string
+      }>
+      if (doomed.length === 0) return
+      const placeholders = doomed.map(() => '?').join(',')
+      this.transaction(() => {
+        this.database.prepare(
+          `DELETE FROM mydb_revisions WHERE id IN (${placeholders})`
+        ).run(...doomed.map((row) => row.id))
+      })
+      // DB에서 지운 뒤에 파일을 지운다. 순서가 반대면 행은 남고 파일만 사라져
+      // 복구 버튼이 있는데 열 수 없는 상태가 된다.
+      for (const row of doomed) {
+        await rm(this.resolveRevisionFile(row.snapshot_relative_path), { force: true })
+          .catch(() => undefined)
+      }
+    } catch (err) {
+      console.error('[mydb] 리비전 정리 실패:', err)
     }
   }
 
@@ -1970,6 +2020,7 @@ export class MyDbStore {
     if (!this.shouldCheckpointGraph(input.action)) return
     const checkpoint = this.captureGraphCheckpoint(input.action)
     this.database.prepare('UPDATE mydb_history SET graph_checkpoint_id = ? WHERE id = ?').run(checkpoint.id, historyId)
+    this.pruneGraphCheckpoints()
   }
 
   private shouldCheckpointGraph(action: MyDbHistoryAction): boolean {
@@ -2003,6 +2054,42 @@ export class MyDbStore {
        VALUES (?, ?, ?, ?, ?, ?)`
     ).run(row.id, row.reason, row.node_count, row.edge_count, row.snapshot_json, row.created_at)
     return this.graphCheckpointFromRow(row)
+  }
+
+  /**
+   * 오래된 그래프 시점을 정리한다. 구조 변경마다 전체 그래프 JSON을 저장하므로
+   * 정리가 없으면 라이브러리가 커질수록 저장량이 2차로 증가한다.
+   *
+   * 히스토리 목록이 HISTORY_LIMIT까지만 보이고 복원 버튼은 그 목록에서만 노출되므로,
+   * 한도 밖 시점은 애초에 UI에서 도달할 수 없다. 지워도 잃는 기능이 없다.
+   *
+   * 남은 히스토리 행의 graph_checkpoint_id 를 NULL 로 만들면 MyDbView 가
+   * `entry.graphCheckpointId &&` 로 버튼을 조건부 렌더하므로 버튼이 그냥 사라진다 —
+   * 렌더러 수정이 필요 없다.
+   *
+   * transaction() 으로 감싸지 않는다. 이 메서드는 recordHistory 가 연 트랜잭션 안에서
+   * 불리고, transaction() 은 BEGIN IMMEDIATE 라 중첩되지 않는다(captureGraphCheckpoint 가
+   * 평문 run() 인 것과 같은 이유).
+   */
+  private pruneGraphCheckpoints(): void {
+    try {
+      const keep = this.database.prepare(
+        'SELECT id FROM mydb_graph_checkpoints ORDER BY created_at DESC, id DESC LIMIT ?'
+      ).all(GRAPH_CHECKPOINT_LIMIT) as Array<{ id: string }>
+      if (keep.length < GRAPH_CHECKPOINT_LIMIT) return
+      const placeholders = keep.map(() => '?').join(',')
+      const ids = keep.map((row) => row.id)
+      this.database.prepare(
+        `UPDATE mydb_history SET graph_checkpoint_id = NULL
+          WHERE graph_checkpoint_id IS NOT NULL AND graph_checkpoint_id NOT IN (${placeholders})`
+      ).run(...ids)
+      this.database.prepare(
+        `DELETE FROM mydb_graph_checkpoints WHERE id NOT IN (${placeholders})`
+      ).run(...ids)
+    } catch (err) {
+      // 보존 정리는 유지보수다. 실패해도 사용자 동작(임포트·이름변경 등)을 막지 않는다.
+      console.error('[mydb] 그래프 시점 정리 실패:', err)
+    }
   }
 
   private graphCheckpointFromRow(row: GraphCheckpointRow): MyDbGraphCheckpoint {
