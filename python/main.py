@@ -698,6 +698,11 @@ class ChatMessage(BaseModel):
     # Opaque IDs only.  The Electron main process stages user selections in an
     # app-managed store; the renderer never sends an arbitrary local path.
     attachments: list[str] = Field(default_factory=list, max_length=16)
+    # 런 경계를 넘겨 '계속해줘'가 이어갈 수 있게 하는 도구 실행 기록.
+    # assistant의 tool_calls와 그 결과인 tool 메시지는 반드시 짝을 이뤄야 한다 —
+    # 짝이 맞지 않으면 OpenAI 호환 공급자가 요청 전체를 거부한다.
+    tool_calls: list[dict[str, Any]] | None = Field(default=None, max_length=16)
+    tool_call_id: str | None = Field(default=None, max_length=512)
 
 
 class ChatRequest(BaseModel):
@@ -874,6 +879,60 @@ async def _prepare_model(host: str, model: str) -> LlmModelRuntime:
     return await create_runtime("ollama", host).prepare_model(model)
 
 
+def _paired_tool_history(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+    """대화를 모델용 dict로 바꾸면서 도구 호출/결과의 짝을 강제한다.
+
+    OpenAI 호환 공급자는 tool_calls를 낸 assistant 메시지마다 각 호출 ID에 대응하는
+    tool 메시지를 요구하고, 짝이 맞지 않으면 요청 전체를 400으로 거부한다. Ollama는
+    관대하지만 짝이 깨진 이력은 모델을 혼란시킨다.
+
+    화면이 보내는 이력을 그대로 믿지 않는다 — 중단된 실행에서는 결과가 없는 호출이
+    남을 수 있다. 결과가 없는 호출은 assistant에서 떼어내고, 대응하는 호출이 없는
+    tool 메시지는 버린다. 남는 것은 항상 완전한 짝뿐이다.
+    """
+    prepared: list[dict[str, Any]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.role != "assistant" or not message.tool_calls:
+            if message.role == "tool":
+                index += 1  # 짝이 되는 호출 없이 떠 있는 결과 — 버린다
+                continue
+            prepared.append({"role": message.role, "content": message.content})
+            index += 1
+            continue
+
+        # 이 assistant 뒤에 연속으로 붙은 tool 결과를 모은다.
+        results: dict[str, str] = {}
+        scan = index + 1
+        while scan < len(messages) and messages[scan].role == "tool":
+            result_id = messages[scan].tool_call_id
+            if result_id:
+                results[result_id] = messages[scan].content
+            scan += 1
+
+        matched = [
+            call for call in message.tool_calls
+            if isinstance(call, dict) and str(call.get("id") or "") in results
+        ]
+        if matched:
+            prepared.append({
+                "role": "assistant",
+                "content": message.content,
+                "tool_calls": matched,
+            })
+            for call in matched:
+                call_id = str(call.get("id") or "")
+                prepared.append({
+                    "role": "tool", "tool_call_id": call_id, "content": results[call_id],
+                })
+        elif message.content:
+            # 결과가 하나도 없으면 호출 목록을 떼고 문장만 남긴다.
+            prepared.append({"role": "assistant", "content": message.content})
+        index = scan
+    return prepared
+
+
 def _messages_with_latest_attachments(
     messages: list[ChatMessage], *, allow_images: bool
 ) -> list[dict[str, Any]]:
@@ -883,7 +942,7 @@ def _messages_with_latest_attachments(
     inflate small local-model contexts.  The current user turn is the explicit
     attachment scope; conversation history still retains the ordinary text.
     """
-    prepared = [{"role": message.role, "content": message.content} for message in messages]
+    prepared = _paired_tool_history(messages)
     if not messages:
         return prepared
     last_user = next((message for message in reversed(messages) if message.role == "user"), None)

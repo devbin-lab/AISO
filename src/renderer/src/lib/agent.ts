@@ -9,9 +9,23 @@ import { authHeaders } from './backend'
 import type { AttachmentRef } from '../../../shared/attachments'
 
 export interface AgentMessage {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'tool'
   content: string
   attachments?: AttachmentRef[]
+  /**
+   * 이 assistant 턴이 실제로 호출한 도구들. 각 항목의 id에 대응하는 `role: 'tool'`
+   * 메시지가 바로 뒤에 와야 한다 — 짝이 깨지면 OpenAI 호환 공급자가 요청 전체를
+   * 거부한다. 서버도 같은 불변식을 다시 강제하지만, 여기서부터 지켜서 보낸다.
+   */
+  toolCalls?: AgentToolCallRecord[]
+  /** 이 결과가 어느 호출에 대한 것인지. `role: 'tool'`에만 쓴다. */
+  toolCallId?: string
+}
+
+export interface AgentToolCallRecord {
+  id: string
+  type: 'function'
+  function: { name: string; arguments: Record<string, unknown> }
 }
 
 /**
@@ -86,7 +100,9 @@ export async function streamAgent(
       messages: messages.map((message) => ({
         role: message.role,
         content: message.content,
-        attachments: message.attachments?.map((attachment) => attachment.id) ?? []
+        attachments: message.attachments?.map((attachment) => attachment.id) ?? [],
+        ...(message.toolCalls ? { tool_calls: message.toolCalls } : {}),
+        ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {})
       })),
       provider: target.provider,
       workspace: target.provider === 'nvidia' ? '' : workspace,

@@ -101,6 +101,53 @@ interface Props {
   convCollapsed?: boolean
 }
 
+/** 런 경계를 넘겨 이어갈 도구 실행 기록 수. 넘길수록 근거는 늘지만 요청이 커진다. */
+const CARRIED_TOOL_RESULTS = 12
+
+/**
+ * 타임라인에서 최근 도구 실행을 뽑아 모델이 읽을 수 있는 형태로 조립한다.
+ *
+ * 예전에는 실행이 끝나면 마지막 assistant 문장 하나만 다음 실행으로 넘어갔다.
+ * "여기까지 한 내용은 유지됩니다"라고 안내하면서 정작 도구 결과는 전부 사라져,
+ * '계속해줘'가 백지에서 다시 시작했다. 결과 본문은 이미 타임라인에 있으므로
+ * 새로 저장할 것은 없고, 모델에게 보내는 형태로 바꿔주기만 하면 된다.
+ *
+ * 짝을 반드시 맞춘다 — 결과가 없는 호출(승인 대기·실행 중·중단)은 제외한다.
+ * 호출만 있고 결과가 없으면 OpenAI 호환 공급자가 요청 전체를 거부한다.
+ */
+function carriedToolHistory(items: Item[]): AgentMessage[] {
+  const completed = items.filter(
+    (item): item is Extract<Item, { kind: 'tool' }> =>
+      item.kind === 'tool' && typeof item.output === 'string' && item.output.length > 0
+  )
+  const recent = completed.slice(-CARRIED_TOOL_RESULTS)
+  if (recent.length === 0) return []
+
+  const messages: AgentMessage[] = []
+  let index = 0
+  while (index < recent.length) {
+    const turnId = recent[index].assistantTurnId
+    const group: typeof recent = []
+    while (index < recent.length && recent[index].assistantTurnId === turnId) {
+      group.push(recent[index])
+      index += 1
+    }
+    messages.push({
+      role: 'assistant',
+      content: '',
+      toolCalls: group.map((tool) => ({
+        id: tool.providerToolCallId,
+        type: 'function' as const,
+        function: { name: tool.name, arguments: tool.args }
+      }))
+    })
+    for (const tool of group) {
+      messages.push({ role: 'tool', content: tool.output ?? '', toolCallId: tool.providerToolCallId })
+    }
+  }
+  return messages
+}
+
 function argPath(args: Record<string, unknown>): string {
   // 툴마다 주요 인자 키가 다르다 (path / command / pattern / query / src) — 카드·승인바에 표시할 값을 고른다
   for (const k of ['path', 'command', 'pattern', 'query', 'src', 'url']) {
@@ -633,7 +680,7 @@ function AgentView({
         backend.port!,
         settings,
         settings.workspace,
-        historyRef.current,
+        [...historyRef.current.slice(0, -1), ...carriedToolHistory(items), ...historyRef.current.slice(-1)],
         sessionRef.current,
         assistantTurnId,
         approvalMode,
