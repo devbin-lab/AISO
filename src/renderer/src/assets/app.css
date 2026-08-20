@@ -6442,3 +6442,294 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
     transform: scale(1) translateY(0);
   }
 }
+
+/* ---------- Sidebar: 홈 버튼 (모드 선택 오른쪽) ---------- */
+.sidebar__home {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 29px;
+  height: 29px;
+  margin-left: 2px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--sidebar-muted);
+  background: transparent;
+  cursor: pointer;
+}
+.sidebar__home:hover {
+  color: var(--sidebar-text-strong);
+  background: var(--sidebar-hover);
+}
+.sidebar__home--active {
+  color: var(--accent);
+  background: var(--sidebar-active);
+}
+/* 접힌 사이드바에서는 모드 영역이 통째로 숨으므로 별도 처리는 두지 않는다. */
+
+/* ---------- 홈 대시보드 ---------- */
+.home {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 26px 28px 34px;
+}
+.home__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.home__title {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.home__subtitle {
+  margin: 5px 0 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.home__refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: var(--bg-elev);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.home__refresh:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.home__refresh:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.home__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  grid-template-areas:
+    'todos usage'
+    'reports reports';
+  gap: 14px;
+}
+.home-card--todos { grid-area: todos; }
+.home-card--usage { grid-area: usage; }
+.home-card--reports { grid-area: reports; }
+@media (max-width: 900px) {
+  .home__grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: 'todos' 'usage' 'reports';
+  }
+}
+
+.home-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px 17px 17px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+}
+.home-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+}
+.home-card__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+.home-card__count {
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: var(--seg-on-bg);
+  font-size: 11.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.home-card__link {
+  margin-left: auto;
+  border: 0;
+  padding: 0;
+  color: var(--text-dim);
+  background: transparent;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.home-card__link:hover { color: var(--accent); }
+.home-card__empty {
+  margin: 0;
+  padding: 14px 0 10px;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.home-card__more {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+/* 할 일 */
+.home-todos {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.home-todo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+}
+.home-todo:hover { background: var(--sidebar-hover); }
+.home-todo__pri {
+  flex: 0 0 auto;
+  width: 22px;
+  text-align: center;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.home-todo__pri--high { color: var(--err); }
+.home-todo__pri--medium { color: var(--warn); }
+.home-todo__pri--low { color: var(--text-dim); }
+.home-todo__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12.5px;
+}
+.home-todo__due {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.home-todo--overdue .home-todo__due { color: var(--err); }
+
+/* 토큰 사용량 */
+.home-spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 92px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.home-spark__col {
+  /* flex 컬럼으로 두면 막대가 라벨과 공간을 다투며 shrink된다 — 100%와 76%가
+     각각 71px·70px로 뭉개져 상단 구간의 차이가 사라졌다. 그리드로 트랙을
+     명시해 막대의 %가 라벨과 무관한 확정 높이에 대해 풀리게 한다. */
+  display: grid;
+  grid-template-rows: 1fr auto;
+  flex: 1 1 0;
+  gap: 5px;
+  height: 100%;
+  min-width: 0;
+}
+.home-spark__bar {
+  align-self: end;
+  width: 100%;
+  max-width: 26px;
+  margin: 0 auto;
+  border-radius: 3px 3px 1px 1px;
+  background: var(--accent-soft);
+  box-shadow: inset 0 -1px 0 var(--accent);
+}
+.home-spark__col:last-child .home-spark__bar { background: var(--accent); }
+.home-spark__label {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.home-usage-stats {
+  display: flex;
+  gap: 18px;
+  margin: 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.home-usage-stats dt {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.home-usage-stats dd {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* My DB 보고서 */
+.home-reports {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.home-report {
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.home-report__head {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin-bottom: 6px;
+}
+.home-report__date {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.home-report__count {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.home-report__body {
+  margin: 0;
+  /* 보고서 본문은 증거 기반 서술이라 줄바꿈이 의미를 갖는다. */
+  white-space: pre-wrap;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.65;
+}

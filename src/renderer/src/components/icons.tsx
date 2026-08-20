@@ -47,6 +47,16 @@ export function AgentIcon({ size = 17 }: IconProps): React.JSX.Element {
   )
 }
 
+export function HomeIcon({ size = 17 }: IconProps): React.JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
+      <path d="M3 10.8 12 3.4l9 7.4" />
+      <path d="M5.5 9.6V20h13V9.6" />
+      <path d="M9.8 20v-5.4h4.4V20" />
+    </svg>
+  )
+}
+
 export function TodoIcon({ size = 17 }: IconProps): React.JSX.Element {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
