@@ -293,6 +293,7 @@ def _delivered_dimensions(
     *,
     fallback_width: int,
     fallback_height: int,
+    builtin: bool,
 ) -> tuple[int, int]:
     """Return the dimensions of Aiso's final built-in latent output.
 
@@ -301,7 +302,22 @@ def _delivered_dimensions(
     would be misleading to the user.  Only trust the exact built-in node shape
     assembled by ``build_workflow``; user workflows retain their declared
     option dimensions because their output geometry is arbitrary.
+
+    ``builtin=False`` returns the fallback immediately.  Without that gate this
+    function scanned user workflows too and reported **the first** LatentUpscale
+    it found, without checking whether that node is even on the output path —
+    a graph whose real output is 2048x2048 could be reported as 512x512, and
+    that number goes straight into the UI and the agent's answer.
+
+    Widening this to user workflows is deliberately not done: this function only
+    understands ``LatentUpscale``, while user graphs commonly use
+    ``LatentUpscaleBy`` / ``ImageScale`` / ``ImageUpscaleWithModel``.  A number
+    that is only sometimes right is a wrong number.  For user workflows the
+    honest signal is the pipeline badge (``scaleProcess`` / ``processingNodes``),
+    which names the scaling nodes on the output path instead of guessing a size.
     """
+    if not builtin:
+        return fallback_width, fallback_height
     for node in workflow.values():
         if not isinstance(node, Mapping) or node.get("class_type") != "LatentUpscale":
             continue
@@ -502,6 +518,7 @@ async def generate_image(
             workflow,
             fallback_width=options.width,
             fallback_height=options.height,
+            builtin=selected.workflow_template is None,
         )
         model_name = primary_model_name(selected)
         summary = f"이미지 생성 완료: {selected.name} ({model_name}), seed {options.seed}"

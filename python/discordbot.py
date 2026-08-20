@@ -538,23 +538,24 @@ async def _schedule_add_with_approval(channel, args: dict) -> str:
 
 
 async def _channel_report_add_with_approval(channel, args: dict) -> str:
-    """Require the Discord owner to approve a recurring channel report."""
+    """채널 보고 예약 — 완전 선검증 → 미리보기 → 소유자 승인 버튼 → 등록.
+
+    검증(채널 해석·권한·개수·주기·지시 길이·예약 개수 상한)을 승인 전에 모두 마치므로
+    '승인했는데 거부'가 없다. 예전에는 승인 뒤 channel_report_add 안에서 9개 거부 경로가
+    돌았고, 미리보기도 해석 전 값이라 실제 등록과 어긋났다 — 보고 채널을 생략하면
+    미리보기엔 "#(없음)"이 뜨는데 실제로는 첫 수집 채널로 등록됐다.
+
+    _schedule_add_with_approval과 같은 형태이며, 같은 트레이드오프를 공유한다:
+    승인 전에 계산한 draft를 그대로 커밋하므로 미리보기와 실제 예약이 어긋나지 않는다.
+    """
     import discordsched  # noqa: PLC0415
 
-    normalized = discordsched.canonical_channel_report_args(args or {})
-    sources = ", ".join(f"#{name}" for name in normalized["channels"]) or "(없음)"
-    destination = normalized["report_channel"] or "(없음)"
-    preview = (
-        "채널 대화 보고 예약 요청\n"
-        f"수집: {sources}\n보고: #{destination}\n"
-        f"주기: {normalized['interval_hours']}시간마다\n"
-        "등록 이후 새 메시지만 수집하며 성공적으로 보고한 메시지는 다시 포함하지 않습니다."
-    )
-    if normalized["instruction"]:
-        preview += f"\n추가 지시: {normalized['instruction']}"
-    if not await _ask_owner_approval(channel, preview):
+    draft, meta, error = await discordsched.prepare_channel_report(**(args or {}))
+    if error:
+        return error
+    if not await _ask_owner_approval(channel, discordsched.render_channel_report_preview(meta)):
         return _REJECTED
-    return await discordsched.channel_report_add(**normalized)
+    return discordsched.render_channel_report_registered(discordsched.commit_job(draft), meta)
 
 
 async def _run_bot_tool(channel, author_id: str, name: str, args: dict) -> str:

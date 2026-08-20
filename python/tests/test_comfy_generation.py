@@ -1014,3 +1014,40 @@ def test_animagine_generation_metadata_matches_submitted_workflow(monkeypatch):
     )
     assert "6327eca98b" not in repr(image["workflow"])
     assert "X-Aiso-Token" not in repr(image["workflow"])
+
+
+# ── A8: 사용자 워크플로의 크기는 추측하지 않는다 ──────────────────────────
+
+def test_user_workflow_dimensions_are_not_guessed_from_a_stray_upscale_node():
+    """사용자 워크플로에는 선언된 옵션 크기를 그대로 보고한다.
+
+    `_delivered_dimensions`는 LatentUpscale 한 클래스만 이해하고, 찾은 첫 노드가
+    출력 경로 위인지도 확인하지 않는다. 그래서 사용자 워크플로를 훑으면 실제 출력이
+    2048x2048인 그래프에서 경로 밖 512x512 노드를 집어 보고할 수 있었다.
+    그 숫자는 UI 화살표 표기와 에이전트 답변 근거로 그대로 나간다.
+
+    넓혀서 고치지 않는 이유: 사용자 그래프는 LatentUpscaleBy·ImageScale·
+    ImageUpscaleWithModel을 흔히 쓴다. 부분적으로만 맞는 숫자는 틀린 숫자다.
+    사용자 워크플로의 정직한 신호는 숫자가 아니라 pipeline 배지다.
+    """
+    from comfy_generation import _delivered_dimensions
+
+    workflow = {
+        "9": {"class_type": "LatentUpscale", "inputs": {"width": 512, "height": 512}},
+        "10": {"class_type": "LatentUpscale", "inputs": {"width": 2048, "height": 2048}},
+    }
+
+    assert _delivered_dimensions(
+        workflow, fallback_width=1024, fallback_height=1024, builtin=False
+    ) == (1024, 1024)
+
+
+def test_builtin_workflow_still_reports_its_refined_latent_size():
+    """Aiso가 직접 조립한 그래프에서는 기존 동작 그대로 — 보정 후 크기를 보고한다."""
+    from comfy_generation import _delivered_dimensions
+
+    workflow = {"9": {"class_type": "LatentUpscale", "inputs": {"width": 2048, "height": 2048}}}
+
+    assert _delivered_dimensions(
+        workflow, fallback_width=1024, fallback_height=1024, builtin=True
+    ) == (2048, 2048)

@@ -184,3 +184,94 @@ def test_channel_report_schema_is_available_to_discord_tool_chat():
     required = sched.CHANNEL_REPORT_ADD_SCHEMA["function"]["parameters"]["required"]
     assert name == "discord_channel_report_add"
     assert required == ["channels", "report_channel", "interval_hours"]
+
+
+# ── A6: 승인 전에 모든 거부 사유를 확인한다 ────────────────────────────────
+
+def test_invalid_interval_is_rejected_without_asking_the_owner(monkeypatch):
+    """'승인했는데 거부'가 없어야 한다.
+
+    예전에는 승인 버튼을 누른 뒤에야 channel_report_add 안에서 검증이 돌았다.
+    거부 경로가 9개나 승인 뒤에 있었다 — 채널 해석 실패, 권한 없음, 개수 초과,
+    interval 범위, 지시 길이, 예약 개수 상한 등.
+    """
+    import asyncio
+
+    import discordbot
+    import discordops
+    import discordsched
+
+    asked = []
+
+    async def never_ask(channel, preview):
+        asked.append(preview)
+        return True
+
+    monkeypatch.setattr(discordbot, "_ask_owner_approval", never_ask)
+    monkeypatch.setattr(discordops, "resolve_text_channel", lambda name: (("1", str(name)), None))
+
+    class FakeChannel:
+        id = 1
+
+    class FakeGuild:
+        def get_channel(self, _cid):
+            return FakeChannel()
+
+    monkeypatch.setattr(discordops, "live_guild", lambda: ((FakeGuild(), "1"), None))
+
+    async def fake_latest(_channel):
+        return "100"
+
+    monkeypatch.setattr(discordsched, "_latest_message_id", fake_latest)
+
+    result = asyncio.run(discordbot._channel_report_add_with_approval(
+        None, {"channels": ["general"], "report_channel": "reports", "interval_hours": 500}
+    ))
+
+    assert result.startswith("[거부]"), result
+    assert "interval_hours" in result
+    assert asked == [], "검증 실패인데 소유자에게 승인을 물었다"
+
+
+def test_preview_shows_the_resolved_destination_not_a_placeholder(monkeypatch):
+    """보고 채널을 생략하면 첫 수집 채널로 등록된다 — 미리보기가 그걸 보여줘야 한다.
+
+    예전 미리보기는 정규화 전 값을 써서 "#(없음)"을 표시했는데, 실제로는 첫 수집
+    채널에 등록됐다. 사용자가 승인한 내용과 실제 등록이 어긋났다.
+    """
+    import asyncio
+
+    import discordbot
+    import discordops
+    import discordsched
+
+    shown = []
+
+    async def capture(channel, preview):
+        shown.append(preview)
+        return False  # 승인 거절 — 등록은 하지 않는다
+
+    monkeypatch.setattr(discordbot, "_ask_owner_approval", capture)
+    monkeypatch.setattr(discordops, "resolve_text_channel", lambda name: (("1", str(name)), None))
+
+    class FakeChannel:
+        id = 1
+
+    class FakeGuild:
+        def get_channel(self, _cid):
+            return FakeChannel()
+
+    monkeypatch.setattr(discordops, "live_guild", lambda: ((FakeGuild(), "1"), None))
+
+    async def fake_latest(_channel):
+        return "100"
+
+    monkeypatch.setattr(discordsched, "_latest_message_id", fake_latest)
+
+    asyncio.run(discordbot._channel_report_add_with_approval(
+        None, {"channels": ["general"], "interval_hours": 6}
+    ))
+
+    assert shown, "미리보기가 표시되지 않았다"
+    assert "(없음)" not in shown[0], f"해석 전 자리표시자가 남았다: {shown[0]}"
+    assert "#general" in shown[0]
