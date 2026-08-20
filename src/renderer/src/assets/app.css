@@ -75,67 +75,6 @@
   }
 }
 
-/* ---------- icon rail ---------- */
-.rail {
-  position: relative;
-  width: var(--rail-w);
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: 10px 0;
-  background: var(--bg);
-  border-right: 1px solid var(--border);
-}
-.rail__thumb {
-  position: absolute;
-  left: calc((var(--rail-w) - 34px) / 2);
-  width: 34px;
-  height: 34px;
-  border-radius: 8px;
-  background: var(--accent-soft);
-  pointer-events: none;
-  /* 아이콘(z-index 1) 위에서 슬라이드 — accent-soft가 반투명이라 아이콘이 그대로 비친다 */
-  z-index: 2;
-  /* 스프링(back-out) 커브 — Segmented 토글과 동일한 쫀득한 슬라이드 */
-  transition: top 0.42s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-.rail__thumb::after {
-  content: '';
-  position: absolute;
-  left: -8px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 2px;
-  height: 16px;
-  border-radius: 2px;
-  background: var(--accent);
-}
-.rail__btn {
-  position: relative;
-  z-index: 1;
-  width: 34px;
-  height: 34px;
-  display: grid;
-  place-items: center;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-  transition:
-    color 0.12s,
-    background 0.12s;
-}
-.rail__btn:hover {
-  color: var(--text-muted);
-  background: var(--bg-elev);
-}
-.rail__btn--active {
-  color: var(--text);
-}
-
 /* ---------- unified project sidebar ---------- */
 .sidebar {
   width: 256px;
