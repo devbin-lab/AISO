@@ -2622,7 +2622,10 @@ async def _run_agent_impl(
     _cleanup_state: dict[str, Any] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Compatibility facade for the extracted agent orchestration loop."""
-    runner.bind_dependencies(globals())
+    # 예전에는 여기서 runner.bind_dependencies(globals())로 이 모듈의 전역 107개를
+    # 런 시작마다 러너의 globals()에 복사했다. 이제 러너가 `import agent as deps`로
+    # 직접 읽으므로 주입이 필요 없다 — 정적 분석이 가능해지고, 호출 시점 속성 조회라
+    # monkeypatch 시임은 그대로 동작한다.
     implementation_stream = runner._run_agent_impl(
         host=host,
         workspace=workspace,

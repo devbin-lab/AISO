@@ -18,10 +18,20 @@ from typing import Any, AsyncGenerator, Mapping
 from uuid import uuid4
 
 # 승인 결과 상수만 직접 가져온다. agent_approval은 asyncio/dataclasses만 의존하는
-# 리프 모듈이라 순환 import 위험이 없다(나머지 협력자는 bind_dependencies로 주입된다).
+# 리프 모듈이라 순환 import 위험이 없다.
 import agent_approval
 
-_RESERVED = frozenset({"_RESERVED", "bind_dependencies", "_run_agent_impl"})
+# 협력자는 파사드(agent) 모듈에서 속성으로 읽는다. 예전에는 bind_dependencies가
+# 런 시작마다 agent의 전역 107개를 이 모듈의 globals()로 복사했는데, 그러면
+# mypy·IDE가 이 3,300여 줄에서 아무 이름도 해석하지 못한다(정의가 런타임에만 생김).
+#
+# 순환 import처럼 보이지만 안전하다: agent도 agent_runner를 import하므로 어느 쪽이
+# 먼저 로드돼도 sys.modules에 (부분 초기화된) 모듈 객체가 이미 있고, 여기서는
+# 모듈 객체만 바인딩한다. 실제 속성 접근은 전부 함수 호출 시점이라 그때는 초기화가 끝나 있다.
+#
+# 테스트 시임도 그대로 유지된다 — monkeypatch.setattr(agent, ...)가 122곳에서 쓰이는데,
+# deps.X는 호출 시점 속성 조회라 패치된 값을 읽는다(주입 방식과 동일한 효과).
+import agent as deps
 
 
 # Resolution and seed are intentionally model-profile-owned unless the user
@@ -106,14 +116,6 @@ def _profile_owned_image_arguments(arguments: Mapping[str, Any], request: str) -
     return filtered
 
 
-def bind_dependencies(namespace: Mapping[str, Any]) -> None:
-    """Bind the facade's current collaborators immediately before a run."""
-    target = globals()
-    for name, value in namespace.items():
-        if not name.startswith("__") and name not in _RESERVED:
-            target[name] = value
-
-
 async def _run_agent_impl(
     *,
     host: str,
@@ -134,9 +136,9 @@ async def _run_agent_impl(
     comfy_selection_mode: str = "auto",
     selected_comfy_model_id: str | None = None,
     provider: str = "ollama",
-    runtime: LlmRuntime | None = None,
+    runtime: deps.LlmRuntime | None = None,
     assistant_turn_id: str = "",
-    execution_ledger: AgentExecutionLedger | None = None,
+    execution_ledger: deps.AgentExecutionLedger | None = None,
     nvidia_allowed_tools: list[str] | None = None,
     enabled_tools: list[str] | None = None,
     user_request_text: str | None = None,
@@ -147,33 +149,33 @@ async def _run_agent_impl(
     # The execution loop uses the extracted deterministic validation policy.
     # Keep module-level compatibility functions below for existing integrations
     # and focused tests while intent classification is migrated separately.
-    _html_entry_path = validation.html_entry_path
-    _web_validation_policy_key = validation.web_validation_policy_key
-    _safe_relative_effect_path = validation.safe_relative_effect_path
-    _relative_tool_effect_paths = validation.relative_tool_effect_paths
-    _relative_tool_effect_path = validation.relative_tool_effect_path
-    _display_path_key = validation.display_path_key
-    _workspace_paths_match = validation.workspace_paths_match
-    _workspace_effect_covers_path = validation.workspace_effect_covers_path
-    _workspace_file_fingerprint = validation.workspace_file_fingerprint
-    _non_html_file_tokens = validation.non_html_file_tokens
-    _request_explicitly_preserves_path = validation.request_explicitly_preserves_path
-    _request_directly_mutates_dependency_path = validation.request_directly_mutates_dependency_path
-    _validation_target_map = validation.validation_target_map
-    _authoritative_html_inventory_result = validation.authoritative_html_inventory_result
-    _provider_safe_web_validation_result = validation.provider_safe_web_validation_result
-    _web_validation_status = validation.web_validation_status
-    _unverified_html_notice = validation.unverified_html_notice
-    _existing_web_validation_notice = validation.existing_web_validation_notice
-    approval_registry = _approvals
-    SYSTEM_PROMPT = prompting.SYSTEM_PROMPT
-    _operational_tool_policy_prompt = prompting.operational_tool_policy_prompt
-    _programming_policy_prompt = prompting.programming_policy_prompt
-    _skill_policy_prompt = prompting.skill_policy_prompt
-    _discord_policy_prompt = prompting.discord_policy_prompt
-    _exact_tool_scope_prompt = prompting.exact_tool_scope_prompt
-    _final_response_language_prompt = prompting.final_response_language_prompt
-    routing_module = routing
+    _html_entry_path = deps.validation.html_entry_path
+    _web_validation_policy_key = deps.validation.web_validation_policy_key
+    _safe_relative_effect_path = deps.validation.safe_relative_effect_path
+    _relative_tool_effect_paths = deps.validation.relative_tool_effect_paths
+    _relative_tool_effect_path = deps.validation.relative_tool_effect_path
+    _display_path_key = deps.validation.display_path_key
+    _workspace_paths_match = deps.validation.workspace_paths_match
+    _workspace_effect_covers_path = deps.validation.workspace_effect_covers_path
+    _workspace_file_fingerprint = deps.validation.workspace_file_fingerprint
+    _non_html_file_tokens = deps.validation.non_html_file_tokens
+    _request_explicitly_preserves_path = deps.validation.request_explicitly_preserves_path
+    _request_directly_mutates_dependency_path = deps.validation.request_directly_mutates_dependency_path
+    _validation_target_map = deps.validation.validation_target_map
+    _authoritative_html_inventory_result = deps.validation.authoritative_html_inventory_result
+    _provider_safe_web_validation_result = deps.validation.provider_safe_web_validation_result
+    _web_validation_status = deps.validation.web_validation_status
+    _unverified_html_notice = deps.validation.unverified_html_notice
+    _existing_web_validation_notice = deps.validation.existing_web_validation_notice
+    approval_registry = deps._approvals
+    SYSTEM_PROMPT = deps.prompting.SYSTEM_PROMPT
+    _operational_tool_policy_prompt = deps.prompting.operational_tool_policy_prompt
+    _programming_policy_prompt = deps.prompting.programming_policy_prompt
+    _skill_policy_prompt = deps.prompting.skill_policy_prompt
+    _discord_policy_prompt = deps.prompting.discord_policy_prompt
+    _exact_tool_scope_prompt = deps.prompting.exact_tool_scope_prompt
+    _final_response_language_prompt = deps.prompting.final_response_language_prompt
+    routing_module = deps.routing
     # 작업 폴더는 선택 사항 — 지정하면 로컬 파일 작업까지, 없으면 웹 조사·스킬만 한다.
     if provider not in ("ollama", "nvidia"):
         yield {"type": "error", "error": "지원하지 않는 Agent provider입니다."}
@@ -185,17 +187,17 @@ async def _run_agent_impl(
     root: Path | None = None
     if not no_workspace:
         try:
-            root = validate_workspace(workspace)
-        except ToolError as e:
+            root = deps.validate_workspace(workspace)
+        except deps.ToolError as e:
             yield {"type": "error", "error": str(e)}
             return
     cleanup_state = _cleanup_state if _cleanup_state is not None else {}
     cleanup_state.update({"root": root, "dirty": False, "rag_available": False})
     try:
-        enabled_tool_names = normalize_enabled_tool_names(
+        enabled_tool_names = deps.normalize_enabled_tool_names(
             nvidia_allowed_tools if nvidia_gate5 else enabled_tools
         )
-    except ToolError as error:
+    except deps.ToolError as error:
         yield {"type": "error", "error": str(error)}
         yield {"type": "done"}
         return
@@ -239,19 +241,19 @@ async def _run_agent_impl(
         f"[PREVIOUS_USER]\n{previous_user}\n"
         f"[PREVIOUS_ASSISTANT]\n{previous_assistant_context}"
     )
-    _masked_last_user_request = _mask_html_path_mentions(last_user_request)
-    _explicit_web_validation_no_run = _is_nonexecuting_web_validation_statement(
+    _masked_last_user_request = deps._mask_html_path_mentions(last_user_request)
+    _explicit_web_validation_no_run = deps._is_nonexecuting_web_validation_statement(
         _masked_last_user_request
     )
     existing_web_validation_only = bool(
         not no_workspace
-        and _looks_like_guarded_web_validation_turn(last_user_request, recent_context)
+        and deps._looks_like_guarded_web_validation_turn(last_user_request, recent_context)
     )
     plan: list[dict] = []
     model_runtime = (
-        await _prepare_model(host, model)
+        await deps._prepare_model(host, model)
         if runtime is None
-        else await _prepare_model(host, model, runtime)
+        else await deps._prepare_model(host, model, runtime)
     )
     offload_noticed = False
     dirty = False  # 파일이 실제로 변경됐는지 (자동 재색인 트리거)
@@ -259,30 +261,30 @@ async def _run_agent_impl(
     # run_web까지 수행하면 추가 왕복은 없고, 빠뜨렸을 때만 한 번 검증 호출을 재촉한다.
     pending_html_validation: dict[str, str] = {}
     html_validation_nudged = False
-    _mentioned_validation_paths = _html_path_tokens(last_user_request)
-    _invalid_validation_path_mentions = _invalid_html_path_mentions(last_user_request)
-    _explicit_validation_paths = _explicit_html_paths(last_user_request)
-    _reactivated_validation_request = _is_validation_feature_reactivation_request(
+    _mentioned_validation_paths = deps._html_path_tokens(last_user_request)
+    _invalid_validation_path_mentions = deps._invalid_html_path_mentions(last_user_request)
+    _explicit_validation_paths = deps._explicit_html_paths(last_user_request)
+    _reactivated_validation_request = deps._is_validation_feature_reactivation_request(
         last_user_request
     )
-    _assistant_validation_active = _assistant_has_active_validation_state(
+    _assistant_validation_active = deps._assistant_has_active_validation_state(
         previous_assistant_context
     )
-    _assistant_selection_pending = _assistant_has_pending_validation_candidates(
+    _assistant_selection_pending = deps._assistant_has_pending_validation_candidates(
         previous_assistant_context
     )
     _candidate_selection_reply = bool(
         _assistant_selection_pending
-        and not _is_explicit_task_reset(last_user_request)
+        and not deps._is_explicit_task_reset(last_user_request)
         and not _reactivated_validation_request
-        and not _contains_explicit_mutation_request(_masked_last_user_request)
-        and _is_bounded_active_validation_reply(last_user_request)
+        and not deps._contains_explicit_mutation_request(_masked_last_user_request)
+        and deps._is_bounded_active_validation_reply(last_user_request)
     )
     _active_validation_reply = bool(
         _assistant_validation_active
         and not _reactivated_validation_request
         and (
-            _is_bounded_active_validation_reply(last_user_request)
+            deps._is_bounded_active_validation_reply(last_user_request)
             or _candidate_selection_reply
         )
     )
@@ -292,33 +294,33 @@ async def _run_agent_impl(
         and (
             (
                 _assistant_validation_active
-                and _looks_like_validation_continuation_command(last_user_request)
+                and deps._looks_like_validation_continuation_command(last_user_request)
             )
             or (
                 _reactivated_validation_request
-                and _has_validation_reactivation_continuation(last_user_request)
+                and deps._has_validation_reactivation_continuation(last_user_request)
             )
         )
     ):
-        _explicit_validation_paths = _explicit_html_paths(previous_user)
+        _explicit_validation_paths = deps._explicit_html_paths(previous_user)
     _current_exact_validation_selection = bool(
-        _explicit_html_paths(last_user_request)
+        deps._explicit_html_paths(last_user_request)
         and _assistant_validation_active
     )
     _continued_exact_validation_selection = bool(
         _assistant_validation_active
-        and _looks_like_validation_continuation_command(last_user_request)
+        and deps._looks_like_validation_continuation_command(last_user_request)
         and _explicit_validation_paths
     )
     _validation_scope_requires_exact_path = bool(
         (_mentioned_validation_paths and not _explicit_validation_paths)
         or _invalid_validation_path_mentions
-        or _positive_ordinal_selection_index(last_user_request) is not None
+        or deps._positive_ordinal_selection_index(last_user_request) is not None
         or (_active_validation_reply and not _explicit_validation_paths)
         or (
             existing_web_validation_only
             and not _mentioned_validation_paths
-            and _looks_like_validation_scope_change(last_user_request)
+            and deps._looks_like_validation_scope_change(last_user_request)
         )
     )
     web_validation_execution_authorized = bool(
@@ -326,8 +328,8 @@ async def _run_agent_impl(
         and not _explicit_web_validation_no_run
         and not _validation_scope_requires_exact_path
         and (
-            _has_explicit_validation_execution_command(last_user_request)
-            or _has_validation_reactivation_continuation(last_user_request)
+            deps._has_explicit_validation_execution_command(last_user_request)
+            or deps._has_validation_reactivation_continuation(last_user_request)
             or _current_exact_validation_selection
             or _continued_exact_validation_selection
         )
@@ -351,12 +353,12 @@ async def _run_agent_impl(
     ):
         try:
             _authoritative_html_inventory = await asyncio.wait_for(
-                asyncio.to_thread(find_html_entries, root),
-                timeout=MAX_HTML_SCAN_SECONDS + 1.0,
+                asyncio.to_thread(deps.find_html_entries, root),
+                timeout=deps.MAX_HTML_SCAN_SECONDS + 1.0,
             )
         except TimeoutError:
             _authoritative_html_inventory = None
-        _explicit_validation_paths = _followup_html_selection_paths(
+        _explicit_validation_paths = deps._followup_html_selection_paths(
             last_user_request,
             recent_context,
             _authoritative_html_inventory,
@@ -394,7 +396,7 @@ async def _run_agent_impl(
     explicit_preserved_paths = [
         path
         for path in [
-            *_html_path_tokens(last_user_request),
+            *deps._html_path_tokens(last_user_request),
             *_non_html_file_tokens(last_user_request),
         ]
         if _request_explicitly_preserves_path(last_user_request, path)
@@ -414,15 +416,15 @@ async def _run_agent_impl(
     if (
         not existing_web_validation_only
         and not _explicit_web_validation_no_run
-        and _has_explicit_validation_execution_command(last_user_request)
+        and deps._has_explicit_validation_execution_command(last_user_request)
     ):
-        requested_normal_validation_paths = _normal_requested_validation_paths(
+        requested_normal_validation_paths = deps._normal_requested_validation_paths(
             last_user_request
         )
         request_requires_prevalidation_mutation = bool(
-            _contains_explicit_mutation_request(_masked_last_user_request)
+            deps._contains_explicit_mutation_request(_masked_last_user_request)
             or any(
-                _request_directly_mutates_html_path(last_user_request, path)
+                deps._request_directly_mutates_html_path(last_user_request, path)
                 for path in requested_normal_validation_paths
             )
         )
@@ -438,7 +440,7 @@ async def _run_agent_impl(
     direct_html_mutation_required = {
         policy_key
         for policy_key, display_path in deferred_normal_validation_scope.items()
-        if _request_directly_mutates_html_path(last_user_request, display_path)
+        if deps._request_directly_mutates_html_path(last_user_request, display_path)
     }
     direct_html_baselines = {
         _display_path_key(display_path): _workspace_file_fingerprint(root, display_path)
@@ -531,11 +533,11 @@ async def _run_agent_impl(
     def record_invalid_web_run() -> bool:
         nonlocal existing_web_validation_invalid_runs
         existing_web_validation_invalid_runs += 1
-        return existing_web_validation_invalid_runs >= _WEB_VALIDATION_INVALID_RUN_LIMIT
+        return existing_web_validation_invalid_runs >= deps._WEB_VALIDATION_INVALID_RUN_LIMIT
     last_call_sig: str | None = None  # 직전 툴 호출 서명 (무한 루프 감지용)
     repeat_count = 0
     # 교대 루프 감지용 슬라이딩 창 — 연속 동일 검사가 놓치는 A→B→A→B…를 잡는다.
-    recent_call_sigs: deque[str] = deque(maxlen=STALL_WINDOW)
+    recent_call_sigs: deque[str] = deque(maxlen=deps.STALL_WINDOW)
     substantive_tool_call_count = 0
     substantive_batch_counts: dict[str, int] = {}
     mutation_target_attempts: dict[str, int] = {}
@@ -549,13 +551,13 @@ async def _run_agent_impl(
     rag_context = ""
     workspace_context_exposed = False
     image_profiles = comfy_profiles if isinstance(comfy_profiles, list) else []
-    image_intent = _looks_like_image_generation_request(
+    image_intent = deps._looks_like_image_generation_request(
         last_user_request,
         previous_assistant,
         previous_image_verified=image_context_verified,
     )
     image_policy_enabled = "generate_image" in enabled_tool_names
-    image_selection_error, manual_comfy_profile_id = _manual_comfy_selection_error(
+    image_selection_error, manual_comfy_profile_id = deps._manual_comfy_selection_error(
         comfy_selection_mode,
         selected_comfy_model_id,
         image_profiles,
@@ -582,39 +584,39 @@ async def _run_agent_impl(
     pending_image_input_errors_run = 0
     calendar_list_fallback_attempted = False
     if nvidia_gate5:
-        tools = [t for t in MODEL_AGENT_TOOLS if t["function"]["name"] in enabled_tool_names]
+        tools = [t for t in deps.MODEL_AGENT_TOOLS if t["function"]["name"] in enabled_tool_names]
     elif no_workspace:
         # 로컬 접근 도구는 목록에서 제외 — 모델이 아예 보지 못하게 한다.
         tools = [
-            t for t in MODEL_AGENT_TOOLS
-            if t["function"]["name"] in WORKSPACE_FREE_TOOLS
+            t for t in deps.MODEL_AGENT_TOOLS
+            if t["function"]["name"] in deps.WORKSPACE_FREE_TOOLS
             and t["function"]["name"] in enabled_tool_names
         ]
     else:
-        tools = [t for t in MODEL_AGENT_TOOLS if t["function"]["name"] in enabled_tool_names]
+        tools = [t for t in deps.MODEL_AGENT_TOOLS if t["function"]["name"] in enabled_tool_names]
     # Central Aiso calendar creation is intentionally conditional: it is not
     # part of the frozen base schema prefix, but it must be available without
     # a workspace and before Discord routing is considered.
     conditional_todo_schemas = [
-        REGISTRY[name].schema
+        deps.REGISTRY[name].schema
         for name in ("create_calendar_event", "manage_calendar_event")
         if name in enabled_tool_names
     ]
     if conditional_todo_schemas:
-        tools = tools + model_schemas_for(conditional_todo_schemas)
+        tools = tools + deps.model_schemas_for(conditional_todo_schemas)
     # 디스코드 봇이 연결돼 있으면 서버 구성 도구를 노출 — search_docs처럼 조건부(스냅샷 불변).
     if nvidia_gate5:
         discord_ready = False
     else:
         try:
-            discord_ready = discordops.available()
+            discord_ready = deps.discordops.available()
         except Exception:  # noqa: BLE001 — 봇 상태 확인 실패는 도구 미노출로만 처리
             discord_ready = False
     if discord_ready:
-        conditional_discord_tools = model_schemas_for([
-            discordops.MAP_SCHEMA, discordops.APPLY_SCHEMA, discordops.SEND_SCHEMA,
-            discordsched.SCHEDULE_ADD_SCHEMA, discordsched.SCHEDULE_LIST_SCHEMA,
-            discordsched.SCHEDULE_REMOVE_SCHEMA, discordsched.CHANNEL_REPORT_ADD_SCHEMA,
+        conditional_discord_tools = deps.model_schemas_for([
+            deps.discordops.MAP_SCHEMA, deps.discordops.APPLY_SCHEMA, deps.discordops.SEND_SCHEMA,
+            deps.discordsched.SCHEDULE_ADD_SCHEMA, deps.discordsched.SCHEDULE_LIST_SCHEMA,
+            deps.discordsched.SCHEDULE_REMOVE_SCHEMA, deps.discordsched.CHANNEL_REPORT_ADD_SCHEMA,
         ])
         tools = tools + [
             schema for schema in conditional_discord_tools
@@ -627,8 +629,8 @@ async def _run_agent_impl(
     # structurally impossible and caused a generic fallback image.
     image_schema: dict[str, Any] | None = None
     if image_requested:
-        image_schema = model_schema_for(
-            NVIDIA_GENERATE_IMAGE_SCHEMA if nvidia_gate5 else GENERATE_IMAGE_SCHEMA
+        image_schema = deps.model_schema_for(
+            deps.NVIDIA_GENERATE_IMAGE_SCHEMA if nvidia_gate5 else deps.GENERATE_IMAGE_SCHEMA
         )
         tools = [*tools, image_schema]
 
@@ -665,7 +667,7 @@ async def _run_agent_impl(
         # unrelated schemas remains valuable for 12B/20B local models; only the
         # explicit source-grounded route above keeps the web phases.
         tools = [
-            schema for schema in MODEL_AGENT_TOOLS
+            schema for schema in deps.MODEL_AGENT_TOOLS
             if schema["function"]["name"] == "update_plan"
             and "update_plan" in enabled_tool_names
         ] + ([image_schema] if image_schema is not None else [])
@@ -679,15 +681,15 @@ async def _run_agent_impl(
         and not route_decision.skips_automatic_rag
     ):
         try:
-            if rag_status(root).get("indexed"):
+            if deps.rag_status(root).get("indexed"):
                 rag_available = True
                 cleanup_state["rag_available"] = True
-                tools = [model_schema_for(SEARCH_DOCS_SCHEMA)] + tools
+                tools = [deps.model_schema_for(deps.SEARCH_DOCS_SCHEMA)] + tools
                 last_user = next(
                     (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), ""
                 )
                 if last_user.strip():
-                    rag_context = format_context(await rag_search(root, host, last_user, rag_top_k))
+                    rag_context = deps.format_context(await deps.rag_search(root, host, last_user, rag_top_k))
                     workspace_context_exposed = bool(rag_context)
         except Exception:  # noqa: BLE001 - RAG failure is non-fatal for a turn.
             rag_available = rag_available and bool(rag_context)
@@ -700,7 +702,7 @@ async def _run_agent_impl(
         # 저장된 사용자 설정을 바꾸지는 않으며 다음 명시적 제작·수정 요청에는 원래 범위가 복구된다.
         tools = [
             tool for tool in tools
-            if str(tool.get("function", {}).get("name") or "") in _WEB_VALIDATION_ONLY_TOOLS
+            if str(tool.get("function", {}).get("name") or "") in deps._WEB_VALIDATION_ONLY_TOOLS
         ]
         if web_validation_execution_denied:
             # A denial, explanatory question, or future statement is not an
@@ -772,7 +774,7 @@ async def _run_agent_impl(
         _skills = []
     else:
         try:
-            _skills = list_skills()
+            _skills = deps.list_skills()
         except Exception:  # noqa: BLE001 — 스킬 목록 실패는 치명적이지 않음
             _skills = []
     skill_names: set[str] = set()
@@ -780,7 +782,7 @@ async def _run_agent_impl(
         _skill_tools = []
         for s in _skills:
             nm = s["name"]
-            if nm in REGISTRY or nm == "generate_image":  # 빌트인 이름과 겹치는 스킬은 노출 안 함
+            if nm in deps.REGISTRY or nm == "generate_image":  # 빌트인 이름과 겹치는 스킬은 노출 안 함
                 continue
             skill_names.add(nm)
             _skill_tools.append({
@@ -811,7 +813,7 @@ async def _run_agent_impl(
             enabled_scope_labels.append("Aiso central calendar data")
         if {"list_mydb_library", "list_mydb_history", "list_mydb_trash", "restore_mydb_trash_node"} & policy_tool_names:
             enabled_scope_labels.append("My DB library metadata")
-        workspace_tools_exposed = bool(policy_tool_names - WORKSPACE_FREE_TOOLS)
+        workspace_tools_exposed = bool(policy_tool_names - deps.WORKSPACE_FREE_TOOLS)
         if no_workspace or not workspace_tools_exposed:
             disabled_scope_labels.append("workspace")
         else:
@@ -978,10 +980,10 @@ async def _run_agent_impl(
     # 캡을 지금 고정하는 이유: reserve_tokens가 이 지점에서 확정되고, 아래 스텝 루프가
     # 시작되기 전까지 role="tool" append가 하나도 없기 때문이다. 루프 안에서 캡이 다시
     # 계산되면 같은 도구 결과가 턴마다 다른 바이트가 되어 KV 프리픽스가 깨진다.
-    convo = ModelConversation(
-        convo, tool_result_cap=tool_result_cap(context_length, reserve_tokens)
+    convo = deps.ModelConversation(
+        convo, tool_result_cap=deps.tool_result_cap(context_length, reserve_tokens)
     )
-    for step in range(MAX_STEPS):
+    for step in range(deps.MAX_STEPS):
         # The renderer/Main grant scopes the whole user request with a stable base
         # ID.  Tool execution identity is narrower: one deterministic scope per
         # assistant model response.  A transport retry of the same response keeps
@@ -993,9 +995,9 @@ async def _run_agent_impl(
             if route_phase is not None and not route_finalized
             else 2048
             if route_finalized
-            else MAX_GEN_TOKENS
+            else deps.MAX_GEN_TOKENS
         )
-        working = compact_convo(
+        working = deps.compact_convo(
             convo,
             context_length,
             reserve_tokens,
@@ -1027,7 +1029,7 @@ async def _run_agent_impl(
                 "type": "function",
                 "function": {"name": route_phase.required_tool},
             }
-        base = LlmRequest(
+        base = deps.LlmRequest(
             model=model,
             messages=messages,
             tools=tools,
@@ -1040,9 +1042,9 @@ async def _run_agent_impl(
         final = None
         gen_error = None
         generation_stream = (
-            _generate_turn(host, base, reasoning_effort, model_runtime, offload_noticed)
+            deps._generate_turn(host, base, reasoning_effort, model_runtime, offload_noticed)
             if runtime is None
-            else _generate_turn(
+            else deps._generate_turn(
                 host,
                 base,
                 reasoning_effort,
@@ -1109,7 +1111,7 @@ async def _run_agent_impl(
                 await generation_stream.aclose()
         if gen_error is not None:  # 치명적 종료(연결·Ollama·빈 응답·파싱 소진) → 런 종료
             yield {"type": "error", "error": gen_error}
-            _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+            deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
             return
 
         # 이번 턴 생성 토큰 누적 + 실시간 표시용 usage 이벤트 (출력 토큰만, 멀티턴이면 턴마다 증가)
@@ -1127,7 +1129,7 @@ async def _run_agent_impl(
             yield usage_event
 
         try:
-            tool_calls = _normalize_tool_calls(final.get("tool_calls") or [], assistant_response_id)
+            tool_calls = deps._normalize_tool_calls(final.get("tool_calls") or [], assistant_response_id)
             exposed_schemas_by_name = {
                 str(schema.get("function", {}).get("name") or ""): schema
                 for schema in tools
@@ -1142,12 +1144,12 @@ async def _run_agent_impl(
                 # provider-neutral JSON-object check still ran above; leave
                 # model-profile-specific compatibility to the image handler.
                 if schema is not None and tool_name != "generate_image":
-                    execution.validate_tool_arguments(
+                    deps.execution.validate_tool_arguments(
                         tool_name,
                         function.get("arguments") or {},
                         schema,
                     )
-        except ToolCallProtocolError as error:
+        except deps.ToolCallProtocolError as error:
             # Do not execute an ambiguous/defaulted call.  A single bounded
             # repair turn is enough for a provider/local-model formatting slip;
             # repeated malformed protocol is a real failure, not a reason to
@@ -1169,7 +1171,7 @@ async def _run_agent_impl(
                 }
                 continue
             yield {"type": "error", "error": f"도구 호출 프로토콜 오류: {error}"}
-            _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+            deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
             return
 
         # A clear image request must not fail merely because a small local model
@@ -1188,8 +1190,8 @@ async def _run_agent_impl(
             and image_nudged
             and not research_image_route
         ):
-            fallback_prompt = _bounded_image_selection_context(last_user_request).strip()
-            tool_calls = _normalize_tool_calls(
+            fallback_prompt = deps._bounded_image_selection_context(last_user_request).strip()
+            tool_calls = deps._normalize_tool_calls(
                 [
                     {
                         "provider_tool_call_id": f"aiso-image-fallback-{assistant_response_id}",
@@ -1223,7 +1225,7 @@ async def _run_agent_impl(
             # fallback: no other mutating route is synthesized.
             todo_action_fallback_attempted = True
             todo_tool_name = route_phase.required_tool
-            tool_calls = _normalize_tool_calls(
+            tool_calls = deps._normalize_tool_calls(
                 [
                     {
                         "provider_tool_call_id": f"aiso-todo-fallback-{assistant_response_id}",
@@ -1262,7 +1264,7 @@ async def _run_agent_impl(
             and not calendar_list_fallback_attempted
         ):
             calendar_list_fallback_attempted = True
-            tool_calls = _normalize_tool_calls(
+            tool_calls = deps._normalize_tool_calls(
                 [
                     {
                         "provider_tool_call_id": f"aiso-calendar-list-fallback-{assistant_response_id}",
@@ -1303,7 +1305,7 @@ async def _run_agent_impl(
                         route_decision, route_phase, response_language
                     ),
                 }
-                _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+                deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                 yield {"type": "done"}
                 return
             if (
@@ -1316,8 +1318,8 @@ async def _run_agent_impl(
                 if final.get("content", "").strip():
                     convo.append({
                         "role": "assistant",
-                        "content": _safe_unverified_image_completion_text(
-                            _safe_image_turn_text(final["content"], response_language),
+                        "content": deps._safe_unverified_image_completion_text(
+                            deps._safe_image_turn_text(final["content"], response_language),
                             response_language,
                         ),
                     })
@@ -1342,7 +1344,7 @@ async def _run_agent_impl(
                 and not truncated
                 and "run_web" in exposed_tool_names
                 and not existing_validation_complete()
-                and spin < SPIN_LIMIT
+                and spin < deps.SPIN_LIMIT
             ):
                 nudge_content: str | None = None
                 nudge_notice = ""
@@ -1390,7 +1392,7 @@ async def _run_agent_impl(
                     if final.get("content", "").strip():
                         convo.append({
                             "role": "assistant",
-                            "content": _safe_unverified_image_completion_text(
+                            "content": deps._safe_unverified_image_completion_text(
                                 final["content"], response_language
                             ),
                         })
@@ -1402,13 +1404,13 @@ async def _run_agent_impl(
                 and "run_web" in exposed_tool_names
                 and pending_html_validation
                 and not html_validation_nudged
-                and spin < SPIN_LIMIT
+                and spin < deps.SPIN_LIMIT
             ):
                 html_validation_nudged = True
                 if final.get("content", "").strip():
                     convo.append({
                         "role": "assistant",
-                        "content": _safe_unverified_image_completion_text(
+                        "content": deps._safe_unverified_image_completion_text(
                             final["content"], response_language
                         ),
                     })
@@ -1434,16 +1436,16 @@ async def _run_agent_impl(
             incomplete = [s for s in plan if s.get("status") != "completed"] if plan else []
             # 자동 이어가기: 툴 없이 끝내려 하지만 계획에 미완 단계가 남았으면, 끝내지 말고
             # '다음 단계를 실제로 실행하라'고 찔러 이어가게 한다 (넛지·정체 한도 안에서만).
-            if not truncated and incomplete and nudges < MAX_NUDGES and spin < SPIN_LIMIT:
+            if not truncated and incomplete and nudges < deps.MAX_NUDGES and spin < deps.SPIN_LIMIT:
                 nudges += 1
                 if final.get("content", "").strip():  # 모델의 이번 설명을 대화에 남긴다
                     content = (
-                        _safe_unverified_image_completion_text(
-                            _safe_image_turn_text(final["content"], response_language),
+                        deps._safe_unverified_image_completion_text(
+                            deps._safe_image_turn_text(final["content"], response_language),
                             response_language,
                         )
                         if image_requested
-                        else _safe_unverified_image_completion_text(
+                        else deps._safe_unverified_image_completion_text(
                             final["content"], response_language
                         )
                     )
@@ -1465,14 +1467,14 @@ async def _run_agent_impl(
             if image_requested:
                 response_parts: list[str] = []
                 if completed_images_run:
-                    response_parts.append(_image_completion_text(completed_images_run, response_language))
+                    response_parts.append(deps._image_completion_text(completed_images_run, response_language))
                 model_content = final.get("content", "")
                 if model_content:
-                    safe_content = _safe_image_turn_text(model_content, response_language)
+                    safe_content = deps._safe_image_turn_text(model_content, response_language)
                     # Even an explicit image request is not proof of success:
                     # without an image_result card, reject completion-looking
                     # model prose instead of persisting a phantom generation.
-                    safe_content = _safe_unverified_image_completion_text(
+                    safe_content = deps._safe_unverified_image_completion_text(
                         safe_content, response_language
                     )
                     # 성공 이미지가 있으면 조작 링크를 대체한 실패 문구는 붙이지 않는다.
@@ -1492,7 +1494,7 @@ async def _run_agent_impl(
                 if model_content:
                     yield {
                         "type": "content",
-                        "text": _safe_unverified_image_completion_text(
+                        "text": deps._safe_unverified_image_completion_text(
                             model_content, response_language
                         ),
                     }
@@ -1501,7 +1503,7 @@ async def _run_agent_impl(
                 if model_content and (held_unverified_image_claim or not streamed_model_content):
                     yield {
                         "type": "content",
-                        "text": _safe_unverified_image_completion_text(
+                        "text": deps._safe_unverified_image_completion_text(
                             model_content, response_language
                         ),
                     }
@@ -1533,7 +1535,7 @@ async def _run_agent_impl(
                     missing=missing_validation_targets(),
                 )
             # 파일이 변경됐고 색인이 있으면 백그라운드로 증분 재색인 (done을 막지 않음)
-            _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+            deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
             yield {"type": "done"}
             return
 
@@ -1543,7 +1545,7 @@ async def _run_agent_impl(
         ]
         disabled_requested = [
             name for name in requested_tool_names
-            if (name in REGISTRY or name == "generate_image") and name not in enabled_tool_names
+            if (name in deps.REGISTRY or name == "generate_image") and name not in enabled_tool_names
         ]
         if disabled_requested:
             yield {
@@ -1591,7 +1593,7 @@ async def _run_agent_impl(
                     route_decision, route_phase, response_language
                 ),
             }
-            _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+            deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
             yield {"type": "done"}
             return
         if route_phase is not None and not route_finalized:
@@ -1623,7 +1625,7 @@ async def _run_agent_impl(
                         route_decision, route_phase, response_language
                     ),
                 }
-                _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+                deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                 yield {"type": "done"}
                 return
         unauthorized = [name for name in requested_tool_names if name not in exposed_tool_names]
@@ -1633,7 +1635,7 @@ async def _run_agent_impl(
             #   (2) 실존하지만 지금 범위 밖 — 정책 차단(예: 기존 웹 산출물 검증 중 수정 도구).
             # (2)는 보호가 목적이므로 종료가 맞다. (1)에만 한 번의 교정 턴을 준다.
             # 아직 배치가 하나도 실행되지 않은 시점이라 부분 부작용 위험이 없다.
-            known_names = set(REGISTRY) | {"generate_image"} | set(skill_names)
+            known_names = set(deps.REGISTRY) | {"generate_image"} | set(skill_names)
             all_hallucinated = all(name not in known_names for name in unauthorized)
             if all_hallucinated and not unknown_tool_recovery_attempted:
                 unknown_tool_recovery_attempted = True
@@ -1656,7 +1658,7 @@ async def _run_agent_impl(
             blocked_mutation = next(
                 (
                     name for name in unauthorized
-                    if name in _WEB_VALIDATION_BLOCKED_MUTATION_TOOLS
+                    if name in deps._WEB_VALIDATION_BLOCKED_MUTATION_TOOLS
                 ),
                 None,
             )
@@ -1697,14 +1699,14 @@ async def _run_agent_impl(
         for tool_call in tool_calls:
             function = tool_call.get("function") or {}
             tool_name = str(function.get("name") or "")
-            tool_spec = REGISTRY.get(tool_name)
+            tool_spec = deps.REGISTRY.get(tool_name)
             if not (
                 (tool_spec is not None and tool_spec.mutates)
                 or tool_name in skill_names
             ):
                 continue
             effect_paths = _relative_tool_effect_paths(
-                tool_name, _parse_args(function.get("arguments")), root
+                tool_name, deps._parse_args(function.get("arguments")), root
             )
             if not effect_paths:
                 if explicit_preserved_paths:
@@ -1753,12 +1755,12 @@ async def _run_agent_impl(
         for tool_index, tool_call in enumerate(tool_calls):
             function = tool_call.get("function") or {}
             tool_name = function.get("name")
-            target = _html_entry_path(_parse_args(function.get("arguments")))
-            tool_spec = REGISTRY.get(str(tool_name or ""))
+            target = _html_entry_path(deps._parse_args(function.get("arguments")))
+            tool_spec = deps.REGISTRY.get(str(tool_name or ""))
             if (tool_spec is not None and tool_spec.mutates) or tool_name in skill_names:
                 effect_paths = _relative_tool_effect_paths(
                     str(tool_name or ""),
-                    _parse_args(function.get("arguments")),
+                    deps._parse_args(function.get("arguments")),
                     root,
                 )
                 for effect_path in effect_paths:
@@ -1785,7 +1787,7 @@ async def _run_agent_impl(
         ]
         raw_batch_keys = [target[0] for target in batch_run_targets if target is not None]
         if batch_run_targets and (
-            len(batch_run_targets) > _WEB_VALIDATION_RUN_BATCH_LIMIT
+            len(batch_run_targets) > deps._WEB_VALIDATION_RUN_BATCH_LIMIT
             or len(valid_batch_keys) != len(batch_run_targets)
             or len(valid_batch_keys) != len(set(valid_batch_keys))
         ):
@@ -1909,7 +1911,7 @@ async def _run_agent_impl(
                 str((tool_call.get("function") or {}).get("arguments") or "{}"),
             )
             for tool_call in tool_calls
-            if not is_meta(str((tool_call.get("function") or {}).get("name") or ""))
+            if not deps.is_meta(str((tool_call.get("function") or {}).get("name") or ""))
         ]
         if substantive_batch:
             batch_fingerprint = json.dumps(
@@ -1917,9 +1919,9 @@ async def _run_agent_impl(
             )
             next_batch_count = substantive_batch_counts.get(batch_fingerprint, 0) + 1
             if (
-                (len(substantive_batch) > 1 and next_batch_count > IDENTICAL_TOOL_BATCH_LIMIT)
+                (len(substantive_batch) > 1 and next_batch_count > deps.IDENTICAL_TOOL_BATCH_LIMIT)
                 or substantive_tool_call_count + len(substantive_batch)
-                > SUBSTANTIVE_TOOL_CALL_LIMIT
+                > deps.SUBSTANTIVE_TOOL_CALL_LIMIT
             ):
                 yield {
                     "type": "notice",
@@ -1944,7 +1946,7 @@ async def _run_agent_impl(
                 function = tool_call.get("function") or {}
                 if function.get("name") != "read_file":
                     continue
-                read_path = str(_parse_args(function.get("arguments")).get("path") or "")
+                read_path = str(deps._parse_args(function.get("arguments")).get("path") or "")
                 read_target = _html_entry_path({"path": read_path})
                 known_targets = required_validation_targets()
                 if (
@@ -2000,9 +2002,9 @@ async def _run_agent_impl(
             {
                 "role": "assistant",
                 "content": (
-                    _safe_image_turn_text(final.get("content", ""), response_language)
+                    deps._safe_image_turn_text(final.get("content", ""), response_language)
                     if image_requested
-                    else _safe_unverified_image_completion_text(
+                    else deps._safe_unverified_image_completion_text(
                         final.get("content", ""), response_language
                     )
                 ),
@@ -2011,16 +2013,16 @@ async def _run_agent_impl(
         )
 
         tool_names = [(tc.get("function") or {}).get("name", "") for tc in tool_calls]
-        substantive_tool_names = [name for name in tool_names if not is_meta(name)]
+        substantive_tool_names = [name for name in tool_names if not deps.is_meta(name)]
         substantive_tool_names_run.update(substantive_tool_names)
         discovery_calls_in_batch = sum(
-            name in _WEB_VALIDATION_DISCOVERY_TOOLS for name in tool_names
+            name in deps._WEB_VALIDATION_DISCOVERY_TOOLS for name in tool_names
         )
         if existing_web_validation_only and discovery_calls_in_batch:
             if (
-                discovery_calls_in_batch > _WEB_VALIDATION_DISCOVERY_BATCH_LIMIT
+                discovery_calls_in_batch > deps._WEB_VALIDATION_DISCOVERY_BATCH_LIMIT
                 or existing_web_validation_discovery_calls + discovery_calls_in_batch
-                > _WEB_VALIDATION_DISCOVERY_CALL_LIMIT
+                > deps._WEB_VALIDATION_DISCOVERY_CALL_LIMIT
             ):
                 yield {
                     "type": "notice",
@@ -2038,7 +2040,7 @@ async def _run_agent_impl(
         for idx, tc in enumerate(tool_calls):
             fn = tc.get("function") or {}
             name = fn.get("name", "")
-            args = _parse_args(fn.get("arguments"))
+            args = deps._parse_args(fn.get("arguments"))
             provider_tool_call_id = tc["provider_tool_call_id"]
             canonical_arguments = tc["canonical_arguments"]
             # ``step-index`` alone repeats whenever a persisted conversation
@@ -2083,7 +2085,7 @@ async def _run_agent_impl(
                     convo.append({
                         "role": "tool", "tool_call_id": provider_tool_call_id, "content": local_result
                     })
-                    if existing_web_validation_invalid_runs >= _WEB_VALIDATION_INVALID_RUN_LIMIT:
+                    if existing_web_validation_invalid_runs >= deps._WEB_VALIDATION_INVALID_RUN_LIMIT:
                         yield {
                             "type": "notice",
                             "text": (
@@ -2205,8 +2207,8 @@ async def _run_agent_impl(
                     attempts = web_validation_attempts.get(bounded_key, 0)
                     if (
                         prior_status is not None
-                        or attempts >= _WEB_VALIDATION_TARGET_ATTEMPT_LIMIT
-                        or web_validation_total_attempts >= _WEB_VALIDATION_TOTAL_ATTEMPT_LIMIT
+                        or attempts >= deps._WEB_VALIDATION_TARGET_ATTEMPT_LIMIT
+                        or web_validation_total_attempts >= deps._WEB_VALIDATION_TOTAL_ATTEMPT_LIMIT
                     ):
                         event_ids = {
                             "id": call_id,
@@ -2235,7 +2237,7 @@ async def _run_agent_impl(
                         }
                         yield {"type": "done"}
                         return
-            mutation_spec = REGISTRY.get(name)
+            mutation_spec = deps.REGISTRY.get(name)
             is_mutating_call = bool(
                 (mutation_spec is not None and mutation_spec.mutates)
                 or name in skill_names
@@ -2248,7 +2250,7 @@ async def _run_agent_impl(
                     raw_mutation_target.casefold() if os.name == "nt" else raw_mutation_target
                 )
                 attempts = mutation_target_attempts.get(mutation_target_key, 0)
-                if attempts >= MUTATION_TARGET_ATTEMPT_LIMIT:
+                if attempts >= deps.MUTATION_TARGET_ATTEMPT_LIMIT:
                     yield {
                         "type": "notice",
                         "text": (
@@ -2260,10 +2262,10 @@ async def _run_agent_impl(
                     return
                 mutation_target_attempts[mutation_target_key] = attempts + 1
 
-            ledger_key: LedgerKey | None = None
+            ledger_key: deps.LedgerKey | None = None
             ledger_record = None
             if execution_ledger is not None:
-                ledger_key = LedgerKey(session_id, assistant_response_id, provider_tool_call_id)
+                ledger_key = deps.LedgerKey(session_id, assistant_response_id, provider_tool_call_id)
                 try:
                     ledger_record = execution_ledger.reserve(
                         ledger_key,
@@ -2272,15 +2274,15 @@ async def _run_agent_impl(
                         approval_id=uuid4().hex,
                         execution_id=uuid4().hex,
                     )
-                except LedgerProtocolConflict as error:
+                except deps.LedgerProtocolConflict as error:
                     yield {"type": "error", "error": f"도구 호출 프로토콜 오류: {error}"}
                     yield {"type": "done"}
                     return
-                except (LedgerIndeterminate, LedgerInProgress) as error:
+                except (deps.LedgerIndeterminate, deps.LedgerInProgress) as error:
                     yield {"type": "error", "error": str(error)}
                     yield {"type": "done"}
                     return
-                except LedgerError:
+                except deps.LedgerError:
                     yield {"type": "error", "error": "Agent 실행 원장을 안전하게 확인할 수 없습니다."}
                     yield {"type": "done"}
                     return
@@ -2294,7 +2296,7 @@ async def _run_agent_impl(
                 repeat_count += 1
             else:
                 repeat_count, last_call_sig = 0, sig
-            if repeat_count >= STALL_REPEAT:
+            if repeat_count >= deps.STALL_REPEAT:
                 yield {
                     "type": "notice",
                     "text": (
@@ -2307,18 +2309,18 @@ async def _run_agent_impl(
                         "type": "run_summary",
                         "text": _run_progress_summary(executed_tool_records),
                     }
-                _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+                deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                 yield {"type": "done"}
                 return
 
             # 교대 루프 감지: 위 연속 검사는 A→B→A→B…에서 매번 리셋되어 무력하다.
             # 최근 창에 등장한 '서로 다른 동작'의 수를 세서, 다양성이 무너지면 멈춘다.
             # 정상 진행은 대상이나 내용이 매번 달라 다양성이 유지된다.
-            if not is_meta(name):
+            if not deps.is_meta(name):
                 recent_call_sigs.append(sig)
                 if (
-                    len(recent_call_sigs) >= STALL_WINDOW
-                    and len(set(recent_call_sigs)) < STALL_WINDOW_MIN_DISTINCT
+                    len(recent_call_sigs) >= deps.STALL_WINDOW
+                    and len(set(recent_call_sigs)) < deps.STALL_WINDOW_MIN_DISTINCT
                 ):
                     yield {
                         "type": "notice",
@@ -2333,7 +2335,7 @@ async def _run_agent_impl(
                             "type": "run_summary",
                             "text": _run_progress_summary(executed_tool_records),
                         }
-                    _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+                    deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                     yield {"type": "done"}
                     return
 
@@ -2353,7 +2355,7 @@ async def _run_agent_impl(
                     replay_provider_id = (
                         f"{provider_tool_call_id[:430]}:revalidation:{replay_nonce}"
                     )
-                    replay_key = LedgerKey(
+                    replay_key = deps.LedgerKey(
                         session_id, assistant_response_id, replay_provider_id
                     )
                     try:
@@ -2364,7 +2366,7 @@ async def _run_agent_impl(
                             approval_id=uuid4().hex,
                             execution_id=uuid4().hex,
                         )
-                    except LedgerError:
+                    except deps.LedgerError:
                         yield {
                             "type": "error",
                             "error": "현재 파일 재검증을 실행 원장에 안전하게 기록할 수 없습니다.",
@@ -2393,13 +2395,13 @@ async def _run_agent_impl(
             if ledger_record is not None and ledger_record.reusable:
                 reused_result = ledger_record.result
                 reused_ok = ledger_record.ok
-                if existing_web_validation_only and name in _WEB_VALIDATION_DISCOVERY_TOOLS:
+                if existing_web_validation_only and name in deps._WEB_VALIDATION_DISCOVERY_TOOLS:
                     existing_web_validation_discovery_seen = True
-                    if name in _WEB_VALIDATION_LISTING_TOOLS:
+                    if name in deps._WEB_VALIDATION_LISTING_TOOLS:
                         reused_result = _authoritative_html_inventory_result(
                             existing_web_validation_candidates
                         )
-                reused_spec = REGISTRY.get(name)
+                reused_spec = deps.REGISTRY.get(name)
                 reused_mutation = bool(
                     ledger_record.ok
                     and not ledger_record.rejected
@@ -2428,7 +2430,7 @@ async def _run_agent_impl(
                             )
                             reusable_effect_exists = (
                                 isinstance(expected_content, str)
-                                and len(expected_bytes) <= MAX_CODE_FILE_BYTES
+                                and len(expected_bytes) <= deps.MAX_CODE_FILE_BYTES
                                 and reused_path.is_relative_to(root_resolved)
                                 and reused_path.is_file()
                                 and reused_path.stat().st_size == len(expected_bytes)
@@ -2462,11 +2464,11 @@ async def _run_agent_impl(
                             "검증 권한을 복원하지 않았습니다. 현재 파일을 다시 확인하고 새 수정 호출로 이어가세요."
                         )
                 if name == "update_plan":
-                    plan = normalize_plan(args.get("steps"))
+                    plan = deps.normalize_plan(args.get("steps"))
                     done = sum(1 for plan_step in plan if plan_step["status"] == "completed")
                     yield {"type": "plan", "steps": plan}
                     reused_result = (
-                        f"계획 갱신됨 (완료 {done}/{len(plan)}).\n" + render_plan(plan).strip()
+                        f"계획 갱신됨 (완료 {done}/{len(plan)}).\n" + deps.render_plan(plan).strip()
                     )
                 if (
                     reused_ok
@@ -2529,7 +2531,7 @@ async def _run_agent_impl(
                             route_decision, route_phase, response_language
                         ),
                     }
-                    _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+                    deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                     yield {"type": "done"}
                     return
                 if (
@@ -2550,7 +2552,7 @@ async def _run_agent_impl(
                     existing_web_validation_only
                     and name == "run_web"
                     and not ledger_record.rejected
-                    and existing_web_validation_invalid_runs >= _WEB_VALIDATION_INVALID_RUN_LIMIT
+                    and existing_web_validation_invalid_runs >= deps._WEB_VALIDATION_INVALID_RUN_LIMIT
                 ):
                     yield {
                         "type": "notice",
@@ -2567,7 +2569,7 @@ async def _run_agent_impl(
             # 목록에서 이미 뺐지만 모델이 호출해도 안 돌게 한 겹 더 막는다. 단 등록되지 않은
             # (모델이 지어낸) 이름은 여기서 막지 않고 아래로 흘려 "알 수 없는 툴" 오류가 나게 한다
             # — 없는 툴을 "작업 폴더가 필요하다"고 잘못 안내하지 않도록.
-            if no_workspace and name in REGISTRY and name not in WORKSPACE_FREE_TOOLS:
+            if no_workspace and name in deps.REGISTRY and name not in deps.WORKSPACE_FREE_TOOLS:
                 result = (
                     f"[불가] '{name}'은(는) 작업 폴더가 있어야 쓸 수 있습니다. 지금은 작업 폴더 없이 실행 중이라 "
                     "로컬 파일·명령·코드 도구가 잠겨 있습니다. 웹 조사(web_search/web_fetch)와 "
@@ -2579,7 +2581,7 @@ async def _run_agent_impl(
                         result = execution_ledger.finish(
                             ledger_key, status="failed", result=result, ok=False
                         ).result
-                    except LedgerError:
+                    except deps.LedgerError:
                         yield {"type": "error", "error": "Agent 실행 원장을 안전하게 갱신할 수 없습니다."}
                         yield {"type": "done"}
                         return
@@ -2594,15 +2596,15 @@ async def _run_agent_impl(
                 if execution_ledger is not None and ledger_key is not None:
                     try:
                         execution_ledger.mark_running(ledger_key)
-                    except LedgerError:
+                    except deps.LedgerError:
                         yield {"type": "error", "error": "Agent 실행 원장을 안전하게 갱신할 수 없습니다."}
                         yield {"type": "done"}
                         return
-                plan = normalize_plan(args.get("steps"))
+                plan = deps.normalize_plan(args.get("steps"))
                 done = sum(1 for s in plan if s["status"] == "completed")
                 yield {"type": "plan", "steps": plan}
                 # 현재 계획 전체를 툴 결과에 담는다 — 모델이 진행 상황을 여기서 확인한다
-                result = f"계획 갱신됨 (완료 {done}/{len(plan)}).\n" + render_plan(plan).strip()
+                result = f"계획 갱신됨 (완료 {done}/{len(plan)}).\n" + deps.render_plan(plan).strip()
                 if execution_ledger is not None and ledger_key is not None:
                     try:
                         execution_ledger.finish(
@@ -2611,7 +2613,7 @@ async def _run_agent_impl(
                             result="계획 갱신 완료.",
                             ok=True,
                         ).result
-                    except LedgerError:
+                    except deps.LedgerError:
                         yield {"type": "error", "error": "Agent 실행 결과를 원장에 확정할 수 없습니다."}
                         yield {"type": "done"}
                         return
@@ -2627,18 +2629,18 @@ async def _run_agent_impl(
             # 런타임 경계가 자동 모드에 approval_request를 만들지 않도록 보장한다.
             # 읽기 모드만, 이미 로컬 작업 폴더/RAG 내용이 모델에 전달된 뒤의
             # 웹 검색·조회는 외부 전송 경계로 한 번 더 확인한다.
-            requires_approval = execution.requires_approval(
+            requires_approval = deps.execution.requires_approval(
                 approval_mode=approval_mode,
                 approval_name=_approval_name,
-                needs_approval_for_tool=needs_approval,
+                needs_approval_for_tool=deps.needs_approval,
                 workspace_context_exposed=workspace_context_exposed,
-                is_network_egress=name in NETWORK_EGRESS_TOOLS,
+                is_network_egress=name in deps.NETWORK_EGRESS_TOOLS,
             )
             if requires_approval:
                 if execution_ledger is not None and ledger_key is not None:
                     try:
                         execution_ledger.mark_awaiting_approval(ledger_key)
-                    except LedgerError:
+                    except deps.LedgerError:
                         yield {"type": "error", "error": "Agent 승인 상태를 원장에 기록할 수 없습니다."}
                         yield {"type": "done"}
                         return
@@ -2647,7 +2649,7 @@ async def _run_agent_impl(
                 approval_registry.open(key, legacy_key)
                 yield {"type": "approval_request", **event_ids, "name": name, "args": args}
                 try:
-                    outcome = await approval_registry.wait_outcome(key, APPROVAL_TIMEOUT)
+                    outcome = await approval_registry.wait_outcome(key, deps.APPROVAL_TIMEOUT)
                 finally:
                     approval_registry.close(key, legacy_key)
                 approved = outcome == agent_approval.APPROVED
@@ -2672,7 +2674,7 @@ async def _run_agent_impl(
                                 ok=False,
                                 rejected=not expired,
                             ).result
-                        except LedgerError:
+                        except deps.LedgerError:
                             yield {"type": "error", "error": "Agent 거절 결과를 원장에 확정할 수 없습니다."}
                             yield {"type": "done"}
                             return
@@ -2709,7 +2711,7 @@ async def _run_agent_impl(
             if execution_ledger is not None and ledger_key is not None:
                 try:
                     execution_ledger.mark_running(ledger_key)
-                except LedgerError:
+                except deps.LedgerError:
                     yield {"type": "error", "error": "Agent 실행 시작을 원장에 확정할 수 없습니다."}
                     yield {"type": "done"}
                     return
@@ -2733,46 +2735,46 @@ async def _run_agent_impl(
                     # 스킬을 이름 그대로 호출 → run_skill로 라우팅. args는 {"args": {...}}·평평한 dict 모두 허용.
                     _raw = args.get("args") if isinstance(args, dict) else None
                     _sargs = _raw if isinstance(_raw, dict) else (args if isinstance(args, dict) else None)
-                    result, shot = await run_skill(name=name, args=_sargs), None
+                    result, shot = await deps.run_skill(name=name, args=_sargs), None
                 elif name == "generate_image":
                     image_tool_attempted = True
                     if not image_requested:
-                        raise ToolError(
+                        raise deps.ToolError(
                             "사용자의 명확한 이미지 생성 지시가 없어 generate_image 실행을 차단했습니다."
                         )
                     if not image_enabled or not comfy_base_url:
-                        raise ToolError("Agent에서 사용할 수 있는 ComfyUI 모델 프로필이 없습니다.")
+                        raise deps.ToolError("Agent에서 사용할 수 있는 ComfyUI 모델 프로필이 없습니다.")
                     if not nvidia_gate5:
-                        await _release_llm_for_image(host)
+                        await deps._release_llm_for_image(host)
                     generation_args = {
                         key: value for key, value in args.items()
-                        if key in _IMAGE_TOOL_ARGS and not (nvidia_gate5 and key == "model_hint")
+                        if key in deps._IMAGE_TOOL_ARGS and not (nvidia_gate5 and key == "model_hint")
                     }
-                    generation_context = _bounded_image_selection_context(last_user_request)
+                    generation_context = deps._bounded_image_selection_context(last_user_request)
                     generation_args = _profile_owned_image_arguments(
                         generation_args, generation_context
                     )
                     try:
-                        generated = await generate_image(
+                        generated = await deps.generate_image(
                             base_url=comfy_base_url,
                             profiles=image_profiles,
                             selection_context=generation_context,
                             selected_profile_id=manual_comfy_profile_id,
                             **generation_args,
                         )
-                    except GenerationError as first_error:
-                        if _is_image_generation_input_error(first_error):
+                    except deps.GenerationError as first_error:
+                        if deps._is_image_generation_input_error(first_error):
                             raise
-                        if not _is_retryable_image_generation_error(first_error):
+                        if not deps._is_retryable_image_generation_error(first_error):
                             detail = str(first_error)
                             local_result = f"[오류] ComfyUI 이미지 생성이 중단되었습니다: {detail}"
-                            result = _nvidia_image_error_result() if nvidia_gate5 else local_result
+                            result = deps._nvidia_image_error_result() if nvidia_gate5 else local_result
                             if execution_ledger is not None and ledger_key is not None:
                                 try:
                                     result = execution_ledger.finish(
                                         ledger_key, status="failed", result=result, ok=False
                                     ).result
-                                except LedgerError:
+                                except deps.LedgerError:
                                     yield {"type": "error", "error": "이미지 실패 결과를 원장에 확정할 수 없습니다."}
                                     yield {"type": "done"}
                                     return
@@ -2790,7 +2792,7 @@ async def _run_agent_impl(
                             if completed_images_run:
                                 yield {
                                     "type": "content",
-                                    "text": _image_completion_text(completed_images_run, response_language),
+                                    "text": deps._image_completion_text(completed_images_run, response_language),
                                 }
                             yield {
                                 "type": "error",
@@ -2800,7 +2802,7 @@ async def _run_agent_impl(
                                     "자동 재시도하지 않았습니다."
                                 ),
                             }
-                            _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+                            deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                             yield {"type": "done"}
                             return
                         yield {
@@ -2809,23 +2811,23 @@ async def _run_agent_impl(
                             "transient": True,
                         }
                         try:
-                            generated = await generate_image(
+                            generated = await deps.generate_image(
                                 base_url=comfy_base_url,
                                 profiles=image_profiles,
                                 selection_context=generation_context,
                                 selected_profile_id=manual_comfy_profile_id,
                                 **generation_args,
                             )
-                        except GenerationError as retry_error:
+                        except deps.GenerationError as retry_error:
                             detail = str(retry_error)
                             local_result = f"[오류] ComfyUI 이미지 생성이 1회 자동 재시도에서도 실패했습니다: {detail}"
-                            result = _nvidia_image_error_result() if nvidia_gate5 else local_result
+                            result = deps._nvidia_image_error_result() if nvidia_gate5 else local_result
                             if execution_ledger is not None and ledger_key is not None:
                                 try:
                                     result = execution_ledger.finish(
                                         ledger_key, status="failed", result=result, ok=False
                                     ).result
-                                except LedgerError:
+                                except deps.LedgerError:
                                     yield {"type": "error", "error": "이미지 실패 결과를 원장에 확정할 수 없습니다."}
                                     yield {"type": "done"}
                                     return
@@ -2843,7 +2845,7 @@ async def _run_agent_impl(
                             if completed_images_run:
                                 yield {
                                     "type": "content",
-                                    "text": _image_completion_text(completed_images_run, response_language),
+                                    "text": deps._image_completion_text(completed_images_run, response_language),
                                 }
                             yield {
                                 "type": "error",
@@ -2854,7 +2856,7 @@ async def _run_agent_impl(
                                     "오류를 해결할 수 없어 다른 도구는 실행하지 않았습니다."
                                 ),
                             }
-                            _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+                            deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                             yield {"type": "done"}
                             return
                     image_result = generated.get("image")
@@ -2863,9 +2865,9 @@ async def _run_agent_impl(
                         height = image_result.get("height") if isinstance(image_result, dict) else None
                         result = f"로컬 이미지 생성 완료 ({width}x{height})."
                     else:
-                        result = result_to_tool_text(generated)
+                        result = deps.result_to_tool_text(generated)
                     shot = None
-                elif existing_web_validation_only and name in _WEB_VALIDATION_LISTING_TOOLS:
+                elif existing_web_validation_only and name in deps._WEB_VALIDATION_LISTING_TOOLS:
                     # The complete inventory was already collected once in a
                     # bounded worker. Never let a model-selected glob/list call
                     # re-walk a large workspace or alter the authorization set.
@@ -2874,10 +2876,10 @@ async def _run_agent_impl(
                     )
                     shot = None
                 else:
-                    spec = REGISTRY.get(name)
+                    spec = deps.REGISTRY.get(name)
                     if spec is None:
                         # 미등록 툴 → run_tool이 "알 수 없는 툴" ToolError를 낸다 (기존 동작 보존)
-                        result, shot = run_tool(root, name, args), None
+                        result, shot = deps.run_tool(root, name, args), None
                     else:
                         # 취소가 execute() 안에서 들어오면 도구가 이미 파일을 일부 바꿨을 수 있다.
                         # 성공 반환 뒤에만 dirty를 표시하면 공통 finally가 재색인을 놓친다.
@@ -2891,10 +2893,10 @@ async def _run_agent_impl(
                             if existing_web_validation_only and name == "run_web"
                             else args
                         )
-                        result, shot = await execute(spec, root, host, execution_args)
-                        if name in WORKSPACE_CONTEXT_TOOLS:
+                        result, shot = await deps.execute(spec, root, host, execution_args)
+                        if name in deps.WORKSPACE_CONTEXT_TOOLS:
                             workspace_context_exposed = True
-                if existing_web_validation_only and name in _WEB_VALIDATION_DISCOVERY_TOOLS:
+                if existing_web_validation_only and name in deps._WEB_VALIDATION_DISCOVERY_TOOLS:
                     existing_web_validation_discovery_seen = True
                 tool_ok = True
                 if name == "run_web":
@@ -2933,7 +2935,7 @@ async def _run_agent_impl(
                         route_phase, str(result)
                     )
                     tool_ok = False
-                completed_spec = REGISTRY.get(name)
+                completed_spec = deps.REGISTRY.get(name)
                 effective_mutation = bool(
                     tool_ok
                     and not str(result).startswith("[NO_CHANGE]")
@@ -2973,7 +2975,7 @@ async def _run_agent_impl(
                         if (
                             not _explicit_web_validation_no_run
                             and web_validation_attempts.get(policy_key, 0)
-                            < _WEB_VALIDATION_TARGET_ATTEMPT_LIMIT
+                            < deps._WEB_VALIDATION_TARGET_ATTEMPT_LIMIT
                         ):
                             web_validation_terminal_status.pop(policy_key, None)
                     elif name == "run_web" and validation_status is not None:
@@ -2988,7 +2990,7 @@ async def _run_agent_impl(
                             result=result,
                             ok=tool_ok,
                         ).result
-                    except LedgerError:
+                    except deps.LedgerError:
                         yield {
                             "type": "error",
                             "error": (
@@ -3006,7 +3008,7 @@ async def _run_agent_impl(
                 }
                 # 실행 사실 기록 — 모델의 서술과 분리해 하네스가 직접 관측한 것만 남긴다.
                 # 안전 한도로 런이 멈출 때 다음 런에 넘길 근거가 된다.
-                if not is_meta(name):
+                if not deps.is_meta(name):
                     executed_tool_records.append(
                         {"name": name, "target": _tool_record_target(args), "ok": bool(tool_ok)}
                     )
@@ -3049,7 +3051,7 @@ async def _run_agent_impl(
                     }
                 if (
                     invalid_web_result
-                    and existing_web_validation_invalid_runs >= _WEB_VALIDATION_INVALID_RUN_LIMIT
+                    and existing_web_validation_invalid_runs >= deps._WEB_VALIDATION_INVALID_RUN_LIMIT
                 ):
                     yield {
                         "type": "notice",
@@ -3060,10 +3062,10 @@ async def _run_agent_impl(
                     }
                     yield {"type": "done"}
                     return
-            except ToolError as e:
+            except deps.ToolError as e:
                 local_result = f"[오류] {e}"
                 result = (
-                    _nvidia_image_error_result(input_error=True)
+                    deps._nvidia_image_error_result(input_error=True)
                     if nvidia_gate5 and name == "generate_image"
                     else local_result
                 )
@@ -3072,7 +3074,7 @@ async def _run_agent_impl(
                         result = execution_ledger.finish(
                             ledger_key, status="failed", result=result, ok=False
                         ).result
-                    except LedgerError:
+                    except deps.LedgerError:
                         yield {"type": "error", "error": "도구 실패 결과를 안전하게 확정하지 못했습니다."}
                         yield {"type": "done"}
                         return
@@ -3095,14 +3097,14 @@ async def _run_agent_impl(
                 # 중단하지 말고, 오류를 모델에 돌려주어 스스로 고쳐 이어가게 한다.
                 if (
                     name == "generate_image"
-                    and isinstance(e, GenerationError)
-                    and _is_image_generation_input_error(e)
+                    and isinstance(e, deps.GenerationError)
+                    and deps._is_image_generation_input_error(e)
                 ):
                     pending_image_input_errors_run += 1
                 local_result = f"[오류] 툴 실행 실패 ({type(e).__name__}): {e}"
                 result = (
-                    _nvidia_image_error_result(
-                        input_error=isinstance(e, GenerationError) and _is_image_generation_input_error(e)
+                    deps._nvidia_image_error_result(
+                        input_error=isinstance(e, deps.GenerationError) and deps._is_image_generation_input_error(e)
                     )
                     if nvidia_gate5 and name == "generate_image"
                     else local_result
@@ -3112,7 +3114,7 @@ async def _run_agent_impl(
                         result = execution_ledger.finish(
                             ledger_key, status="failed", result=result, ok=False
                         ).result
-                    except LedgerError:
+                    except deps.LedgerError:
                         yield {"type": "error", "error": "도구 실패 결과를 안전하게 확정하지 못했습니다."}
                         yield {"type": "done"}
                         return
@@ -3150,7 +3152,7 @@ async def _run_agent_impl(
                         route_decision, route_phase, response_language
                     ),
                 }
-                _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+                deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                 yield {"type": "done"}
                 return
 
@@ -3167,7 +3169,7 @@ async def _run_agent_impl(
                 )
                 if direct_route_result is not None:
                     yield {"type": "content", "text": direct_route_result}
-                    _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+                    deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                     yield {"type": "done"}
                     return
                 route_finalized = True
@@ -3272,7 +3274,7 @@ async def _run_agent_impl(
         if (
             existing_web_validation_only
             and not existing_validation_complete()
-            and existing_web_validation_discovery_turns >= _WEB_VALIDATION_DISCOVERY_TURN_LIMIT
+            and existing_web_validation_discovery_turns >= deps._WEB_VALIDATION_DISCOVERY_TURN_LIMIT
         ):
             yield {
                 "type": "notice",
@@ -3296,15 +3298,15 @@ async def _run_agent_impl(
         ):
             yield {
                 "type": "content",
-                "text": _image_completion_text(completed_images_run, response_language),
+                "text": deps._image_completion_text(completed_images_run, response_language),
             }
-            _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+            deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
             yield {"type": "done"}
             return
 
         # ── 정체(spin) 감지 ── 이번 턴에 실제 작업 툴(메타 툴 외)이 있었나?
         substantive = any(
-            not is_meta((tc.get("function") or {}).get("name", "")) for tc in tool_calls
+            not deps.is_meta((tc.get("function") or {}).get("name", "")) for tc in tool_calls
         )
         if substantive:
             spin = 0
@@ -3312,8 +3314,8 @@ async def _run_agent_impl(
         else:
             # 이 턴엔 update_plan 같은 메타 툴만 호출 = 실질 진전 없음
             spin += 1
-            if spin >= SPIN_LIMIT:
-                _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+            if spin >= deps.SPIN_LIMIT:
+                deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                 yield {
                     "type": "notice",
                     "text": (
@@ -3348,11 +3350,11 @@ async def _run_agent_impl(
                 })
 
     # 최후의 안전선 도달 — 오류가 아니라 '길어서 잠깐 멈춤'으로 안내하고 이어갈 수 있게 한다.
-    _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+    deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
     yield {
         "type": "notice",
         "text": (
-            f"작업이 매우 길어 {MAX_STEPS}단계에서 일단 멈췄습니다(폭주 방지 안전선). "
+            f"작업이 매우 길어 {deps.MAX_STEPS}단계에서 일단 멈췄습니다(폭주 방지 안전선). "
             "여기까지 한 내용은 유지됩니다 — 이어서 계속하려면 '계속해줘'라고 해주세요."
         ),
     }
@@ -3375,4 +3377,4 @@ async def _run_agent_impl(
     yield {"type": "done"}
 
 
-__all__ = ["_run_agent_impl", "bind_dependencies"]
+__all__ = ["_run_agent_impl"]
