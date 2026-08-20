@@ -59,6 +59,11 @@ def test_agent_tools_snapshot():
     """
     expected = json.loads(_SNAPSHOT.read_text(encoding="utf-8"))
     assert agent.AGENT_TOOLS == expected
+    # list_change_history / knowledge_graph.py 는 폐기된 설계다. My DB의 백엔드가
+    # 되려다가, "에이전트로 만든 파일이 여기에 쌓이는 구조가 절대 아니다"라는 방향
+    # 확정으로 2026-07-19에 연결이 끊겼고, My DB는 src/main/mydb.ts 로 새로 구현됐다.
+    # 에이전트의 My DB 접근은 list_mydb_* 4개 도구로 이미 다시 열려 있다.
+    # 이 단언은 폐기된 도구가 다시 노출되는 것을 막는다.
     assert "list_change_history" not in {schema["function"]["name"] for schema in agent.AGENT_TOOLS}
 
 
