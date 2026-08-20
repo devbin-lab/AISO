@@ -12,9 +12,14 @@ import hashlib
 import json
 import os
 import re
+from collections import deque
 from pathlib import Path
 from typing import Any, AsyncGenerator, Mapping
 from uuid import uuid4
+
+# 승인 결과 상수만 직접 가져온다. agent_approval은 asyncio/dataclasses만 의존하는
+# 리프 모듈이라 순환 import 위험이 없다(나머지 협력자는 bind_dependencies로 주입된다).
+import agent_approval
 
 _RESERVED = frozenset({"_RESERVED", "bind_dependencies", "_run_agent_impl"})
 
@@ -489,6 +494,8 @@ async def _run_agent_impl(
         return existing_web_validation_invalid_runs >= _WEB_VALIDATION_INVALID_RUN_LIMIT
     last_call_sig: str | None = None  # 직전 툴 호출 서명 (무한 루프 감지용)
     repeat_count = 0
+    # 교대 루프 감지용 슬라이딩 창 — 연속 동일 검사가 놓치는 A→B→A→B…를 잡는다.
+    recent_call_sigs: deque[str] = deque(maxlen=STALL_WINDOW)
     substantive_tool_call_count = 0
     substantive_batch_counts: dict[str, int] = {}
     mutation_target_attempts: dict[str, int] = {}
@@ -641,6 +648,9 @@ async def _run_agent_impl(
                     workspace_context_exposed = bool(rag_context)
         except Exception:  # noqa: BLE001 - RAG failure is non-fatal for a turn.
             rag_available = rag_available and bool(rag_context)
+            # finally 백스톱이 읽는 값이므로 낮아진 판정도 반영한다. 안 그러면
+            # cleanup_state가 지역 변수보다 관대해져 종료 시 불필요한 재색인을 던진다.
+            cleanup_state["rag_available"] = rag_available
 
     if existing_web_validation_only:
         # 새 제작으로 회귀하지 못하게 이번 요청의 실제 tool schema부터 최소 권한으로 좁힌다.
@@ -683,6 +693,7 @@ async def _run_agent_impl(
     # rather than consuming an unbounded sequence of web calls.
     route_evidence_failures = 0
     tool_protocol_recovery_attempted = False
+    unknown_tool_recovery_attempted = False
     if route_decision.final_response_only:
         tools = []
     elif route_phase is not None:
@@ -920,6 +931,13 @@ async def _run_agent_impl(
     rag_message = {"role": "user", "content": rag_context} if rag_context else None
     # 압축 예산 계산용 고정 오버헤드(토큰 근사) — 시스템+툴 스키마
     reserve_tokens = (len(stable_sys) + len(json.dumps(tools, ensure_ascii=False))) // 3
+    # 여기서부터 convo는 도구 결과를 기록 시점에 한 번만 자르는 append-only 대화가 된다.
+    # 캡을 지금 고정하는 이유: reserve_tokens가 이 지점에서 확정되고, 아래 스텝 루프가
+    # 시작되기 전까지 role="tool" append가 하나도 없기 때문이다. 루프 안에서 캡이 다시
+    # 계산되면 같은 도구 결과가 턴마다 다른 바이트가 되어 KV 프리픽스가 깨진다.
+    convo = ModelConversation(
+        convo, tool_result_cap=tool_result_cap(context_length, reserve_tokens)
+    )
     for step in range(MAX_STEPS):
         # The renderer/Main grant scopes the whole user request with a stable base
         # ID.  Tool execution identity is narrower: one deterministic scope per
@@ -1048,14 +1066,22 @@ async def _run_agent_impl(
                 await generation_stream.aclose()
         if gen_error is not None:  # 치명적 종료(연결·Ollama·빈 응답·파싱 소진) → 런 종료
             yield {"type": "error", "error": gen_error}
-            _maybe_reindex(root, host, dirty, rag_available)
+            _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
             return
 
         # 이번 턴 생성 토큰 누적 + 실시간 표시용 usage 이벤트 (출력 토큰만, 멀티턴이면 턴마다 증가)
         turn_tokens = final.get("output_tokens") or 0
+        # prompt_tokens는 사용량 집계(total)에 넣지 않는다 — 그건 '생성 토큰' 계약이고
+        # 렌더러 usage.record가 그 정의로 쓰인다. 여기서는 컨텍스트 예산이 실제로
+        # 맞는지 관측하기 위한 참고값으로만 함께 실어 보낸다.
+        turn_prompt_tokens = final.get("input_tokens")
         if turn_tokens:
             total_tokens += turn_tokens
-            yield {"type": "usage", "total": total_tokens}
+            usage_event: dict[str, Any] = {"type": "usage", "total": total_tokens}
+            if isinstance(turn_prompt_tokens, int):
+                usage_event["prompt_tokens"] = turn_prompt_tokens
+                usage_event["context_length"] = context_length
+            yield usage_event
 
         try:
             tool_calls = _normalize_tool_calls(final.get("tool_calls") or [], assistant_response_id)
@@ -1100,7 +1126,7 @@ async def _run_agent_impl(
                 }
                 continue
             yield {"type": "error", "error": f"도구 호출 프로토콜 오류: {error}"}
-            _maybe_reindex(root, host, dirty, rag_available)
+            _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
             return
 
         # A clear image request must not fail merely because a small local model
@@ -1234,7 +1260,7 @@ async def _run_agent_impl(
                         route_decision, route_phase, response_language
                     ),
                 }
-                _maybe_reindex(root, host, dirty, rag_available)
+                _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                 yield {"type": "done"}
                 return
             if (
@@ -1464,7 +1490,7 @@ async def _run_agent_impl(
                     missing=missing_validation_targets(),
                 )
             # 파일이 변경됐고 색인이 있으면 백그라운드로 증분 재색인 (done을 막지 않음)
-            _maybe_reindex(root, host, dirty, rag_available)
+            _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
             yield {"type": "done"}
             return
 
@@ -1522,7 +1548,7 @@ async def _run_agent_impl(
                     route_decision, route_phase, response_language
                 ),
             }
-            _maybe_reindex(root, host, dirty, rag_available)
+            _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
             yield {"type": "done"}
             return
         if route_phase is not None and not route_finalized:
@@ -1554,11 +1580,36 @@ async def _run_agent_impl(
                         route_decision, route_phase, response_language
                     ),
                 }
-                _maybe_reindex(root, host, dirty, rag_available)
+                _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                 yield {"type": "done"}
                 return
         unauthorized = [name for name in requested_tool_names if name not in exposed_tool_names]
         if unauthorized:
+            # 두 가지가 섞여 있다.
+            #   (1) 아예 없는 이름 — 작은 로컬 모델의 최빈 실패(도구명 환각).
+            #   (2) 실존하지만 지금 범위 밖 — 정책 차단(예: 기존 웹 산출물 검증 중 수정 도구).
+            # (2)는 보호가 목적이므로 종료가 맞다. (1)에만 한 번의 교정 턴을 준다.
+            # 아직 배치가 하나도 실행되지 않은 시점이라 부분 부작용 위험이 없다.
+            known_names = set(REGISTRY) | {"generate_image"} | set(skill_names)
+            all_hallucinated = all(name not in known_names for name in unauthorized)
+            if all_hallucinated and not unknown_tool_recovery_attempted:
+                unknown_tool_recovery_attempted = True
+                available = ", ".join(sorted(exposed_tool_names)) or "(none)"
+                convo.append({
+                    "role": "user",
+                    "content": (
+                        "Aiso tool correction: no tool was executed because "
+                        f"`{unauthorized[0] or '(unnamed)'}` is not a real tool. "
+                        f"The only tools that exist right now are: {available}. "
+                        "Call one of those exact names, or answer directly without a tool."
+                    ),
+                })
+                yield {
+                    "type": "notice",
+                    "text": "존재하지 않는 도구 이름이라 실행하지 않고, 실제 도구 목록으로 한 번만 다시 요청합니다…",
+                    "transient": True,
+                }
+                continue
             blocked_mutation = next(
                 (
                     name for name in unauthorized
@@ -2203,9 +2254,30 @@ async def _run_agent_impl(
                         "요청을 조금 더 구체적으로 다시 지시하거나 '계속해줘'로 이어가세요."
                     ),
                 }
-                _maybe_reindex(root, host, dirty, rag_available)
+                _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                 yield {"type": "done"}
                 return
+
+            # 교대 루프 감지: 위 연속 검사는 A→B→A→B…에서 매번 리셋되어 무력하다.
+            # 최근 창에 등장한 '서로 다른 동작'의 수를 세서, 다양성이 무너지면 멈춘다.
+            # 정상 진행은 대상이나 내용이 매번 달라 다양성이 유지된다.
+            if not is_meta(name):
+                recent_call_sigs.append(sig)
+                if (
+                    len(recent_call_sigs) >= STALL_WINDOW
+                    and len(set(recent_call_sigs)) < STALL_WINDOW_MIN_DISTINCT
+                ):
+                    yield {
+                        "type": "notice",
+                        "text": (
+                            f"최근 {len(recent_call_sigs)}번의 도구 실행이 "
+                            f"{len(set(recent_call_sigs))}가지 동작만 반복해 멈췄습니다(무한 루프 방지). "
+                            "이미 나온 결과를 확인한 뒤 다음에 할 일을 구체적으로 지시해 주세요."
+                        ),
+                    }
+                    _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+                    yield {"type": "done"}
+                    return
 
             replay_readonly_validation = bool(
                 ledger_record is not None
@@ -2365,6 +2437,8 @@ async def _run_agent_impl(
                     "ok": reused_ok,
                     "output": reused_result,
                     "rejected": ledger_record.rejected,
+                    # 재생에서도 '거부'와 '응답 없음'을 구분해 전달한다.
+                    "expired": ledger_record.status == "expired",
                     "reused": True,
                 }
                 if (
@@ -2397,7 +2471,7 @@ async def _run_agent_impl(
                             route_decision, route_phase, response_language
                         ),
                     }
-                    _maybe_reindex(root, host, dirty, rag_available)
+                    _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                     yield {"type": "done"}
                     return
                 if (
@@ -2515,27 +2589,46 @@ async def _run_agent_impl(
                 approval_registry.open(key, legacy_key)
                 yield {"type": "approval_request", **event_ids, "name": name, "args": args}
                 try:
-                    approved = await approval_registry.wait(key, APPROVAL_TIMEOUT)
+                    outcome = await approval_registry.wait_outcome(key, APPROVAL_TIMEOUT)
                 finally:
                     approval_registry.close(key, legacy_key)
+                approved = outcome == agent_approval.APPROVED
                 if not approved:
-                    result = "[거부됨] 사용자가 이 작업을 승인하지 않았습니다."
+                    # 실행 판단은 예전과 같다 — 승인되지 않았으면 실행하지 않는다.
+                    # 달라진 것은 '왜 실행하지 않았는지'를 정직하게 남긴다는 점뿐이다.
+                    # 무응답을 거부로 기록하면 원장에 없던 사용자 결정이 사실로 남고,
+                    # 모델은 거부와 무응답에 같은 신호를 받는다.
+                    expired = outcome == agent_approval.EXPIRED
+                    result = (
+                        "[응답 없음] 승인 요청에 응답이 오지 않아 실행하지 않았습니다. "
+                        "사용자가 거부한 것은 아닙니다."
+                        if expired
+                        else "[거부됨] 사용자가 이 작업을 승인하지 않았습니다."
+                    )
                     if execution_ledger is not None and ledger_key is not None:
                         try:
                             result = execution_ledger.finish(
                                 ledger_key,
-                                status="rejected",
+                                status="expired" if expired else "rejected",
                                 result=result,
                                 ok=False,
-                                rejected=True,
+                                rejected=not expired,
                             ).result
                         except LedgerError:
                             yield {"type": "error", "error": "Agent 거절 결과를 원장에 확정할 수 없습니다."}
                             yield {"type": "done"}
                             return
+                    if expired:
+                        yield {
+                            "type": "notice",
+                            "text": (
+                                "승인 요청에 응답이 없어 실행하지 않고 넘어갑니다. "
+                                "계속하려면 같은 요청을 다시 보내 주세요."
+                            ),
+                        }
                     yield {
                         "type": "tool_result", **event_ids, "ok": False,
-                        "output": result, "rejected": True,
+                        "output": result, "rejected": not expired, "expired": expired,
                     }
                     convo.append({
                         "role": "tool", "tool_call_id": provider_tool_call_id, "content": result
@@ -2649,7 +2742,7 @@ async def _run_agent_impl(
                                     "자동 재시도하지 않았습니다."
                                 ),
                             }
-                            _maybe_reindex(root, host, dirty, rag_available)
+                            _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                             yield {"type": "done"}
                             return
                         yield {
@@ -2703,7 +2796,7 @@ async def _run_agent_impl(
                                     "오류를 해결할 수 없어 다른 도구는 실행하지 않았습니다."
                                 ),
                             }
-                            _maybe_reindex(root, host, dirty, rag_available)
+                            _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                             yield {"type": "done"}
                             return
                     image_result = generated.get("image")
@@ -2854,6 +2947,13 @@ async def _run_agent_impl(
                     "output": result,
                 }
                 yield tool_result_event
+                if tool_ok:
+                    # 도구가 실제로 돌았으면 이전의 형식 실수는 지나간 일이다.
+                    # 리셋하지 않으면 이 플래그가 런 전체에 한 번뿐이라, 50단계짜리
+                    # 작업의 40번째에서 처음 삐끗해도 회복 없이 런이 끝난다.
+                    # (route_recovery_attempted는 이미 같은 이유로 리셋된다.)
+                    tool_protocol_recovery_attempted = False
+                    unknown_tool_recovery_attempted = False
                 if (
                     route_phase is not None
                     and not route_finalized
@@ -2986,7 +3086,7 @@ async def _run_agent_impl(
                         route_decision, route_phase, response_language
                     ),
                 }
-                _maybe_reindex(root, host, dirty, rag_available)
+                _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                 yield {"type": "done"}
                 return
 
@@ -3003,7 +3103,7 @@ async def _run_agent_impl(
                 )
                 if direct_route_result is not None:
                     yield {"type": "content", "text": direct_route_result}
-                    _maybe_reindex(root, host, dirty, rag_available)
+                    _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                     yield {"type": "done"}
                     return
                 route_finalized = True
@@ -3134,7 +3234,7 @@ async def _run_agent_impl(
                 "type": "content",
                 "text": _image_completion_text(completed_images_run, response_language),
             }
-            _maybe_reindex(root, host, dirty, rag_available)
+            _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
             yield {"type": "done"}
             return
 
@@ -3149,7 +3249,7 @@ async def _run_agent_impl(
             # 이 턴엔 update_plan 같은 메타 툴만 호출 = 실질 진전 없음
             spin += 1
             if spin >= SPIN_LIMIT:
-                _maybe_reindex(root, host, dirty, rag_available)
+                _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                 yield {
                     "type": "notice",
                     "text": (
@@ -3184,7 +3284,7 @@ async def _run_agent_impl(
                 })
 
     # 최후의 안전선 도달 — 오류가 아니라 '길어서 잠깐 멈춤'으로 안내하고 이어갈 수 있게 한다.
-    _maybe_reindex(root, host, dirty, rag_available)
+    _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
     yield {
         "type": "notice",
         "text": (

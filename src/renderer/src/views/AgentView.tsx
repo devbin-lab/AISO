@@ -67,7 +67,7 @@ async function listComfyProfilesForAgent(manualSelection: boolean): Promise<Comf
   }
 }
 
-type ToolStatus = 'running' | 'awaiting' | 'done' | 'error' | 'rejected'
+type ToolStatus = 'running' | 'awaiting' | 'done' | 'error' | 'rejected' | 'expired'
 
 type Item =
   | { kind: 'user'; text: string; attachments?: AttachmentRef[] }
@@ -476,7 +476,13 @@ function AgentView({
           i.kind === 'tool' && i.callId === ev.executionId
             ? {
                 ...i,
-                status: ev.ok ? ('done' as const) : ev.rejected ? ('rejected' as const) : ('error' as const),
+                status: ev.ok
+                  ? ('done' as const)
+                  : ev.expired
+                    ? ('expired' as const)
+                    : ev.rejected
+                      ? ('rejected' as const)
+                      : ('error' as const),
                 output: ev.output
               }
             : i
@@ -918,6 +924,8 @@ function AgentView({
                     {it.status === 'done' && '완료'}
                     {it.status === 'error' && '오류'}
                     {it.status === 'rejected' && '거부됨'}
+                    {/* 무응답을 '거부됨'으로 보여 주면 자리를 비웠던 사용자가 자기가 거부했다고 오해한다. */}
+                    {it.status === 'expired' && '응답 없음'}
                   </span>
                 </div>
 

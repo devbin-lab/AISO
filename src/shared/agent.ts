@@ -120,7 +120,13 @@ export type AgentEvent =
       type: 'tool_result'
       ok: boolean
       output: string
+      /** 사용자가 명시적으로 거부했다. */
       rejected?: boolean
+      /**
+       * 승인 요청에 응답이 오지 않았다. `rejected`와 반드시 구분한다 — 사용자는
+       * 거부한 적이 없고, 자리를 비웠거나 창을 닫았을 뿐이다.
+       */
+      expired?: boolean
       reused?: boolean
     } & AgentToolIdentity)
   | { type: 'screenshot'; id: string; assistantTurnId: string; data: string }

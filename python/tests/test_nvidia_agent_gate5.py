@@ -459,9 +459,16 @@ def test_approval_denial_is_ledgered_without_execution(tmp_path, monkeypatch):
     result = next(event for event in events if event["type"] == "tool_result")
     assert executions == 0
     assert request["approvalId"] != request["executionId"]
-    assert result["rejected"] is True
+    # 계약 변경(의도): 이 시나리오는 타임아웃(무응답)이지 사용자 거부가 아니다.
+    # 원장에도 expired로 남고, 재시도는 그 결과를 그대로 재생한다 — 도구를 몰래
+    # 다시 실행하지 않는다는 '정확히 한 번' 보장은 그대로다.
+    assert result["expired"] is True
+    assert result["rejected"] is False
     assert not any(event["type"] == "approval_request" for event in retry)
-    assert any(event.get("reused") is True and event.get("rejected") is True for event in retry)
+    assert any(
+        event.get("reused") is True and event.get("expired") is True for event in retry
+    ), "재시도가 저장된 무응답 결과를 재생하지 않았다"
+    assert executions == 0, "재시도가 도구를 실제로 실행했다"
 
 
 def test_nvidia_model_payload_never_contains_workspace_rag_or_file_metadata(tmp_path):

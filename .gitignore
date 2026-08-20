@@ -16,6 +16,14 @@
 /_checkbox_test.md
 /checklist.html
 
+# 녹화·미디어 스크래치 (어느 디렉터리든). python/ 아래에 떨어지면 electron-builder의
+# extraResources가 설치본에 통째로 담으므로 package.json 필터와 함께 이중으로 막는다.
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+
 # Logs
 logs
 *.log

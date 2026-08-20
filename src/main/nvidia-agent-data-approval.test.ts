@@ -4,6 +4,7 @@ import { DEFAULT_SETTINGS } from '../shared/settings.ts'
 import type { ComfyModelProfile } from '../shared/comfy-model.ts'
 import {
   NvidiaAgentDataApprovalStore,
+  NVIDIA_AGENT_TODO_TOOLS,
   buildAutomaticNvidiaAgentDataScope,
   buildNvidiaAgentManifestAuthority,
   fenceNvidiaAgentSettingsMutation,
@@ -135,6 +136,23 @@ test('automatic scope is derived only from the saved NVIDIA tool policy', () => 
     calendarOnlyPolicy,
     [readyProfile('enabled-ready', true)]
   ), { workspace: false, rag: false, image: false, todos: true, myDb: false })
+})
+
+test('every calendar tool on its own opens the todos scope', () => {
+  // 예전에는 list_calendar_events / create_calendar_event 두 개만 손으로 검사해서,
+  // manage_calendar_event만 켠 정책이 todos=false를 받고 캘린더 도구가 전부 빠졌다.
+  const base = settings()
+  for (const toolId of NVIDIA_AGENT_TODO_TOOLS) {
+    const policy: ReturnType<typeof settings> = {
+      ...base,
+      agentToolPolicy: { ollama: [], nvidia: [toolId] }
+    }
+    assert.deepEqual(
+      buildAutomaticNvidiaAgentDataScope(policy, [readyProfile('enabled-ready', true)]),
+      { workspace: false, rag: false, image: false, todos: true, myDb: false },
+      `${toolId} 하나만 켰을 때 todos 스코프가 열리지 않았다`
+    )
+  }
 })
 
 test('allowed tools and fingerprint bind the exact saved NVIDIA policy', () => {

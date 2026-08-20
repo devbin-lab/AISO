@@ -328,3 +328,52 @@ def test_web_search_recency_query_is_anchored_to_current_year():
     assert websearch.enrich_recency_query("OpenAI latest news", year=2026) == "OpenAI latest news 2026"
     assert websearch.enrich_recency_query("OpenAI 최신 뉴스 2025", year=2026).endswith("2026")
     assert websearch.enrich_recency_query("파이썬 리스트 정렬", year=2026) == "파이썬 리스트 정렬"
+
+
+def test_research_tool_results_are_capped_at_record_time(monkeypatch):
+    """리서치 루프의 도구 결과도 기록 시점에 잘린다.
+
+    회귀 방지: 절단을 `compact_convo`에서 기록 시점으로 옮길 때, 에이전트 루프만
+    새 관문(ModelConversation)을 쓰고 리서치 루프는 평범한 list로 남을 뻔했다.
+    그러면 web_fetch 원문(최대 3만자)이 무제한으로 모델 컨텍스트에 들어간다 —
+    compact_convo는 더 이상 내용을 자르지 않기 때문이다.
+    """
+    huge = "본문 " * 20_000
+
+    async def on_execute(spec, root, host, args):
+        return (huge, None)
+
+    seen_payloads: list = []
+    original_request = agent.LlmRequest
+
+    _script(
+        monkeypatch,
+        [
+            _final([{"function": {"name": "web_fetch", "arguments": {"url": "https://e.com"}}}]),
+            _final([], content="정리 완료"),
+        ],
+        on_execute,
+    )
+
+    def capturing_request(**kwargs):
+        seen_payloads.append(kwargs.get("messages") or [])
+        return original_request(**kwargs)
+
+    monkeypatch.setattr(agent, "LlmRequest", capturing_request)
+    asyncio.run(
+        _collect(agent.run_research_chat(host="h", model="m", messages=[{"role": "user", "content": "질문"}]))
+    )
+
+    tool_messages = [
+        message
+        for messages in seen_payloads
+        for message in messages
+        if message.get("role") == "tool"
+    ]
+    assert tool_messages, "도구 결과가 프롬프트에 실리지 않았다"
+    longest = max(len(str(message.get("content") or "")) for message in tool_messages)
+    assert longest < len(huge), f"원문이 통째로 실렸다: {longest}자"
+    assert any(
+        agent.TOOL_RESULT_TRUNCATION_LABEL in str(message.get("content") or "")
+        for message in tool_messages
+    )

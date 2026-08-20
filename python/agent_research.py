@@ -75,6 +75,7 @@ async def run_research_chat(
     strict_tool_protocol: bool,
     registry: Mapping[str, Any],
     compact_conversation: Callable[[list[dict], int, int], list[dict]],
+    build_conversation: Callable[[list[dict], int, int], list[dict]],
     prepare_model: Callable[[str, str], Awaitable[Any]],
     generate_turn: Callable[..., AsyncGenerator[dict, None]],
     parse_args: Callable[[Any], dict],
@@ -90,7 +91,7 @@ async def run_research_chat(
     tools = model_tool_schemas(RESEARCH_TOOL_NAMES)
     model_runtime = await (runtime.prepare_model(model) if runtime is not None else prepare_model(host, model))
     offload_noticed = False
-    convo: list[dict] = list(messages)
+    convo: list[dict] = list(messages)  # reserve_tokens 확정 후 아래에서 감싼다
     total_tokens = 0
     last_call_sig: str | None = None
     repeat_count = 0
@@ -105,6 +106,10 @@ async def run_research_chat(
     system_prompt = research_system_prompt(response_language)
     system_msg = {"role": "system", "content": system_prompt}
     reserve_tokens = (len(system_prompt) + len(json.dumps(tools, ensure_ascii=False))) // 3
+    # 도구 결과는 기록 시점에 한 번만 잘린다. 에이전트 루프와 같은 관문을 쓴다 —
+    # 여기만 평범한 list로 두면 web_fetch 원문(최대 3만자)이 무제한으로 컨텍스트에
+    # 들어간다. compact_conversation은 더 이상 내용을 자르지 않기 때문이다.
+    convo = build_conversation(convo, context_length, reserve_tokens)
 
     for step in range(MAX_RESEARCH_STEPS):
         working = compact_conversation(convo, context_length, reserve_tokens)

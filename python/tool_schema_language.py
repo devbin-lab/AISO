@@ -94,7 +94,6 @@ _FIELD_DESCRIPTIONS: dict[str, str] = {
     "node_id": "Exact My DB trash-item ID returned by the listing tool.",
     "period": "Requested My DB history period.",
     "updated_period": "Optional My DB library update period. Use it for reports about items added or changed today.",
-    "kind": "My DB item kind to return. Use core when the user asks for core names only.",
     "k": "Number of result chunks to return.",
     "url": "Public HTTP(S) URL.",
     "name": "Name.",
@@ -114,7 +113,6 @@ _FIELD_DESCRIPTIONS: dict[str, str] = {
     "text": "Text to send, or briefing instruction.",
     "when": "Scheduled local time.",
     "repeat": "Schedule repetition mode.",
-    "kind": "Schedule content type.",
     "id": "Registered schedule ID.",
     "report_channel": "Text channel that receives the report.",
     "interval_hours": "Report interval in hours.",
@@ -145,10 +143,83 @@ _FIELD_DESCRIPTIONS: dict[str, str] = {
 }
 
 
-def _fallback_description(field_name: str | None) -> str:
-    if field_name:
-        return _FIELD_DESCRIPTIONS.get(field_name, f"Value for `{field_name}`.")
-    return "Tool parameter details."
+# A few parameter names mean different things in different tools: `kind` is a
+# My DB item type in list_mydb_library but a schedule content type in
+# discord_schedule_add.  A single flat name->description map cannot hold both —
+# the later literal silently wins and the model is told the wrong contract.
+# These per-function entries take precedence over _FIELD_DESCRIPTIONS.
+_FUNCTION_FIELD_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    "update_plan": {
+        # write_file의 "Text content."가 아니라 한 단계의 제목이다.
+        "content": "What this single plan step does.",
+    },
+    "list_mydb_library": {
+        "kind": "My DB item kind to return. Use core when the user asks for core names only.",
+        # read_file의 "Maximum number of lines to read."가 아니라 항목 개수다.
+        "limit": "Maximum number of My DB items to return.",
+        "query": "Optional filter matched against My DB item names and tags.",
+    },
+    "list_mydb_history": {
+        "limit": "Maximum number of My DB history entries to return.",
+    },
+    "glob": {
+        # grep의 "Regular expression..."이 아니다. 정규식을 넘기면 아무것도 못 찾는다.
+        "pattern": "Glob pattern. `**` matches nested directories, e.g. `src/**/*.ts`.",
+    },
+    "web_search": {
+        # "Number of repetitions."가 아니라 가져올 결과 개수다.
+        "count": "How many search results to return. Default 8, maximum 15.",
+    },
+    "run_web": {
+        # update_plan의 계획 단계가 아니라 브라우저 조작·단언 시나리오다.
+        "steps": (
+            "Ordered browser interactions and assertions to run in one local page load, "
+            "at most 24 steps. Each step is a click, press, wait, or assert."
+        ),
+        # 최상위 path는 HTML 파일이지만, steps[].path는 파일 경로가 아니라
+        # 페이지 상태를 읽는 점 표기 경로다. 부모 스코프 키로 구분한다.
+        "steps.path": (
+            "Read-only dotted state path inside the page, such as "
+            "`window.__AISO_TEST__.state.score`. This is not a file path."
+        ),
+        "name": "Accessibility name of the target element.",
+    },
+    "create_skill": {
+        "name": "Skill name: letters, digits, Hangul, underscore, or hyphen; 1-64 characters.",
+    },
+    "discord_server_apply": {
+        # run_web의 "Browser action."이 아니라 서버 구성 작업 종류다.
+        "action": "Discord server operation to perform, such as creating or renaming a channel.",
+        "name": "Name for the newly created channel or category.",
+    },
+    "discord_channel_report_add": {
+        # create_calendar_event의 "User's complete original instruction"이 아니다.
+        # 필수 원문이 아니라 선택적인 보고 초점 지시다.
+        "instruction": "Optional focus for the report: topics to track or a preferred format.",
+    },
+    "discord_schedule_add": {
+        "kind": "Schedule content type. message sends fixed text; briefing generates the content at send time.",
+    },
+}
+
+
+def _fallback_description(
+    function_name: str, field_name: str | None, parent_field: str | None = None
+) -> str:
+    if not field_name:
+        return "Tool parameter details."
+    per_function = _FUNCTION_FIELD_DESCRIPTIONS.get(function_name)
+    if per_function:
+        # 한 도구가 같은 이름을 다른 깊이에서 다른 뜻으로 쓰는 경우가 있다
+        # (run_web은 최상위 path=HTML 파일, steps[].path=읽기 전용 상태 점표기).
+        # "부모.필드" 키가 있으면 그것이 먼저 이긴다.
+        if parent_field:
+            scoped = per_function.get(f"{parent_field}.{field_name}")
+            if scoped:
+                return scoped
+        if field_name in per_function:
+            return per_function[field_name]
+    return _FIELD_DESCRIPTIONS.get(field_name, f"Value for `{field_name}`.")
 
 
 def _localize_description(
@@ -157,6 +228,7 @@ def _localize_description(
     function_name: str,
     field_name: str | None,
     is_function_description: bool,
+    parent_field: str | None = None,
 ) -> Any:
     """Return an English description while preserving non-description values.
 
@@ -171,7 +243,7 @@ def _localize_description(
         return value
     if is_function_description:
         return _FUNCTION_DESCRIPTIONS.get(function_name, f"Call the `{function_name}` tool.")
-    return _fallback_description(field_name)
+    return _fallback_description(function_name, field_name, parent_field)
 
 
 def _localize_node(
@@ -179,6 +251,7 @@ def _localize_node(
     *,
     function_name: str,
     field_name: str | None = None,
+    parent_field: str | None = None,
     function_level: bool = False,
 ) -> None:
     if not isinstance(node, dict):
@@ -190,16 +263,29 @@ def _localize_node(
             function_name=function_name,
             field_name=field_name,
             is_function_description=function_level,
+            parent_field=parent_field,
         )
 
     properties = node.get("properties")
     if isinstance(properties, dict):
         for name, child in properties.items():
-            _localize_node(child, function_name=function_name, field_name=str(name))
+            # 자식 입장에서 현재 노드의 이름이 부모가 된다. 배열을 거쳐도(items가
+            # field_name을 그대로 물려주므로) steps[].path 는 부모가 steps로 잡힌다.
+            _localize_node(
+                child,
+                function_name=function_name,
+                field_name=str(name),
+                parent_field=field_name,
+            )
 
     items = node.get("items")
     if isinstance(items, dict):
-        _localize_node(items, function_name=function_name, field_name=field_name)
+        _localize_node(
+            items,
+            function_name=function_name,
+            field_name=field_name,
+            parent_field=parent_field,
+        )
 
     parameters = node.get("parameters")
     if isinstance(parameters, dict):
@@ -211,7 +297,12 @@ def _localize_node(
         variants = node.get(key)
         if isinstance(variants, list):
             for variant in variants:
-                _localize_node(variant, function_name=function_name, field_name=field_name)
+                _localize_node(
+                    variant,
+                    function_name=function_name,
+                    field_name=field_name,
+                    parent_field=parent_field,
+                )
 
 
 def model_schema_for(schema: Mapping[str, Any]) -> dict[str, Any]:

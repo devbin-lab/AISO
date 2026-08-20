@@ -172,6 +172,10 @@ class OllamaAdapter:
                         yield LlmEvent(
                             kind="done",
                             output_tokens=data.get("eval_count"),
+                            # prompt_eval_count = 서버가 실제로 처리한 프롬프트 토큰.
+                            # 이게 없으면 compact_convo의 chars//3 예산이 num_ctx를
+                            # 실제로 넘겼는지 확인할 방법이 없다(한국어 혼합에서 특히).
+                            input_tokens=data.get("prompt_eval_count"),
                             total_duration=data.get("total_duration"),
                             done_reason=data.get("done_reason"),
                         )

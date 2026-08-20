@@ -98,7 +98,9 @@ export function buildAutomaticNvidiaAgentDataScope(
   )
   const rag = Boolean(settings.workspace.trim()) && settings.ragEnabled && enabled.has('search_docs')
   const workspace = Boolean(settings.workspace.trim()) && (hasWorkspaceTool || rag)
-  const todos = enabled.has('list_calendar_events') || enabled.has('create_calendar_event')
+  // 목록을 손으로 다시 적으면 NVIDIA_AGENT_TODO_TOOLS와 갈라진다. 실제로 갈라져 있었고,
+  // manage_calendar_event만 켠 정책에서 todos=false가 되어 캘린더 도구 3종이 모두 빠졌다.
+  const todos = NVIDIA_AGENT_TODO_TOOLS.some((toolId) => enabled.has(toolId))
   const myDb = NVIDIA_AGENT_MYDB_TOOLS.some((toolId) => enabled.has(toolId))
   const selectionMode = settings.comfyModelSelectionMode === 'manual' ? 'manual' : 'auto'
 

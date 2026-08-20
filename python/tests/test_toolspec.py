@@ -49,17 +49,15 @@ _ALL_TOOLS = [
 
 
 def test_agent_tools_snapshot():
-    """AGENT_TOOLS 스키마·순서가 프리즈된 스냅샷과 완전히 동일해야 한다."""
-    expected = [
-        schema for schema in json.loads(_SNAPSHOT.read_text(encoding="utf-8"))
-        if schema["function"]["name"] != "list_change_history"
-    ]
-    mydb_schemas = [
-        REGISTRY[name].schema
-        for name in ("list_mydb_library", "list_mydb_history", "list_mydb_trash", "restore_mydb_trash_node")
-    ]
-    calendar_index = next(index for index, schema in enumerate(expected) if schema["function"]["name"] == "list_calendar_events")
-    expected = expected[:calendar_index + 1] + mydb_schemas + expected[calendar_index + 1:]
+    """AGENT_TOOLS 스키마·순서가 프리즈된 스냅샷과 완전히 동일해야 한다.
+
+    예전에는 이 테스트가 스냅샷에서 폐기 도구를 걸러내고 My DB 도구 4종을 **live
+    REGISTRY에서 끌어와** 끼워 넣은 뒤 비교했다. 그 4종은 자기 자신과 비교되므로
+    스키마가 어떻게 바뀌어도 통과했고, 프리즈가 그 범위에서 아무 일도 하지 않았다.
+    스냅샷은 이제 AGENT_TOOLS 전체를 있는 그대로 담는다 — 의도한 변경이면 스냅샷을
+    함께 갱신하고, 그 diff가 리뷰 대상이 된다.
+    """
+    expected = json.loads(_SNAPSHOT.read_text(encoding="utf-8"))
     assert agent.AGENT_TOOLS == expected
     assert "list_change_history" not in {schema["function"]["name"] for schema in agent.AGENT_TOOLS}
 

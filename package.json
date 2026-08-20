@@ -20,9 +20,10 @@
     "test:gate4": "node --experimental-strip-types --test src/main/nvidia-capability-cache.test.ts",
     "test:gate5": "node --experimental-strip-types --test src/main/nvidia-agent-authorization.test.ts",
     "test:gate6": "node --experimental-strip-types --test src/main/nvidia-agent-data-approval.test.ts src/main/nvidia-runtime-demand.test.ts src/main/nvidia-grant-ttl.test.ts src/main/nvidia-discord-apply.test.ts",
+    "test:mydb": "node --experimental-strip-types --test src/main/mydb.test.ts src/main/mydb-agent-bridge.test.ts",
     "test:renderer": "vitest run --config vitest.config.ts",
     "test:python": "python\\.venv\\Scripts\\python.exe -m pytest python\\tests -q",
-    "test": "npm run test:comfy-model-analysis && npm run test:gate2 && npm run test:gate3 && npm run test:gate4 && npm run test:gate5 && npm run test:gate6 && npm run test:renderer",
+    "test": "npm run test:comfy-model-analysis && npm run test:gate2 && npm run test:gate3 && npm run test:gate4 && npm run test:gate5 && npm run test:gate6 && npm run test:mydb && npm run test:renderer",
     "test:all": "npm run typecheck && npm run test && npm run test:python",
     "build:pyruntime": "powershell -ExecutionPolicy Bypass -File scripts/build-pyruntime.ps1",
     "build:win": "electron-vite build && electron-builder --win",
@@ -56,7 +57,9 @@
     "appId": "com.aiso.app",
     "productName": "Aiso",
     "files": [
-      "out/**/*"
+      "out/**/*",
+      "LICENSE",
+      "NOTICE"
     ],
     "extraResources": [
       {
@@ -72,7 +75,14 @@
           "!tests/**",
           "!.pytest_cache",
           "!**/.pytest_cache/**",
-          "!requirements-dev.txt"
+          "!requirements-dev.txt",
+          "!**/*.mp4",
+          "!**/*.mov",
+          "!**/*.mkv",
+          "!**/*.avi",
+          "!**/*.webm",
+          "!**/*.zip",
+          "!**/*.7z"
         ]
       },
       {

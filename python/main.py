@@ -1865,8 +1865,18 @@ async def ollama_pull(req: OllamaPullRequest):
                         if status == "success":
                             yield json.dumps({"type": "done", "model": model}, ensure_ascii=False) + "\n"
                             return
-            # success 없이 스트림이 끝난 경우도 완료로 간주
-            yield json.dumps({"type": "done", "model": model}, ensure_ascii=False) + "\n"
+            # success 표식 없이 스트림이 끝났다 = 내려받기가 중간에 끊겼다는 뜻이다.
+            # 예전에는 이것도 done으로 보고했는데, 그러면 사용자는 모델이 설치된 줄
+            # 알고 넘어가고 정작 채팅에서 "모델 없음"으로 실패한다. 실패로 보고해야
+            # 재시도할 수 있다. (Ollama는 오류가 나도 HTTP 200을 주므로 상태 코드로는
+            # 구분되지 않는다 — 스트림의 success 표식이 유일한 완료 근거다.)
+            yield json.dumps(
+                {
+                    "type": "error",
+                    "error": "모델 내려받기가 완료 표식 없이 중단되었습니다. 다시 시도해 주세요.",
+                },
+                ensure_ascii=False,
+            ) + "\n"
         except Exception as e:  # noqa: BLE001 — 연결 끊김 등은 오류로 중계
             yield json.dumps({"type": "error", "error": f"연결 실패: {e}"}, ensure_ascii=False) + "\n"
 
