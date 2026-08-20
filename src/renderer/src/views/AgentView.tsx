@@ -229,6 +229,9 @@ function AgentView({
   const sessionRef = useRef<string>('')
   const historyRef = useRef<AgentMessage[]>([])
   const finalTextRef = useRef<string>('') // 이번 run의 마지막 assistant 답변 (툴콜 이후 초기화)
+  // 하네스가 관측한 실행 사실 요약. 안전 한도로 멈춘 런에서만 온다. finalText와 달리
+  // 툴콜마다 초기화하지 않는다 — 런 전체의 기록이기 때문이다.
+  const runSummaryRef = useRef<string>('')
   // NDJSON events can arrive after a newer run starts.  Keep the active execution
   // identity outside React state so a stale image_result cannot mutate this timeline.
   const activeAssistantTurnIdRef = useRef<string>('')
@@ -404,6 +407,9 @@ function AgentView({
     } else if (ev.type === 'usage') {
       runTokensRef.current = ev.total
       setLiveTokens(ev.total)
+      return
+    } else if (ev.type === 'run_summary') {
+      runSummaryRef.current = ev.text
       return
     } else if (ev.type === 'notice') {
       if (ev.transient) {
@@ -609,6 +615,7 @@ function AgentView({
       setInput('')
       if (taRef.current) taRef.current.style.height = 'auto'
       const pendingAttachments = attachments
+      runSummaryRef.current = ''
       historyRef.current = [...historyRef.current, { role: 'user', content: text, attachments: pendingAttachments }]
       finalTextRef.current = ''
       setNote(null)
@@ -667,8 +674,16 @@ function AgentView({
         setItems((prev) => [...prev, { kind: 'meta', tokens: runTokensRef.current, seconds: secs }])
       }
       // 이번 run의 마지막 assistant 답변을 대화 히스토리에 반영 (ref 기반 → 중복 없음)
-      if (executionStarted && finalTextRef.current.trim()) {
-        historyRef.current = [...historyRef.current, { role: 'assistant', content: finalTextRef.current }]
+      // 안전 한도로 멈춘 경우 하네스의 실행 사실 요약을 함께 남긴다. 예전에는
+      // "여기까지 한 내용은 유지됩니다"라고 안내하면서 정작 아무것도 넘기지 않아,
+      // '계속해줘'가 백지에서 다시 시작했다.
+      if (executionStarted) {
+        const carried = [finalTextRef.current.trim(), runSummaryRef.current.trim()]
+          .filter(Boolean)
+          .join(`\n\n`)
+        if (carried) {
+          historyRef.current = [...historyRef.current, { role: 'assistant', content: carried }]
+        }
       }
       // 재색인은 백엔드에서 백그라운드로 돌므로, 잠시 뒤 색인 칩 수치를 갱신한다
       if (backend.port && settings.workspace.trim()) {

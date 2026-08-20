@@ -144,6 +144,12 @@ export type AgentEvent =
       /** Progress feedback for the current stream only; clear it at the next tool/terminal event. */
       transient?: boolean
     }
+  /**
+   * 안전 한도로 런이 멈출 때, 하네스가 **실제로 관측한** 도구 실행 기록.
+   * 모델의 서술이 아니다 — 둘을 섞으면 "했다고 말했지만 안 한 것"이 다음 런으로
+   * 넘어간다. 다음 실행의 대화 히스토리에 이어붙여 '계속해줘'가 근거를 갖게 한다.
+   */
+  | { type: 'run_summary'; text: string }
   | { type: 'usage'; total: number }
   | { type: 'done' }
   | { type: 'error'; error: string }

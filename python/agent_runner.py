@@ -34,6 +34,46 @@ _EXPLICIT_IMAGE_SEED_RE = re.compile(
 )
 
 
+MAX_SUMMARIZED_TOOL_RECORDS = 20  # 요약에 나열할 최대 실행 건수
+
+
+def _run_progress_summary(records: list[dict]) -> str:
+    """이 런에서 '실제로 실행된 도구'만 사실대로 나열한다.
+
+    모델의 말이 아니라 하네스가 관측한 실행 기록이다. 둘을 섞으면 "했다고 말했지만
+    실제로는 안 한 것"이 그대로 다음 런으로 넘어간다 — 이미지 생성에서 겪은 문제와
+    같은 부류다. 그래서 별도 이벤트로 내보내고 문구도 실행 사실만 담는다.
+
+    안전 한도로 멈춘 런은 "'계속해줘'라고 하세요"라고 안내하면서 정작 무엇을 했는지는
+    아무것도 넘기지 않았다(렌더러는 마지막 assistant 텍스트 하나만 이어붙인다).
+    이 요약이 그 공백을 메운다.
+    """
+    if not records:
+        return ""
+    shown = records[-MAX_SUMMARIZED_TOOL_RECORDS:]
+    omitted = len(records) - len(shown)
+    lines = []
+    if omitted > 0:
+        lines.append(f"(앞선 {omitted}건 생략)")
+    for record in shown:
+        mark = "성공" if record.get("ok") else "실패"
+        target = str(record.get("target") or "").strip()
+        name = str(record.get("name") or "?")
+        lines.append(f"- {name}{f' {target}' if target else ''} — {mark}")
+    return "[이번 실행에서 실제로 수행한 도구]\n" + "\n".join(lines)
+
+
+def _tool_record_target(args: Any) -> str:
+    """실행 대상을 한 눈에 알아볼 값 하나만 고른다(카드 표시와 같은 기준)."""
+    if not isinstance(args, dict):
+        return ""
+    for key in ("path", "src", "command", "pattern", "query", "url", "channel", "name"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:120]
+    return ""
+
+
 def _image_request_allows_dimensions(request: str) -> bool:
     """Accept a model-selected size only for an explicit user pixel request."""
     return bool(_EXPLICIT_IMAGE_DIMENSIONS_RE.search(request))
@@ -535,6 +575,9 @@ async def _run_agent_impl(
     image_nudged = False
     completed_images_run: list[dict] = []
     substantive_tool_names_run: set[str] = set()
+    # 순서가 있는 실행 사실 기록. substantive_tool_names_run(집합)과 달리 무엇을
+    # 어떤 대상에 대해 했고 성공했는지를 순서대로 남긴다 — 런 경계를 넘길 근거.
+    executed_tool_records: list[dict] = []
     expected_image_results_run = 0
     pending_image_input_errors_run = 0
     calendar_list_fallback_attempted = False
@@ -1885,6 +1928,11 @@ async def _run_agent_impl(
                         "이미 완료된 결과를 확인한 뒤 필요한 다음 작업만 새로 지시해 주세요."
                     ),
                 }
+                if _run_progress_summary(executed_tool_records):
+                    yield {
+                        "type": "run_summary",
+                        "text": _run_progress_summary(executed_tool_records),
+                    }
                 yield {"type": "done"}
                 return
             substantive_batch_counts[batch_fingerprint] = next_batch_count
@@ -2254,6 +2302,11 @@ async def _run_agent_impl(
                         "요청을 조금 더 구체적으로 다시 지시하거나 '계속해줘'로 이어가세요."
                     ),
                 }
+                if _run_progress_summary(executed_tool_records):
+                    yield {
+                        "type": "run_summary",
+                        "text": _run_progress_summary(executed_tool_records),
+                    }
                 _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                 yield {"type": "done"}
                 return
@@ -2275,6 +2328,11 @@ async def _run_agent_impl(
                             "이미 나온 결과를 확인한 뒤 다음에 할 일을 구체적으로 지시해 주세요."
                         ),
                     }
+                    if _run_progress_summary(executed_tool_records):
+                        yield {
+                            "type": "run_summary",
+                            "text": _run_progress_summary(executed_tool_records),
+                        }
                     _maybe_reindex(root, host, dirty, rag_available, cleanup_state)
                     yield {"type": "done"}
                     return
@@ -2946,6 +3004,12 @@ async def _run_agent_impl(
                     "ok": tool_ok,
                     "output": result,
                 }
+                # 실행 사실 기록 — 모델의 서술과 분리해 하네스가 직접 관측한 것만 남긴다.
+                # 안전 한도로 런이 멈출 때 다음 런에 넘길 근거가 된다.
+                if not is_meta(name):
+                    executed_tool_records.append(
+                        {"name": name, "target": _tool_record_target(args), "ok": bool(tool_ok)}
+                    )
                 yield tool_result_event
                 if tool_ok:
                     # 도구가 실제로 돌았으면 이전의 형식 실수는 지나간 일이다.
@@ -3292,6 +3356,8 @@ async def _run_agent_impl(
             "여기까지 한 내용은 유지됩니다 — 이어서 계속하려면 '계속해줘'라고 해주세요."
         ),
     }
+    if _run_progress_summary(executed_tool_records):
+        yield {"type": "run_summary", "text": _run_progress_summary(executed_tool_records)}
     if pending_html_validation:
         yield _unverified_html_notice(pending_html_validation)
     if (

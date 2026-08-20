@@ -672,4 +672,55 @@ describe('AgentView NVIDIA capability gate', () => {
     expect(screen.queryByText('Stale image result')).toBeNull()
     expect(document.querySelectorAll('.generated-image')).toHaveLength(2)
   })
+  it('carries the harness run summary into the next run so "계속해줘" is not a blank restart', async () => {
+    // 하네스는 안전 한도로 멈출 때 "여기까지 한 내용은 유지됩니다"라고 안내한다.
+    // 예전에는 마지막 assistant 텍스트 하나만 이어붙여서 그 안내가 사실이 아니었다.
+    const status = vi.fn().mockResolvedValue(null)
+    installApiStub(status)
+
+    const encoder = new TextEncoder()
+    const agentRequests: Array<Record<string, unknown>> = []
+    const SUMMARY = `[이번 실행에서 실제로 수행한 도구]
+- write_file a.md — 성공`
+
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/agent')) {
+        agentRequests.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+        const first = agentRequests.length === 1
+        return {
+          ok: true,
+          status: 200,
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              const events = first
+                ? [
+                    { type: 'notice', text: '안전선에서 멈췄습니다.' },
+                    { type: 'run_summary', text: SUMMARY },
+                    { type: 'done' }
+                  ]
+                : [{ type: 'content', text: '이어서 진행했습니다.' }, { type: 'done' }]
+              controller.enqueue(encoder.encode(events.map((e) => JSON.stringify(e)).join(`\n`) + `\n`))
+              controller.close()
+            }
+          })
+        }
+      }
+      return { ok: true, status: 200, json: vi.fn().mockResolvedValue({ indexed: false, count: 0, files: 0 }) }
+    }))
+
+    render(<AgentView {...commonProps} settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'ollama' }} />)
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '긴 작업 해줘' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+    await waitFor(() => expect(agentRequests).toHaveLength(1))
+    await screen.findByText('안전선에서 멈췄습니다.')
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '계속해줘' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+    await waitFor(() => expect(agentRequests).toHaveLength(2))
+
+    const second = JSON.stringify(agentRequests[1]?.messages ?? [])
+    expect(second).toContain('write_file a.md')
+  })
 })
