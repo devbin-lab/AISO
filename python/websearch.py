@@ -64,9 +64,16 @@ WEB_SEARCH_SCHEMA = {
 }
 
 # DuckDuckGo html 엔드포인트 결과 블록에서 (제목·링크·요약)을 뽑는다.
+#
+# `blocks`(결과 컨테이너 매치 수)를 함께 반환한다. 이게 없으면 '마크업이 바뀌어
+# 하나도 못 뽑았다'와 '검색어에 결과가 정말 0건이다'를 구분할 수 없다. 예전에는
+# 둘 다 "[검색 결과 없음]"으로 나갔고, 상위 루프가 그걸 성공으로 취급해 모델이
+# 웹을 못 읽은 채 기억으로 답을 썼다 — 조용한 오답이 가장 나쁜 실패다.
+# items 추출 로직은 그대로 두어 성공 경로 출력 바이트를 유지한다.
 _EXTRACT_JS = """() => {
   const res = [];
-  document.querySelectorAll('div.result, div.web-result, div.results_links, div.result--web').forEach((b) => {
+  const blocks = document.querySelectorAll('div.result, div.web-result, div.results_links, div.result--web');
+  blocks.forEach((b) => {
     const a = b.querySelector('a.result__a') || b.querySelector('h2 a') || b.querySelector('a.result__url');
     if (!a) return;
     const sn = b.querySelector('.result__snippet');
@@ -76,8 +83,23 @@ _EXTRACT_JS = """() => {
       snippet: sn ? (sn.textContent || '').trim() : '',
     });
   });
-  return res;
+  return { blocks: blocks.length, items: res };
 }"""
+
+
+# 검색 결과 문자열이 '실제 근거'인지 판정한다. URL이 하나도 없으면 근거가 아니다.
+# agent_routing 의 research_image 라우트에만 걸려 있던 규칙을, 검색을 소비하는
+# 모든 경로가 같이 쓰도록 여기로 끌어올린다.
+_EVIDENCE_URL_RE = re.compile(r"https?://[^\s\])}>]+", re.IGNORECASE)
+
+
+def search_result_is_evidence(result: str) -> bool:
+    """검색 결과가 모델이 실제로 열어볼 수 있는 URL을 담고 있는가.
+
+    차단·파싱 실패·0건 안내 문자열은 모델에게 유용한 설명이지만 근거가 아니다.
+    이걸 성공으로 보고하면 모델은 '검색했다'고 여기고 기억으로 답을 쓴다.
+    """
+    return bool(_EVIDENCE_URL_RE.search(str(result or "")))
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -121,19 +143,31 @@ def _search_sync(query: str, count: int) -> str:
                 context.route("**/*", _guard_subresource)  # 서브리소스 로컬/사설망 요청 차단
                 page = context.new_page()
                 try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=SEARCH_TIMEOUT)
+                    response = page.goto(url, wait_until="domcontentloaded", timeout=SEARCH_TIMEOUT)
                 except Exception as e:  # noqa: BLE001
                     return f"[검색 실패] 검색 페이지를 열 수 없습니다: {type(e).__name__}: {e}"
+                # 상태 코드를 버리지 않는다. DuckDuckGo는 안티봇 챌린지에서 202를
+                # 내는데, 그 페이지에는 결과 블록이 없어 예전에는 '결과 없음'으로 보였다.
+                status = getattr(response, "status", None) if response is not None else None
                 page.wait_for_timeout(700)  # 결과 렌더 시간
-                raw = page.evaluate(_EXTRACT_JS)
+                try:
+                    raw = page.evaluate(_EXTRACT_JS)
+                except Exception as e:  # noqa: BLE001 — 추출 실패는 브라우저 기동 실패가 아니다
+                    return f"[검색 파싱 실패] 결과를 추출하지 못했습니다: {type(e).__name__}: {e}"
             finally:
                 browser.close()
     except Exception as e:  # noqa: BLE001 — 브라우저 자체가 안 뜨는 경우
         return f"[검색 불가] 헤드리스 브라우저 실행 실패: {type(e).__name__}: {e}."
 
+    if isinstance(raw, dict):
+        blocks = int(raw.get("blocks") or 0)
+        extracted = raw.get("items")
+    else:  # 예전 배열 형태(방어적)
+        blocks, extracted = (len(raw) if isinstance(raw, list) else 0), raw
+
     seen: set[str] = set()
     items: list[tuple[str, str, str]] = []
-    for r in raw if isinstance(raw, list) else []:
+    for r in extracted if isinstance(extracted, list) else []:
         u = _decode_ddg_url((r or {}).get("href", ""))
         if not u.startswith("http") or u in seen:
             continue
@@ -147,9 +181,23 @@ def _search_sync(query: str, count: int) -> str:
             break
 
     if not items:
+        # 세 상태를 구분해 보고한다. 예전에는 전부 "[검색 결과 없음]" 하나로 나갔고,
+        # 상위 루프가 그걸 성공으로 취급해 모델이 웹을 못 읽은 채 답을 썼다.
+        if status is not None and status != 200:
+            return (
+                f"[검색 차단] '{query}' — 검색 엔진이 HTTP {status}로 응답했습니다"
+                "(안티봇 챌린지일 수 있음). 웹 근거를 얻지 못했으므로 아는 대로 답하지 말고, "
+                "사용자에게 검색이 막혔다고 알리거나 잠시 뒤 다시 시도하세요."
+            )
+        if blocks == 0:
+            return (
+                f"[검색 파싱 실패] '{query}' — 결과 블록을 찾지 못했습니다"
+                "(검색 엔진 마크업 변경 또는 차단). 웹 근거를 얻지 못했으므로 "
+                "아는 대로 답하지 말고 사용자에게 검색 실패를 알리세요."
+            )
         return (
-            f"[검색 결과 없음] '{query}' — 검색이 일시적으로 차단됐거나 결과가 없습니다. "
-            "키워드를 바꿔 다시 시도하세요."
+            f"[검색 결과 없음] '{query}' — 결과 블록 {blocks}개를 확인했으나 "
+            "열어볼 수 있는 링크가 없습니다. 키워드를 바꿔 다시 시도하세요."
         )
 
     lines = [

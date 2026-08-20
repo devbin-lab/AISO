@@ -63,6 +63,11 @@ def test_research_forces_fetch_after_search_only(monkeypatch):
 
     async def on_execute(spec, root, host, args):
         executed.append(spec.name)
+        # 실제 web_search 는 열어볼 수 있는 URL을 반환한다. URL이 없는 결과는
+        # 이제 "근거 없음"으로 판정되어 fetch 넛지를 발동시키지 않으므로,
+        # 넛지 동작을 검증하려면 픽스처도 현실적이어야 한다.
+        if spec.name == "web_search":
+            return ("검색 결과 1건\n1. 예시 — https://example.com/a", None)
         return (f"[{spec.name} 결과] …", None)
 
     calls = _script(
@@ -91,6 +96,11 @@ def test_research_no_nudge_when_already_fetched(monkeypatch):
 
     async def on_execute(spec, root, host, args):
         executed.append(spec.name)
+        # 실제 web_search 는 열어볼 수 있는 URL을 반환한다. URL이 없는 결과는
+        # 이제 "근거 없음"으로 판정되어 fetch 넛지를 발동시키지 않으므로,
+        # 넛지 동작을 검증하려면 픽스처도 현실적이어야 한다.
+        if spec.name == "web_search":
+            return ("검색 결과 1건\n1. 예시 — https://example.com/a", None)
         return (f"[{spec.name} 결과] …", None)
 
     calls = _script(

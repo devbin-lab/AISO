@@ -15,6 +15,7 @@ from typing import Any, AsyncGenerator, Awaitable, Callable, Mapping
 
 from agent_prompting import final_response_language_prompt
 from response_language import normalize_response_language
+from websearch import search_result_is_evidence
 from toolspec import model_tool_schemas
 
 
@@ -60,6 +61,18 @@ def top_urls_from_search(text: str, n: int) -> list[str]:
             if len(out) >= n:
                 break
     return out
+
+
+def _tool_result_ok(name: str, result: str) -> bool:
+    """검색이 근거를 못 냈으면 성공으로 보고하지 않는다.
+
+    예전에는 예외가 없으면 무조건 ok=True 였다. 그래서 검색이 차단되거나 마크업이
+    바뀌어 링크를 하나도 못 뽑아도 조사 루프는 '검색 성공'으로 이어갔고, 모델은
+    웹을 못 읽은 채 기억으로 답을 썼다 — 예외로 죽는 것보다 나쁜 조용한 오답이다.
+    """
+    if name != "web_search":
+        return True
+    return search_result_is_evidence(result)
 
 
 async def run_research_chat(
@@ -245,11 +258,17 @@ async def run_research_chat(
             previous_provider_result = completed_provider_calls.get(provider_tool_call_id) if strict_tool_protocol and isinstance(provider_tool_call_id, str) else None
             if previous_provider_result is not None:
                 result = previous_provider_result[1]
-                yield {"type": "tool_result", "id": call_id, "name": name, "ok": True, "output": result}
+                yield {
+                    "type": "tool_result", "id": call_id, "name": name,
+                    "ok": _tool_result_ok(name, result), "output": result,
+                }
             else:
                 try:
                     result, _shot = await execute_tool(spec, Path("."), host, args)
-                    yield {"type": "tool_result", "id": call_id, "name": name, "ok": True, "output": result}
+                    yield {
+                        "type": "tool_result", "id": call_id, "name": name,
+                        "ok": _tool_result_ok(name, result), "output": result,
+                    }
                 except tool_error as error:
                     result = f"[오류] {error}"
                     yield {"type": "tool_result", "id": call_id, "name": name, "ok": False, "output": result}
@@ -258,6 +277,10 @@ async def run_research_chat(
                     yield {"type": "tool_result", "id": call_id, "name": name, "ok": False, "output": result}
                 if strict_tool_protocol and isinstance(provider_tool_call_id, str):
                     completed_provider_calls[provider_tool_call_id] = (provider_signature, result)
+            # 근거(URL)를 못 얻은 검색은 '검색했다'로 치지 않는다. 그러면 아래 fetch
+            # 넛지가 "URL을 열어 확인하라"고 밀어붙이는데 열 URL이 없어 모델이 지어낸다.
+            if name == "web_search" and not search_result_is_evidence(result):
+                searched_any = False
             convo.append({"role": "tool", **({"tool_call_id": provider_tool_call_id} if strict_tool_protocol else {}), "content": result})
 
             if not strict_tool_protocol and name == "web_search" and auto_fetched < AUTO_FETCH_BUDGET:
