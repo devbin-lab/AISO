@@ -88,3 +88,36 @@ describe('달력에서 누를 수 있는 날', () => {
     expect(clickable('2026-08-19', entries, REPORTS)).toBe(false)
   })
 })
+
+describe('아래 목록이 보여 줄 이력', () => {
+  /** 화면과 같은 규칙: 달력 보기는 보고서와 같은 하루, 목록 보기는 전체. */
+  function visible(view: 'list' | 'calendar', reportDate: string, entries: MyDbHistoryEntry[]) {
+    return view === 'calendar'
+      ? entries.filter((e) => localDayKey(e.createdAt) === reportDate)
+      : entries
+  }
+
+  const entries: MyDbHistoryEntry[] = [
+    { id: 'a', action: 'imported', subjectTitle: '어제 자료', createdAt: new Date(2026, 7, 21, 10).toISOString() },
+    { id: 'b', action: 'imported', subjectTitle: '어제 자료2', createdAt: new Date(2026, 7, 21, 18).toISOString() },
+    { id: 'c', action: 'core_created', subjectTitle: '오늘 코어', createdAt: new Date(2026, 7, 22, 9).toISOString() }
+  ]
+
+  it('달력 보기는 보고서와 같은 하루만 보여 준다', () => {
+    // 화면 전체가 한 날짜를 말한다 — 달력·보고서·목록이 어긋나지 않는다.
+    const shown = visible('calendar', '2026-08-21', entries)
+    expect(shown.map((e) => e.id)).toEqual(['a', 'b'])
+  })
+
+  it('다른 날짜를 고르면 목록도 따라간다', () => {
+    expect(visible('calendar', '2026-08-22', entries).map((e) => e.id)).toEqual(['c'])
+  })
+
+  it('이력이 없는 날은 빈 목록이다', () => {
+    expect(visible('calendar', '2026-08-19', entries)).toHaveLength(0)
+  })
+
+  it('목록 보기는 전체를 보여 준다 — 날짜를 고를 달력이 없다', () => {
+    expect(visible('list', '2026-08-21', entries)).toHaveLength(3)
+  })
+})

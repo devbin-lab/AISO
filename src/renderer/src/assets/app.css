@@ -648,35 +648,30 @@
   box-shadow: 0 1px 2px color-mix(in srgb, var(--menu-shadow) 30%, transparent);
 }
 
-/* ── 날짜 필터 안내 ── */
-.mydb-history__filter {
+/* ── 목록 위 날짜 머리 ──
+   달력 보기에서는 아래 목록이 보고서와 같은 하루만 보여 준다. 예전에는
+   '전체 보기' 버튼이 달린 필터 배너였는데, 화면이 한 날짜를 말하는 이상
+   되돌릴 상태가 없다 — 배너 대신 그냥 어느 날인지 적는다. */
+.mydb-history__daylabel {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 14px;
-  padding: 8px 12px;
-  color: var(--text-muted);
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-left: 2px solid var(--accent);
-  border-radius: 9px;
-  font-size: 11.5px;
+  align-items: baseline;
+  gap: 9px;
+  margin: 0 0 10px;
 }
-/* 어느 날짜인지가 이 줄의 요점이다. */
-.mydb-history__filter strong { color: var(--text); font-weight: 650; font-variant-numeric: tabular-nums; }
-.mydb-history__filter button {
-  margin-left: auto;
-  padding: 3px 9px;
-  color: var(--text-muted);
-  background: transparent;
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  cursor: pointer;
-  font: inherit;
+.mydb-history__daylabel strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -.01em;
+  font-variant-numeric: tabular-nums;
+}
+.mydb-history__daylabel span {
+  /* text-dim 그대로면 대비 3.12 다(실측). 건수도 읽는 값이라 한 단계 올린다. */
+  color: color-mix(in srgb, var(--text-dim) 55%, var(--text));
   font-size: 11px;
-  white-space: nowrap;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
-.mydb-history__filter button:hover { color: var(--text); background: var(--bg-input); }
 
 /* ── 달력 ── */
 /* 달력(고정 폭)과 보고서(남는 폭)를 나란히 둔다. 달력은 정사각형 셀 때문에

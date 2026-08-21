@@ -1585,11 +1585,15 @@ function MyDbView({ active }: Props): React.JSX.Element {
   // 오늘 보고서는 하루가 끝나야 쓰이므로 기본값으로 두면 늘 비어 있다.
   const reportDate = historyDay ?? defaultReportDate(reportsByDate.keys())
   const shownReport = reportsByDate.get(reportDate) ?? null
-  // 날짜를 고르면 그 날 것만 보여 준다. 목록 보기에도 그대로 적용된다.
+  // 달력 보기에서는 아래 목록도 보고서와 같은 날짜를 따른다 — 한 화면이 하루를
+  // 말하게 한다. 목록 보기에는 달력이 없으므로 날짜를 고를 수단도 없다: 전체를 본다.
   const visibleHistory = useMemo(
-    () => (historyDay ? history.entries.filter((entry) => localDayKey(entry.createdAt) === historyDay) : history.entries),
-    [history.entries, historyDay]
+    () => (historyView === 'calendar'
+      ? history.entries.filter((entry) => localDayKey(entry.createdAt) === reportDate)
+      : history.entries),
+    [history.entries, historyView, reportDate]
   )
+  // 날짜를 고르면 그 날 것만 보여 준다. 목록 보기에도 그대로 적용된다.
 
   const nodesById = useMemo(() => new Map(snapshot.nodes.map((node) => [node.id, node])), [snapshot.nodes])
   const selected = selectedId ? nodesById.get(selectedId) ?? null : null
@@ -2512,11 +2516,11 @@ function MyDbView({ active }: Props): React.JSX.Element {
                     ))}
                   </section>
                 )}
-                {historyDay && (
-                  <div className="mydb-history__filter">
-                    <span><strong>{historyDay ? formatReportDate(historyDay) : ''}</strong> 의 이력 {visibleHistory.length}건</span>
-                    <button type="button" onClick={() => setHistoryDay(null)}>전체 보기</button>
-                  </div>
+                {historyView === 'calendar' && (
+                  <h3 className="mydb-history__daylabel">
+                    <strong>{formatReportDate(reportDate)}</strong>
+                    <span>변경 {visibleHistory.length}건</span>
+                  </h3>
                 )}
                 {visibleHistory.length > 0 ? (
                   <ol className="mydb-history__list">
@@ -2564,7 +2568,7 @@ function MyDbView({ active }: Props): React.JSX.Element {
                   </ol>
                 ) : (
                   <div className="mydb-history__empty">
-                    {historyDay ? '이 날짜에는 변경 이력이 없습니다.' : '아직 변경 이력이 없습니다.'}
+                    {historyView === 'calendar' ? '이 날짜에는 변경 이력이 없습니다.' : '아직 변경 이력이 없습니다.'}
                   </div>
                 )}
               </div>
