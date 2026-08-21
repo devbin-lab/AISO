@@ -316,7 +316,7 @@ AISO/
 ├─ python/              # FastAPI sidecar, agent, tool execution, document/RAG
 ├─ build/               # Windows 아이콘 원본과 패키징 리소스
 ├─ docs/                # 릴리스 노트와 README 로고
-├─ scripts/             # 아이콘·Python runtime 빌드 스크립트
+├─ scripts/             # 아이콘·Python runtime 빌드 스크립트, 진단 스모크
 └─ dist/                # 로컬 패키징 산출물(배포 대상)
 ```
 

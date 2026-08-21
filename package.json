@@ -10,6 +10,7 @@
     "start": "electron-vite preview",
     "build": "electron-vite build",
     "build:icon": "node scripts/generate-app-icon.cjs",
+    "diagnose:safe-storage": "electron scripts/safe-storage-smoke.cjs",
     "preview": "electron-vite preview",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",

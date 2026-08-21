@@ -35,8 +35,3 @@ def create_runtime(
         return _RUNTIMES[name](endpoint)
     except KeyError as exc:
         raise ValueError(f"지원하지 않는 LLM 공급자: {name}") from exc
-
-
-def create_provider(name: str, endpoint: str) -> LlmRuntime:
-    """Gate 1 호환 별칭. 새 실행 경로는 ``create_runtime``을 사용한다."""
-    return create_runtime(name, endpoint)

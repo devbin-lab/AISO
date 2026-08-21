@@ -56,8 +56,6 @@ def base_system_prompt(response_language: str | None = "ko") -> str:
     )
 
 
-# Compatibility export for callers/tests that use the default Korean Discord experience.
-SYSTEM_PROMPT = base_system_prompt("ko")
 
 _EXPLICIT_WEB_RESEARCH_RE = re.compile(
     r"(?:인터넷|웹).{0,40}(?:검색|조사|확인)|"
@@ -924,9 +922,6 @@ def channel_report_system(response_language: str | None = "ko") -> str:
     )
 
 
-# Compatibility exports retain the former default Korean scheduling experience.
-BRIEFING_SYSTEM = briefing_system("ko")
-CHANNEL_REPORT_SYSTEM = channel_report_system("ko")
 
 
 def _job_response_language(job: dict) -> str:

@@ -132,5 +132,3 @@ class LlmRuntime(Protocol):
     ) -> list[str]: ...
 
 
-# Gate 1 호환 별칭. 이후 실행 코드는 LlmRuntime만 사용한다.
-LlmProvider = LlmRuntime

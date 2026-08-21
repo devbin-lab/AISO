@@ -115,24 +115,6 @@ export const TEMP_MODE_OPTIONS: { value: TempPreset; label: string; hint: string
   { value: 'custom', label: '커스텀', hint: '슬라이더로 직접 값을 고정' }
 ]
 
-/** ComfyUI 설정 화면의 모델 선택 제어 옵션. */
-export const COMFY_MODEL_SELECTION_MODE_OPTIONS: {
-  value: ComfyModelSelectionMode
-  label: string
-  hint: string
-}[] = [
-  {
-    value: 'auto',
-    label: '자동 선택',
-    hint: 'Agent가 등록·검증된 모델의 태그와 우선순위를 기준으로 선택합니다.'
-  },
-  {
-    value: 'manual',
-    label: '직접 선택',
-    hint: '이미지 요청 전 사용자가 고른 등록 모델만 사용합니다.'
-  }
-]
-
 // 'auto' 분류용 키워드 — 정리 관련 문구면 organize, 그 외(코딩 지시·질문 등)는 balanced로 떨어진다.
 const ORGANIZE_KEYWORDS = [
   '정리', '분류', '정돈', '폴더', '옮겨', '이동해', '삭제', '중복', '더미', '미완성',

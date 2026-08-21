@@ -2784,19 +2784,10 @@ async def run_agent(
 # 모르는 걸 여러 출처로 폭넓게 조사한 뒤 종합해 답하게 한다. 에이전트 하네스의 스트리밍/
 # 오프로드/파싱재생성(_generate_turn)과 툴 디스패치(REGISTRY)를 그대로 재사용한다.
 
-MAX_RESEARCH_STEPS = 16  # 모델 턴(각 턴은 여러 검색·읽기를 한 번에 낼 수 있음) 상한
-RESEARCH_TOOL_NAMES = ("web_search", "web_fetch")
-# 검색 직후 하네스가 상위 결과 '원문'을 자동으로 읽어들인다. 작은 모델이 1개만 읽고 마는
-# 문제를 없애고, 여러 출처를 실제로 정독해 근거를 넓히기 위함(사용자 요청: 원문 전체 정독·보고).
-AUTO_FETCH_TOP = 3       # 검색 1회당 자동으로 원문을 읽을 상위 결과 수
-AUTO_FETCH_BUDGET = 6    # 한 런에서 자동 원문 읽기 총 상한(지연·토큰 폭주 방지)
-# 자동 정독분은 페이지당 이만큼으로 발췌한다. 원문 전체(최대 3만자)×여러 개는 num_ctx(기본 16k토큰)에
-# 안 들어가 compact_convo가 통째로 잘라버려 오히려 모델이 못 읽는다. 발췌하면 3개가 실제로 들어가
-# 모델이 여러 출처를 종합할 수 있다(스니펫보다 20배 이상 많은 본문).
-AUTO_FETCH_CHARS = 7000
-
-
-RESEARCH_SYSTEM_PROMPT = research.RESEARCH_SYSTEM_PROMPT
+# 리서치 상수는 agent_research 가 소유한다. 예전에는 여기에도 같은 값이 리터럴로
+# 적혀 있었는데, 리서치 루프는 agent_research 쪽만 읽으므로 여기를 고쳐도 아무 일이
+# 일어나지 않았다 — 조용히 무시되는 손잡이였다. 재수출로 바꿔 진실을 하나로 둔다.
+RESEARCH_TOOL_NAMES = research.RESEARCH_TOOL_NAMES
 
 
 async def run_research_chat(

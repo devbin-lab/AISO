@@ -9,6 +9,7 @@ import {
   type NvidiaAgentDataManifest,
   type NvidiaAgentDataScopeRequest,
   type NvidiaAgentManifestDecisionInput,
+  type NvidiaAgentManifestDecisionResult,
   type NvidiaAgentManifestDescribeInput,
   type NvidiaCredentialBinding
 } from '../shared/nvidia.ts'
@@ -484,7 +485,7 @@ export class NvidiaAgentDataApprovalStore {
     this.enforceRecordLimit(this.approved)
   }
 
-  decide(input: NvidiaAgentManifestDecisionInput): { approved: boolean } {
+  decide(input: NvidiaAgentManifestDecisionInput): NvidiaAgentManifestDecisionResult {
     this.prune()
     const pending = this.pending.get(input.manifestId)
     this.pending.delete(input.manifestId)

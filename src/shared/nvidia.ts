@@ -16,10 +16,6 @@ export interface NvidiaCredentialBinding {
   endpoint: string
 }
 
-export interface NvidiaCredentialSaveRequest extends NvidiaCredentialBindingInput {
-  apiKey: string
-}
-
 export interface NvidiaCredentialStatus {
   encryptionAvailable: boolean
   hasStoredCredential: boolean

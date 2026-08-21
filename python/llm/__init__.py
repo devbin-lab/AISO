@@ -8,13 +8,12 @@ from .contracts import (
     LlmEvent,
     LlmFailureKind,
     LlmModelRuntime,
-    LlmProvider,
     LlmProviderError,
     LlmRequest,
     LlmRuntime,
     ModelCapabilities,
 )
-from .factory import create_provider, create_runtime
+from .factory import create_runtime
 from .providers.nvidia import (
     NVIDIA_BUILD_BASE_URL,
     NvidiaAdapter,
@@ -26,12 +25,10 @@ __all__ = [
     "LlmEvent",
     "LlmFailureKind",
     "LlmModelRuntime",
-    "LlmProvider",
     "LlmProviderError",
     "LlmRequest",
     "LlmRuntime",
     "ModelCapabilities",
-    "create_provider",
     "create_runtime",
     "NVIDIA_BUILD_BASE_URL",
     "NvidiaAdapter",

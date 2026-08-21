@@ -56,11 +56,6 @@ class RouteDecision:
         return bool(self.phases) or self.final_response_only
 
     @property
-    def hold_model_content(self) -> bool:
-        """Never display an unverified answer before a required read/query occurs."""
-        return bool(self.phases)
-
-    @property
     def skips_automatic_rag(self) -> bool:
         return self.constrained
 

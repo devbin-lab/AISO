@@ -65,6 +65,12 @@
 .conn--error .conn__dot {
   background: var(--err);
 }
+.conn--warn {
+  color: var(--warn);
+}
+.conn--warn .conn__dot {
+  background: var(--warn);
+}
 .conn--checking .conn__dot {
   background: var(--warn);
   animation: blink 1.1s infinite;
@@ -159,7 +165,6 @@
 }
 .sidebar__new,
 .sidebar__nav,
-.sidebar__project,
 .sidebar__conversation {
   width: 100%;
   display: flex;
@@ -173,8 +178,7 @@
   text-align: left;
 }
 .sidebar__new,
-.sidebar__nav,
-.sidebar__project {
+.sidebar__nav {
   height: 31px;
   gap: 10px;
   padding: 0 9px;
@@ -183,39 +187,24 @@
 }
 .sidebar__new:hover,
 .sidebar__nav:hover,
-.sidebar__project:hover,
 .sidebar__conversation:hover {
   color: var(--sidebar-text-strong);
   background: var(--sidebar-hover);
 }
-.sidebar__newmark {
-  display: grid;
-  place-items: center;
-  width: 14px;
-  height: 14px;
-  border-radius: 4px;
-  color: var(--sidebar-text-strong);
-  background: var(--accent);
-  font-size: 15px;
-  font-weight: 500;
-  line-height: 1;
-}
+
 .sidebar__new svg {
   flex: none;
   color: var(--accent);
 }
-.sidebar__nav svg,
-.sidebar__project svg {
+.sidebar__nav svg {
   flex: none;
   color: var(--sidebar-muted);
 }
-.sidebar__nav--active,
-.sidebar__project--active {
+.sidebar__nav--active {
   color: var(--sidebar-text-strong);
   background: var(--sidebar-active);
 }
-.sidebar__nav--active svg,
-.sidebar__project--active svg {
+.sidebar__nav--active svg {
   color: var(--sidebar-text-strong);
 }
 .sidebar__section {
@@ -372,12 +361,8 @@
   color: var(--sidebar-text-strong);
   background: var(--sidebar-active);
 }
-.sidebar__conversation--active {
-  color: var(--sidebar-text-strong);
-  background: var(--sidebar-active);
-}
+
 .sidebar__conversation-title,
-.sidebar__conversation-kind,
 .sidebar__conversation-meta {
   display: block;
   overflow: hidden;
@@ -389,17 +374,13 @@
   font-weight: 600;
   line-height: 1.45;
 }
-.sidebar__conversation-kind,
 .sidebar__conversation-meta {
   margin-top: 1px;
   color: var(--sidebar-dim);
   font-size: 10.5px;
   font-weight: 500;
 }
-.sidebar__conversation--active .sidebar__conversation-kind,
-.sidebar__conversation--active .sidebar__conversation-meta {
-  color: var(--sidebar-muted);
-}
+
 .sidebar__conversation-row--active .sidebar__conversation-meta {
   color: var(--sidebar-muted);
 }
@@ -538,7 +519,6 @@
   padding: 0 18px;
   background: var(--mydb-canvas-bg);
 }
-.mydb-toolbar__brand,
 .mydb-toolbar__center,
 .mydb-toolbar__actions,
 .mydb-segment,
@@ -546,7 +526,7 @@
 .mydb-add-button,
 .mydb-detail__actions,
 .mydb-dialog__actions { display: flex; align-items: center; }
-.mydb-toolbar__brand { color: var(--text); font-size: 14px; font-weight: 720; letter-spacing: -.01em; }
+
 .mydb-toolbar__center {
   position: absolute;
   left: 50%;
@@ -1094,7 +1074,7 @@
 .mydb-dialog__actions { justify-content: flex-end; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
 .mydb-dialog__actions button:hover { color: var(--text); border-color: var(--border-strong); }
 .mydb-dialog__actions .is-danger { color: #fff; background: var(--err); border-color: var(--err); }
-.mydb-dialog__actions .is-quiet-danger { color: var(--err); }
+
 .mydb-dialog--trash { width: min(590px, 100%); }
 .mydb-dialog--versions { width: min(1040px, 100%); max-height: min(760px, calc(100vh - 48px)); }
 .mydb-dialog--versions > p,
@@ -1136,7 +1116,7 @@
 .mydb-trash-list > div > span { display: flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .mydb-trash-list button { min-height: 26px; padding: 0 7px; color: var(--text-muted); background: var(--sidebar-hover); border: 1px solid var(--border); border-radius: 5px; cursor: pointer; font: inherit; font-size: 10.5px; }
 .mydb-trash-list button:hover { color: var(--text); border-color: var(--border-strong); }
-.mydb-trash-list .is-quiet-danger { color: var(--err); }
+
 .mydb-trash-actions { display: flex; gap: 6px; }
 /* 되돌릴 수 없는 유일한 동작 — 복원 버튼과 색으로 구분되어야 잘못 누르지 않는다. */
 .mydb-trash-list .mydb-trash-purge { color: var(--err); border-color: color-mix(in srgb, var(--err) 34%, transparent); }
@@ -1485,8 +1465,7 @@
   background: transparent;
 }
 .todo-calendar__day.is-selected:not(.is-today) .todo-calendar__day-date b { color: var(--accent); font-weight: 700; }
-.todo-calendar__task-list,
-.todo-drop-day__tasks { display: grid; min-height: 0; gap: 3px; margin-top: 3px; }
+
 .todo-calendar__range-layer {
   position: absolute;
   z-index: 2;
@@ -1599,12 +1578,9 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
 }
 .todo-task-chip:active { cursor: grabbing; }
 .todo-task-chip.is-done { opacity: .56; text-decoration: line-through; }
-.todo-task-chip--high { border-color: rgba(227,83,73,.32); background: rgba(227,83,73,.09); }
-.todo-task-chip--medium { border-color: rgba(229,111,48,.26); background: rgba(229,111,48,.07); }
-.todo-task-chip--low { border-color: rgba(99,132,192,.28); background: rgba(99,132,192,.07); }
-.todo-task-chip__title { display: flex; min-width: 0; flex: 1; gap: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.todo-task-chip__title em { flex: 0 0 auto; color: var(--text-dim); font-size: 9px; font-style: normal; }
-.todo-task-chip__title small { flex: 0 0 auto; margin-left: auto; color: var(--text-dim); font-size: 8.5px; line-height: inherit; }
+
+
+
 .todo-task-chip__handle {
   display: grid;
   width: 18px;
@@ -1651,10 +1627,8 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   overflow: hidden;
 }
 .todo-day-list--wide { flex: 1; min-height: 0; }
-.todo-day-controls,
-.todo-week__head > div:last-child { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
-.todo-day-controls button,
-.todo-week__head button {
+.todo-day-controls { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.todo-day-controls button {
   min-height: 29px;
   padding: 0 8px;
   border: 1px solid var(--border);
@@ -1665,8 +1639,7 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   font-size: 11px;
   cursor: pointer;
 }
-.todo-day-controls button:hover,
-.todo-week__head button:hover { color: var(--accent); border-color: var(--accent); }
+.todo-day-controls button:hover { color: var(--accent); border-color: var(--accent); }
 .todo-day-list > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 17px; border-bottom: 1px solid var(--border); }
 .todo-day-list > header h2 { margin: 3px 0 4px; font-size: 18px; }
 .todo-day-list > header p { margin: 0; color: var(--text-dim); font-size: 12px; }
@@ -1821,24 +1794,9 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
 .todo-empty { padding: 24px; }
 .todo-empty > b { font-size: 13px; }
 .todo-empty .btn { margin-top: 15px; }
-.todo-week {
-  display: flex;
-  flex: 1;
-  min-height: 0;
-  flex-direction: column;
-  padding: 22px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-elev);
-}
-.todo-week__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
-.todo-week__head h2 { margin: 3px 0 0; font-size: 16px; }
-.todo-week__grid {
-  flex: 1;
-  min-height: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
-}
+
+
+
 .todo-week__surface {
   position: relative;
   display: grid;
@@ -1847,13 +1805,13 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   min-width: 896px;
   min-height: 100%;
 }
-.todo-week__surface .todo-drop-day__tasks { display: none; }
+
 .todo-week__range-layer {
   inset: 47px 1px 6px;
   grid-template-columns: repeat(7, minmax(128px, 1fr));
   grid-auto-rows: 23px;
 }
-.todo-week__drop-targets { grid-template-columns: repeat(7, minmax(128px, 1fr)); }
+
 
 /* Hourly day/week planner ------------------------------------------------- */
 .todo-time-planner {
@@ -2110,24 +2068,9 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
 .todo-context-menu__weekdays { display: grid !important; grid-template-columns: repeat(7, 1fr); gap: 3px !important; }
 .todo-context-menu__weekdays button { min-width: 0; min-height: 26px; padding: 0; border: 1px solid var(--border); border-radius: 99px; color: var(--text-dim); background: var(--bg); font: inherit; font-size: 9px; cursor: pointer; }
 .todo-context-menu__weekdays button.is-active { color: #fff; border-color: var(--accent); background: var(--accent); }
-.todo-drop-day { display: flex; min-width: 0; flex-direction: column; padding: 10px 8px; border-right: 1px solid var(--border); }
-.todo-drop-day:last-child { border-right: 0; }
-.todo-drop-day.is-today { background: transparent; }
-.todo-drop-day.is-today .todo-drop-day__date b {
-  display: grid;
-  width: 27px;
-  height: 27px;
-  place-items: center;
-  border-radius: 999px;
-  color: #fff;
-  background: var(--accent);
-  box-shadow: 0 1px 2px rgba(229, 111, 48, .22);
-}
-.todo-drop-day.is-selected { box-shadow: inset 0 2px 0 var(--accent); }
-.todo-drop-day__date { display: flex; align-items: baseline; justify-content: space-between; padding: 0 2px 9px; border: 0; color: var(--text-dim); background: transparent; font: inherit; text-align: left; cursor: pointer; }
-.todo-drop-day__date span { font-size: 11px; }
-.todo-drop-day__date b { color: var(--text); font-size: 18px; }
-.todo-drop-day__tasks { flex: 1; align-content: start; }
+
+
+
 @media (max-width: 860px) {
   .todo-layout { grid-template-columns: 1fr; }
 }
@@ -2160,7 +2103,7 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
     font-size: 10.5px;
   }
   .todo-planner-grid { grid-template-columns: 1fr; }
-  .todo-week { overflow: hidden; }
+
 
   /* Keep the 3:2 planner usable in a medium window.  The calendar copy may
      contract, but controls and panel content must never be squeezed into
@@ -2240,8 +2183,8 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   .todo-row { gap: 9px; padding: 13px 4px; }
   .todo-row time { flex-basis: 45px; font-size: 11px; }
   .todo-priority { display: none; }
-  .todo-week { padding: 16px; }
-  .todo-week__head { align-items: flex-start; flex-direction: column; }
+
+
   .todo-editor { padding: 17px; }
   .todo-editor form { grid-template-columns: 1fr; }
   .todo-editor__full,
@@ -2262,201 +2205,23 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   min-width: 0;
   height: 100%;
 }
-.convlist {
-  flex: none;
-  width: 208px;
-  display: flex;
-  flex-direction: column;
-  border-right: 1px solid var(--border);
-  background: var(--bg);
-}
-.convlist__head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 10px;
-  border-bottom: 1px solid var(--border);
-}
-.convlist__new {
-  flex: 1;
-  height: 30px;
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--text);
-  background: var(--bg-elev);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-}
-.convlist__new:hover {
-  border-color: var(--accent);
-  color: var(--accent-hover);
-}
-.convlist__scroll {
-  flex: 1;
-  overflow-y: auto;
-  padding: 6px;
-}
-.convlist__empty {
-  padding: 20px 10px;
-  text-align: center;
-  font-size: 11.5px;
-  color: var(--text-dim);
-}
+
+
+
 /* 고정(위) / 비고정(아래) 구분선 */
-.convlist__divider {
-  height: 0;
-  margin: 6px 10px;
-  border-top: 1px solid var(--border-strong);
-}
-.convrow {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 7px 8px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-}
-.convrow:hover {
-  background: var(--bg-elev);
-}
-.convrow--active {
-  background: var(--accent-soft);
-}
-.convrow__main {
-  flex: 1;
-  min-width: 0;
-}
-.convrow__title {
-  font-size: 12.5px;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.convrow__pinmark {
-  display: inline-flex;
-  vertical-align: -1px;
-  margin-right: 3px;
-  color: var(--accent);
-}
-.convrow__time {
-  font-size: 10.5px;
-  color: var(--text-dim);
-  margin-top: 1px;
-}
-.convrow__edit {
-  flex: 1;
-  min-width: 0;
-  font: inherit;
-  font-size: 12.5px;
-  color: var(--text);
-  background: var(--bg-input);
-  border: 1px solid var(--accent);
-  border-radius: 5px;
-  padding: 3px 6px;
-  outline: none;
-}
+
+
+
 /* 행 우측 동작 버튼(고정·이름변경·삭제) — 제목 위에 겹쳐 hover 시 나타난다.
    평소엔 제목이 패널 폭을 온전히 쓰고, 마우스를 올렸을 때만 우측에서 페이드 인. */
-.convrow__acts {
-  position: absolute;
-  right: 5px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: flex;
-  gap: 1px;
-  padding-left: 16px;
-  background: linear-gradient(to right, transparent, var(--bg-elev) 30%);
-  opacity: 0;
-  /* 컨테이너(그라데이션·여백)는 항상 이벤트 통과 → 제목 우측 더블클릭이 살아있다.
-     실제 클릭 대상은 버튼뿐이고, 버튼은 hover로 보일 때만 활성화. */
-  pointer-events: none;
-  transition: opacity 0.12s;
-}
-.convrow:hover .convrow__acts {
-  opacity: 1;
-}
-.convrow__act {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  color: var(--text-dim);
-  background: transparent;
-  border: none;
-  border-radius: 5px;
-  cursor: pointer;
-  pointer-events: none;
-  transition:
-    color 0.12s,
-    background 0.12s;
-}
-.convrow:hover .convrow__act {
-  pointer-events: auto;
-}
-.convrow__act:hover {
-  color: var(--text);
-  background: var(--accent-soft);
-}
-.convrow__act--on {
-  color: var(--accent);
-}
-.convrow__act--del:hover {
-  color: var(--err);
-}
+
+
+
 
 /* 우클릭 컨텍스트 메뉴 (커서 위치, body 포털) */
-.ctxmenu {
-  position: fixed;
-  z-index: 900;
-  min-width: 148px;
-  padding: 4px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 10px 32px var(--menu-shadow);
-  animation: ctx-in 0.11s ease;
-}
-@keyframes ctx-in {
-  from {
-    opacity: 0;
-    transform: scale(0.97);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-.ctxmenu__item {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  text-align: left;
-  padding: 7px 10px;
-  font-size: 12.5px;
-  color: var(--text-muted);
-  background: transparent;
-  border: none;
-  border-radius: 5px;
-  cursor: pointer;
-  transition:
-    color 0.1s,
-    background 0.1s;
-}
-.ctxmenu__item:hover {
-  color: var(--text);
-  background: var(--accent-soft);
-}
-.ctxmenu__item--danger {
-  color: var(--err);
-}
-.ctxmenu__item--danger:hover {
-  color: var(--err);
-  background: rgba(229, 83, 75, 0.12);
-}
+
+
+
 
 .view {
   max-width: 840px;
@@ -3502,18 +3267,8 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   margin-top: 8px;
   flex-wrap: wrap;
 }
-.composer-tools__manual-model {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding-left: 8px;
-  border-left: 1px solid var(--border);
-}
-.composer-tools__label {
-  font-size: 11px;
-  color: var(--text-dim);
-  white-space: nowrap;
-}
+
+
 .composer-tools__right {
   margin-left: auto;
   display: flex;
@@ -4050,6 +3805,12 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   border-left-color: var(--text-dim);
   opacity: 0.75;
 }
+/* 만료 = 사용자가 거부한 것이 아니라 응답이 오지 않은 것. 회색(거부)과 달리 경고색으로
+   구분한다 — shared/agent.ts 의 expired 계약이 요구하는 구분이다. */
+.tool--expired {
+  border-left-color: var(--warn);
+  opacity: 0.85;
+}
 .tool__head {
   display: flex;
   align-items: center;
@@ -4097,6 +3858,10 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
 .tool__badge--rejected,
 .tool__badge--stopped {
   color: var(--text-dim);
+}
+.tool__badge--expired {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
 }
 .tool__caption {
   padding: 0 11px 8px;
@@ -5926,10 +5691,11 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
 }
 .agent-tool-group__header .agent-tool-group__mark--files { background: #4f9e97; }
 .agent-tool-group__header .agent-tool-group__mark--programming { background: #d36f45; }
-.agent-tool-group__header .agent-tool-group__mark--execution { background: #6c8fd6; }
+.agent-tool-group__header .agent-tool-group__mark--plan { background: #6c8fd6; }
 .agent-tool-group__header .agent-tool-group__mark--research { background: #9583c4; }
 .agent-tool-group__header .agent-tool-group__mark--automation { background: #c58658; }
 .agent-tool-group__header .agent-tool-group__mark--rag { background: #77a36a; }
+.agent-tool-group__header .agent-tool-group__mark--mydb { background: #5f9bb5; }
 .agent-tool-group__header .agent-tool-group__mark--discord { background: #7f8dde; }
 .agent-tool-group__header .agent-tool-group__mark--image { background: #c67eaa; }
 .agent-tool-group__control {

@@ -61,10 +61,6 @@ class ToolCallAssembler:
     def __init__(self) -> None:
         self._calls: dict[int, _Fragments] = {}
 
-    @property
-    def has_calls(self) -> bool:
-        return bool(self._calls)
-
     def add(self, deltas: Sequence[Mapping[str, Any]]) -> None:
         for delta in deltas:
             if not isinstance(delta, Mapping):
