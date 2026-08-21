@@ -212,3 +212,10 @@ export const MAX_AUTO_CONTINUES = 3
 export const AUTO_CONTINUE_PROMPT =
   '이어서 계속 진행해라. 위의 [이번 실행에서 실제로 수행한 도구] 요약과 도구 결과를 근거로 ' +
   '이미 끝낸 일은 다시 하지 말고, 남은 일부터 이어서 하라. 계획만 갱신하지 말고 실제 작업 도구를 호출하라.'
+
+/**
+ * 모델이 **막혀서** 멈춘 사유들. 여기서는 "계속해줘"가 나쁜 조언이다 —
+ * 같은 시도가 통하지 않는 상태라 그대로 이어가면 대개 다시 같은 데서 멈춘다.
+ * (자동 이어가기는 "이미 한 일은 다시 하지 마라"를 함께 보내므로 그쪽은 유효하다.)
+ */
+export const STUCK_LIMITS = new Set(['repeat', 'stall', 'repetition', 'tool_budget'])

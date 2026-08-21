@@ -3543,7 +3543,15 @@ def test_repeating_identical_two_call_mutation_batch_stops_early(env):
 
     assert fake.calls == agent.IDENTICAL_TOOL_BATCH_LIMIT + 1
     assert len([event for event in events if event["type"] == "tool_call"]) == 4
-    assert any("작업 묶음이 반복" in event.get("text", "") for event in events)
+    # 판정은 문구가 아니라 이벤트로 한다 — 안내문은 다듬을 수 있어야 한다.
+    assert any(
+        event.get("type") == "run_limit" and event.get("reason") == "tool_budget"
+        for event in events
+    )
+    assert any(
+        event.get("type") == "notice" and "작업 묶음" in event.get("text", "")
+        for event in events
+    ), "사람에게도 무엇이 반복됐는지 알려야 한다"
 
 
 def test_noop_write_does_not_unlock_existing_html_validation(env):

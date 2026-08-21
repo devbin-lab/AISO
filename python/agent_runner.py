@@ -1528,8 +1528,11 @@ async def _run_agent_impl(
                 yield {
                     "type": "notice",
                     "text": (
-                        "⚠ 모델이 같은 내용을 반복해(퇴행) 자동 중단했습니다. 컨텍스트 길이를 낮추거나"
-                        "(예: 16k~32k) 더 강한 모델(gpt-oss)로 바꿔 다시 시도해보세요."
+                        "⚠ 모델이 같은 문장을 반복하기 시작해(퇴행) 자동으로 끊었습니다. "
+                        "작은 모델이 풀리지 않는 지점을 맴돌 때 나타납니다 — 요청을 더 좁게 나누거나 "
+                        "더 큰 모델(gpt-oss)로 바꾸는 것이 효과적입니다. "
+                        "컨텍스트 길이를 낮추는 것은 도움이 되지 않습니다"
+                        f"(반복 폭주는 이미 한 턴 {deps.MAX_GEN_TOKENS} 토큰 상한으로 막혀 있습니다)."
                     ),
                 }
             elif truncated:
@@ -1537,7 +1540,11 @@ async def _run_agent_impl(
                 limit_reason = "truncated"
                 yield {
                     "type": "notice",
-                    "text": "⚠ 컨텍스트 한도에 도달해 응답이 중간에 잘렸습니다. 설정에서 '컨텍스트 길이'를 늘리거나 '추론 강도'를 낮춰보세요.",
+                    "text": (
+                        f"⚠ 한 턴에 쓸 수 있는 출력 한도({deps.MAX_GEN_TOKENS} 토큰)를 다 써서 답이 중간에 끊겼습니다. "
+                        "'컨텍스트 길이'를 늘려도 이 한도는 그대로입니다 — 생각(추론)도 같은 한도를 나눠 쓰므로 "
+                        "'추론 강도'를 낮추면 답에 쓸 몫이 늘어납니다. 요청을 작게 나누는 것도 방법입니다."
+                    ),
                 }
             if pending_html_validation:
                 yield _unverified_html_notice(pending_html_validation)
@@ -1944,16 +1951,31 @@ async def _run_agent_impl(
                 substantive_batch, ensure_ascii=False, separators=(",", ":")
             )
             next_batch_count = substantive_batch_counts.get(batch_fingerprint, 0) + 1
-            if (
-                (len(substantive_batch) > 1 and next_batch_count > deps.IDENTICAL_TOOL_BATCH_LIMIT)
-                or substantive_tool_call_count + len(substantive_batch)
+            batch_repeated = (
+                len(substantive_batch) > 1 and next_batch_count > deps.IDENTICAL_TOOL_BATCH_LIMIT
+            )
+            budget_spent = (
+                substantive_tool_call_count + len(substantive_batch)
                 > deps.SUBSTANTIVE_TOOL_CALL_LIMIT
-            ):
+            )
+            if batch_repeated or budget_spent:
+                # 두 원인을 'A이거나 B'로 뭉뚱그리면 사용자가 무엇을 고쳐야 할지 알 수 없다.
+                # 코드는 어느 쪽인지 알고 있으므로 그대로 말한다.
                 yield {
                     "type": "notice",
                     "text": (
-                        "같은 작업 묶음이 반복되거나 전체 도구 실행 안전 한도를 초과해 중단했습니다. "
-                        "이미 완료된 결과를 확인한 뒤 필요한 다음 작업만 새로 지시해 주세요."
+                        (
+                            f"같은 작업 묶음(도구 {len(substantive_batch)}개)을 {next_batch_count}회 반복해 "
+                            f"멈췄습니다(같은 묶음은 {deps.IDENTICAL_TOOL_BATCH_LIMIT}회까지). "
+                            "같은 방법이 통하지 않는 상태라, 그대로 이어가면 다시 반복됩니다 — "
+                            "이미 나온 결과를 확인하고 다른 방법을 지시해 주세요."
+                        )
+                        if batch_repeated
+                        else (
+                            f"한 번의 요청에서 도구를 {deps.SUBSTANTIVE_TOOL_CALL_LIMIT}회까지 실행할 수 있는데 "
+                            "그 한도에 도달해 멈췄습니다(폭주 방지). 반복이 아니라 실제로 일이 많았던 경우입니다 — "
+                            "여기까지 한 작업은 그대로 남아 있습니다."
+                        )
                     ),
                 }
                 if _run_progress_summary(executed_tool_records):
@@ -2330,8 +2352,9 @@ async def _run_agent_impl(
                 yield {
                     "type": "notice",
                     "text": (
-                        f"같은 동작을 {repeat_count + 1}회 연속 반복해 멈췄습니다(무한 루프 방지). "
-                        "요청을 조금 더 구체적으로 다시 지시하거나 '계속해줘'로 이어가세요."
+                        f"같은 동작({name})을 인자까지 똑같이 {repeat_count + 1}회 연속 반복해 "
+                        "멈췄습니다(무한 루프 방지). 같은 시도가 통하지 않는 상태라, "
+                        "그대로 이어가면 다시 반복됩니다 — 다른 방법이나 다음 단계를 지시해 주세요."
                     ),
                 }
                 if _run_progress_summary(executed_tool_records):
@@ -2356,9 +2379,10 @@ async def _run_agent_impl(
                     yield {
                         "type": "notice",
                         "text": (
-                            f"최근 {len(recent_call_sigs)}번의 도구 실행이 "
-                            f"{len(set(recent_call_sigs))}가지 동작만 반복해 멈췄습니다(무한 루프 방지). "
-                            "이미 나온 결과를 확인한 뒤 다음에 할 일을 구체적으로 지시해 주세요."
+                            f"최근 도구 실행 {len(recent_call_sigs)}번이 "
+                            f"{len(set(recent_call_sigs))}가지 동작만 오가며 제자리를 돌아 멈췄습니다"
+                            "(교대 루프 방지). 이미 나온 결과를 확인한 뒤 "
+                            "다음에 할 일을 구체적으로 지시해 주세요."
                         ),
                     }
                     if _run_progress_summary(executed_tool_records):
@@ -3388,8 +3412,8 @@ async def _run_agent_impl(
     yield {
         "type": "notice",
         "text": (
-            f"작업이 매우 길어 {deps.MAX_STEPS}단계에서 일단 멈췄습니다(폭주 방지 안전선). "
-            "여기까지 한 내용은 유지됩니다 — 이어서 계속하려면 '계속해줘'라고 해주세요."
+            f"작업이 길어져 {deps.MAX_STEPS}단계에서 일단 멈췄습니다(폭주 방지 안전선). "
+            "오류가 아니라 분량 때문이며, 여기까지 한 작업은 그대로 남아 있습니다."
         ),
     }
     yield {"type": "run_limit", "reason": "max_steps"}

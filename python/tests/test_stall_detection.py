@@ -29,13 +29,26 @@ def _tool_results(events):
     return [event for event in events if event.get("type") == "tool_result"]
 
 
+# 정체로 멈췄음을 뜻하는 사유들. 한국어 안내문을 훑어보던 것을 이걸로 바꿨다 —
+# 문구를 다듬을 때마다 이 테스트가 깨졌고(실제로 깨졌다), 문구는 계약이 아니다.
+_STALL_REASONS = {"stall", "repeat"}
+
+
 def _stall_notice(events) -> str | None:
+    """정체로 멈췄으면 사용자에게 보인 안내문을 돌려준다(아니면 None).
+
+    판정은 run_limit 이벤트로 하고, 안내문은 '사람에게도 알렸는지' 확인용으로 함께 본다.
+    둘 중 하나라도 빠지면 사용자는 왜 멈췄는지 모른 채 화면만 보게 된다.
+    """
+    if not any(
+        event.get("type") == "run_limit" and event.get("reason") in _STALL_REASONS
+        for event in events
+    ):
+        return None
     for event in events:
-        if event.get("type") == "notice" and (
-            "반복" in event.get("text", "") or "정체" in event.get("text", "")
-        ):
+        if event.get("type") == "notice" and "멈췄습니다" in event.get("text", ""):
             return event["text"]
-    return None
+    raise AssertionError("정체로 멈췄는데 사람에게 보이는 안내가 없다")
 
 
 def test_alternating_two_call_loop_is_stopped(env):

@@ -884,10 +884,49 @@ describe('AgentView NVIDIA capability gate', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: '긴 작업' } })
     fireEvent.click(screen.getByRole('button', { name: '실행' }))
     await waitFor(() => expect(agentRequests).toHaveLength(1))
-    await screen.findByText('안전선에서 멈췄습니다.')
+    // 백엔드 안내(무슨 일이 있었나)를 덮지 않고, 그 뒤에 이어가는 방법을 덧붙인다.
+    const note = await screen.findByText(/안전선에서 멈췄습니다\./)
+    expect(note.textContent).toContain('계속해줘')
+    expect(note.textContent).toContain('작업 자동 이어가기')
     // 잠깐 기다려도 두 번째 요청이 생기지 않는다.
     await new Promise((resolve) => setTimeout(resolve, 60))
     expect(agentRequests).toHaveLength(1)
+  })
+
+  it("막혀서 멈춘 사유에는 '계속해줘'를 권하지 않는다", async () => {
+    // repeat/stall 은 같은 시도가 통하지 않는 상태다. 그대로 이어가라고 하면
+    // 대개 같은 자리에서 다시 멈춘다 — 설정을 알려 주되 재시도를 권하지는 않는다.
+    const status = vi.fn().mockResolvedValue(null)
+    installApiStub(status)
+    const encoder = new TextEncoder()
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).includes('/agent')) {
+        const events = [
+          { type: 'notice', text: '같은 동작(read_file)을 반복해 멈췄습니다.' },
+          { type: 'run_limit', reason: 'repeat' },
+          { type: 'done' }
+        ]
+        return {
+          ok: true,
+          status: 200,
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(encoder.encode(events.map((e) => JSON.stringify(e)).join(chr10) + chr10))
+              controller.close()
+            }
+          })
+        } as unknown as Response
+      }
+      return { ok: true, status: 200, json: vi.fn().mockResolvedValue({ indexed: false, count: 0, files: 0 }) }
+    }))
+    render(<AgentView {...commonProps}
+      settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'ollama', autoContinueOnLimit: false }} />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '막히는 작업' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+
+    const note = await screen.findByText(/같은 동작\(read_file\)/)
+    expect(note.textContent).toContain('작업 자동 이어가기')
+    expect(note.textContent).not.toContain('계속해줘')
   })
 
   it('설정이 켜져 있으면 한도에서 스스로 이어가되 상한을 넘지 않는다', async () => {

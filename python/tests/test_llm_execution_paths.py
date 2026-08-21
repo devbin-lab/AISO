@@ -453,3 +453,31 @@ def test_context_truncation_is_reported_as_a_resumable_limit(monkeypatch):
     limits = [e for e in events if e["type"] == "run_limit"]
     assert limits == [{"type": "run_limit", "reason": "truncated"}]
     assert events[-1]["type"] == "done", "신호는 done 앞에 온다 — 소비자가 done 에서 판단한다"
+
+
+def test_truncation_notice_names_the_output_cap_not_the_context_window(monkeypatch):
+    """잘린 이유를 출력 상한으로 말한다 — 예전엔 컨텍스트를 늘리라고 했다.
+
+    실제 원인은 한 턴 출력 상한(MAX_GEN_TOKENS)이다. num_ctx 를 늘려도 이 상한은
+    그대로라 아무 소용이 없는데, 안내문이 그걸 권해 사용자가 엉뚱한 설정을 만졌다.
+    """
+    lines = [
+        json.dumps({"message": {"content": "중간까지 쓰다가"}}),
+        json.dumps({"done": True, "done_reason": "length", "eval_count": 7, "total_duration": 9}),
+    ]
+    _install(monkeypatch, lines)
+    monkeypatch.setattr(agent, "list_skills", lambda: [])
+    monkeypatch.setattr(agent.discordops, "available", lambda: False)
+
+    async def collect():
+        return [event async for event in agent.run_agent(
+            host="http://ollama.test", workspace="", model="m",
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.2, context_length=4096, keep_alive="5m", rag_enabled=False,
+        )]
+
+    notices = [e["text"] for e in asyncio.run(collect()) if e["type"] == "notice"]
+    text = " ".join(notices)
+    assert str(agent.MAX_GEN_TOKENS) in text, "실제 한도 숫자를 알려 줘야 한다"
+    assert "컨텍스트 길이'를 늘리" not in text, "num_ctx 를 늘려도 이 한도는 그대로다"
+    assert "추론 강도" in text, "실제로 듣는 처방은 이쪽이다"

@@ -17,6 +17,7 @@ import {
   approveAgent,
   AUTO_CONTINUE_PROMPT,
   MAX_AUTO_CONTINUES,
+  STUCK_LIMITS,
   type AgentMessage
 } from '../lib/agent'
 import { newConversationId, titleFromText } from '../lib/conversations'
@@ -786,6 +787,15 @@ function AgentView({
         `자동 이어가기 ${MAX_AUTO_CONTINUES}회를 모두 썼습니다. 계속하려면 '계속해줘'라고 해주세요 — ` +
         '요청을 더 작게 나누면 한도에 덜 걸립니다.'
       )
+    } else if (runLimitRef.current && !ac.signal.aborted) {
+      // '어떻게 이어가나'는 화면이 말한다 — 자동 이어가기 설정을 아는 쪽이 여기뿐이다.
+      // 백엔드 안내문은 '무슨 일이 있었나'만 말하므로 그 뒤에 붙인다(덮어쓰지 않는다).
+      setNote((prev) => {
+        const tail = STUCK_LIMITS.has(runLimitRef.current)
+          ? "설정 → LLM → '작업 자동 이어가기'를 켜면 이런 중단에서 자동으로 이어갑니다."
+          : "이어가려면 '계속해줘'라고 해주세요. 설정 → LLM → '작업 자동 이어가기'를 켜면 자동으로 이어갑니다."
+        return prev ? `${prev} ${tail}` : tail
+      })
     }
   }
 
