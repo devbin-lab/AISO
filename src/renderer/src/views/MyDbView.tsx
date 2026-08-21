@@ -1770,6 +1770,14 @@ function MyDbView({ active }: Props): React.JSX.Element {
     if (active) void load()
   }, [active, load])
 
+  // 화면을 열어 둔 채 날이 바뀌면 새 보고서가 생긴다 — 그때 다시 읽는다.
+  // (자정 직후 메인이 보고서를 쓰고 알려 준다.)
+  useEffect(() => {
+    const bridge = window.api?.myDb
+    if (!bridge?.onDailyReport) return
+    return bridge.onDailyReport(() => { void load() })
+  }, [load])
+
   const importPaths = useCallback(async (paths: string[]): Promise<void> => {
     if (paths.length === 0) return
     setLoading(true)

@@ -190,6 +190,13 @@ export type MyDbDropEvent =
 export interface MyDbBridge {
   state: () => Promise<MyDbSnapshot>
   history: () => Promise<MyDbHistorySnapshot>
+  /**
+   * 새 일일 보고서가 쓰였을 때 알린다. 해제 함수를 돌려준다.
+   *
+   * My DB 화면은 들어올 때만 이력을 읽으므로, 화면을 열어 둔 채 날이 바뀌면
+   * 새 보고서가 생겨도 옛 것을 그대로 보여 준다. 이 신호로 그때 다시 읽는다.
+   */
+  onDailyReport: (cb: (reportDate: string) => void) => () => void
   restoreGraphCheckpoint: (checkpointId: string) => Promise<MyDbGraphCheckpoint>
   /** Selects an upstream file. Only that external file may update My DB. */
   pickSourceForFile: (itemId: string) => Promise<MyDbNode | null>

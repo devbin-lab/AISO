@@ -221,6 +221,14 @@ const api = {
   myDb: {
     state: () => ipcRenderer.invoke('mydb:state'),
     history: () => ipcRenderer.invoke('mydb:history'),
+    /** 새 일일 보고서가 쓰이면 알린다 — 화면을 열어 둔 채 날이 바뀌는 경우. */
+    onDailyReport: (cb: (reportDate: string) => void): (() => void) => {
+      const listener = (_e: unknown, reportDate: string): void => cb(reportDate)
+      ipcRenderer.on('mydb:daily-report', listener)
+      return () => {
+        ipcRenderer.removeListener('mydb:daily-report', listener)
+      }
+    },
     restoreGraphCheckpoint: (checkpointId: string) => ipcRenderer.invoke('mydb:restore-graph-checkpoint', checkpointId),
     pickSourceForFile: (itemId: string) => ipcRenderer.invoke('mydb:pick-source-for-file', itemId),
     exportCore: (coreId: string) => ipcRenderer.invoke('mydb:export-core', coreId),

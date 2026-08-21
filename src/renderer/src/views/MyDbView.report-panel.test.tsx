@@ -149,3 +149,43 @@ describe('아래 목록이 보여 줄 이력', () => {
     expect(visible('list', '2026-08-21', entries)).toHaveLength(3)
   })
 })
+
+describe('보고서가 새로 쓰이면 화면이 다시 읽는다', () => {
+  /**
+   * My DB 화면은 들어올 때만 이력을 읽는다. 화면을 열어 둔 채 자정을 넘기면
+   * 메인이 새 보고서를 쓰지만 화면은 옛 것을 그대로 보여 준다.
+   * preload 가 여는 구독(onDailyReport)이 그 틈을 메운다.
+   */
+  function wireSubscription(bridge: { onDailyReport?: (cb: (d: string) => void) => () => void }, reload: () => void) {
+    if (!bridge?.onDailyReport) return () => {}
+    return bridge.onDailyReport(() => reload())
+  }
+
+  it('알림이 오면 다시 읽는다', () => {
+    // 명시 타입이 없으면 TS 가 대입을 못 보고 never 로 좁힌다(호출 불가 오류).
+    let fire: null | ((d: string) => void) = null as null | ((d: string) => void)
+    let reloads = 0
+    const bridge = { onDailyReport: (cb: (d: string) => void) => { fire = cb; return () => { fire = null } } }
+    wireSubscription(bridge, () => { reloads += 1 })
+
+    expect(reloads).toBe(0)
+    fire?.('2026-08-22')
+    expect(reloads).toBe(1)
+  })
+
+  it('화면을 떠나면 구독을 푼다 — 사라진 화면을 다시 읽지 않는다', () => {
+    // 명시 타입이 없으면 TS 가 대입을 못 보고 never 로 좁힌다(호출 불가 오류).
+    let fire: null | ((d: string) => void) = null as null | ((d: string) => void)
+    let reloads = 0
+    const bridge = { onDailyReport: (cb: (d: string) => void) => { fire = cb; return () => { fire = null } } }
+    const unsubscribe = wireSubscription(bridge, () => { reloads += 1 })
+    unsubscribe()
+    fire?.('2026-08-22')
+    expect(reloads).toBe(0)
+  })
+
+  it('브리지가 없어도 터지지 않는다', () => {
+    // 예전 preload 로 실행되는 경우(설치본 갱신 중 등).
+    expect(() => wireSubscription({}, () => {})).not.toThrow()
+  })
+})

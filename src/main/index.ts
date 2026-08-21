@@ -701,16 +701,47 @@ function assertMyDbStoragePath(value: unknown): void {
 
 let myDbDailyReportTimer: ReturnType<typeof setInterval> | null = null
 let myDbDailyReportCheckMs = 0
+let myDbMidnightTimer: ReturnType<typeof setTimeout> | null = null
 
+/**
+ * 전날 보고서를 쓰고, 실제로 만들어졌으면 열려 있는 창에 알린다.
+ *
+ * 알림이 필요한 이유: My DB 화면은 들어올 때만 이력을 읽는다. 화면을 열어 둔
+ * 채 날이 바뀌면 새 보고서가 생겨도 화면은 옛 것을 그대로 보여 준다.
+ */
 function writeMissingMyDbDailyReport(): void {
   try {
-    myDbEnsurePreviousDayReport()
+    const report = myDbEnsurePreviousDayReport()
+    if (!report) return
+    BrowserWindow.getAllWindows().forEach((w) => w.webContents.send('mydb:daily-report', report.reportDate))
   } catch (error) {
     console.warn('[mydb] 전날 변경 보고서 생성 실패:', error)
   }
 }
 
+/**
+ * 다음 자정 직후에 한 번 더 쓴다.
+ *
+ * 주기 검사(기본 6시간)만으로는 날이 바뀐 뒤 최대 6시간 동안 어제 보고서가
+ * 없다. 화면은 그동안 그 전날 것을 대신 보여 주지만(resolveReportDate),
+ * 하루 늦은 내용이다. 자정에 맞춰 한 번 더 돌려 그 창을 없앤다.
+ *
+ * setTimeout 은 절전·시계 변경으로 밀릴 수 있으므로 주기 검사를 그대로 두고
+ * 이건 그 위에 얹는다 — 둘 중 하나만 늦어도 다른 쪽이 메운다.
+ */
+function scheduleMyDbMidnightReport(): void {
+  if (myDbMidnightTimer) clearTimeout(myDbMidnightTimer)
+  const nextMidnight = new Date()
+  nextMidnight.setHours(24, 0, 30, 0) // 자정 30초 뒤 — 경계에서 어제/오늘이 흔들리지 않게
+  const waitMs = Math.max(1000, nextMidnight.getTime() - Date.now())
+  myDbMidnightTimer = setTimeout(() => {
+    writeMissingMyDbDailyReport()
+    scheduleMyDbMidnightReport()
+  }, waitMs)
+}
+
 function startMyDbDailyReportScheduler(settings = loadSettings()): void {
+  scheduleMyDbMidnightReport()
   const nextCheckMs = settings.myDbDailyReportCheckHours * 60 * 60 * 1000
   if (myDbDailyReportTimer && myDbDailyReportCheckMs === nextCheckMs) return
   if (myDbDailyReportTimer) clearInterval(myDbDailyReportTimer)
@@ -1512,6 +1543,8 @@ app.on('before-quit', () => {
 app.on('will-quit', () => {
   if (myDbDailyReportTimer) clearInterval(myDbDailyReportTimer)
   myDbDailyReportTimer = null
+  if (myDbMidnightTimer) clearTimeout(myDbMidnightTimer)
+  myDbMidnightTimer = null
   destroyComfySurface()
   stopManagedComfyUI()
   stopBackend()
