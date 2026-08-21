@@ -422,7 +422,10 @@ async def generate_image(
         # The optional quality node is intentionally fetched apart from the
         # mandatory contract.  A normal ComfyUI install without it remains a
         # valid base-generation environment.
-        optional_node_infos: dict[str, Mapping[str, Any]] = {}
+        # get_node_infos()가 돌려주는 구체 타입(dict[str, dict])을 그대로 적는다.
+        # 소비처(validate_runtime_options·build_workflow)는 Mapping을 받으므로
+        # 공변으로 그대로 통과한다.
+        optional_node_infos: dict[str, dict[str, Any]] = {}
         optional_classes = refinement_node_classes_for_profile(selected)
         if optional_classes:
             try:

@@ -15,6 +15,7 @@ import re
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any  # 타입 표기 전용(런타임 의존 없음)
 
 SCHEDULES_FILE = "schedules.json"
 MAX_JOBS = 20          # 등록 가능한 예약 수 상한(폭주 방지)
@@ -183,7 +184,10 @@ def pop_due(*, now: "datetime | None" = None) -> list[dict]:
         interval_hours: int | None = None
         if j.get("repeat") == "interval" or j.get("kind") == "channel_report":
             try:
-                interval_hours = int(j.get("interval_hours"))
+                # 필드가 없으면(None) int()가 TypeError를 내고 바로 아래 except가 잡아 잡을 버린다 —
+                # 그 경로가 설계이므로 값을 Any로 받아 둔다(저장 파일에서 온 값이라 타입 보장이 없다).
+                raw_hours: Any = j.get("interval_hours")
+                interval_hours = int(raw_hours)
             except (TypeError, ValueError):
                 changed = True
                 continue
@@ -259,6 +263,9 @@ def build_job(
     first, err = parse_when(when, repeat, now=now)
     if err:
         return None, err
+    # parse_when(108행)의 여섯 return이 모두 (시각,None)·(None,오류)로 상보적이라
+    # 오류 가드를 지난 지점에서 first는 반드시 있다.
+    assert first is not None
     return {
         "kind": kind,
         "channel_id": str(channel_id),
@@ -282,6 +289,7 @@ def add_job(**kwargs) -> tuple["dict | None", "str | None"]:
     draft, err = build_job(**kwargs)
     if err:
         return None, err
+    assert draft is not None  # build_job(244행)의 거부 return은 모두 (None, 오류)다
     return commit_job(draft, now=kwargs.get("now")), None
 
 
@@ -405,23 +413,30 @@ async def prepare_channel_report(
     report_got, report_error = discordops.resolve_text_channel(destination)
     if report_error:
         return None, None, f"[거부] 보고 채널: {report_error}"
+    # discordops의 (값, 오류) 헬퍼들은 상보적이다 — resolve_text_channel(discordops.py 652행),
+    # live_guild(discordops.py 487행) 모두 오류가 없으면 값이 반드시 있다.
+    assert report_got is not None
     live, live_error = discordops.live_guild()
     if live_error:
         return None, None, live_error
+    assert live is not None
     guild, _command_channel_id = live
     sources: list[dict] = []
     for requested in args["channels"]:
         got, error = discordops.resolve_text_channel(requested)
         if error:
             return None, None, f"[거부] 수집 채널 '{requested}': {error}"
+        assert got is not None
         channel_id, channel_name = got
         channel = guild.get_channel(int(channel_id)) if channel_id.isdigit() else None
         if channel is None:
             return None, None, f"[거부] 수집 채널 '#{channel_name}'을 찾을 수 없습니다."
         try:
             baseline = await _latest_message_id(channel)
-        except Exception as error:  # noqa: BLE001
-            return None, None, f"[거부] #{channel_name}의 메시지 기록을 읽을 수 없습니다: {error}"
+        except Exception as exc:  # noqa: BLE001
+            # 예외 변수를 error로 두면 except 블록 끝의 암묵적 del이 아래에서 다시 쓰는
+            # error(빌드 결과 오류)와 같은 이름을 지워 흐름 추적이 끊긴다 — 이름만 분리했다.
+            return None, None, f"[거부] #{channel_name}의 메시지 기록을 읽을 수 없습니다: {exc}"
         sources.append({"id": channel_id, "name": channel_name, "last_message_id": baseline})
     report_id, report_name = report_got
     draft, error = build_channel_report_job(
@@ -433,6 +448,7 @@ async def prepare_channel_report(
     )
     if error:
         return None, None, f"[거부] {error}"
+    assert draft is not None  # build_channel_report_job(322행)의 거부 return은 모두 (None, 오류)다
     meta = {
         "source_names": [source["name"] for source in sources],
         "report_name": report_name,
@@ -479,6 +495,8 @@ async def channel_report_add(
     )
     if error:
         return error
+    # prepare_channel_report(386행)는 거부 시 (None, None, 오류)만 낸다 — 오류가 없으면 둘 다 있다.
+    assert draft is not None and meta is not None
     return render_channel_report_registered(commit_job(draft), meta)
 
 
@@ -617,6 +635,7 @@ async def schedule_add(channel=None, text=None, when=None, repeat=None, kind=Non
     got, err = discordops.resolve_text_channel(a["channel"])
     if err:
         return f"[거부] {err}"
+    assert got is not None  # resolve_text_channel·add_job 모두 (값,None)·(None,오류) 상보적
     ch_id, ch_name = got
     job, jerr = add_job(
         channel_id=ch_id, channel_name=ch_name, kind=a["kind"], text=a["text"],
@@ -624,6 +643,7 @@ async def schedule_add(channel=None, text=None, when=None, repeat=None, kind=Non
     )
     if jerr:
         return f"[거부] {jerr}"
+    assert job is not None
     return "예약이 등록되었습니다.\n" + render_job(job)
 
 

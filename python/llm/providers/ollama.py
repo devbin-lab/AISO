@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import Any, AsyncIterator, Mapping
+from typing import Any, AsyncGenerator, Mapping
 
 import httpx
 
@@ -143,7 +143,7 @@ class OllamaAdapter:
             payload["think"] = extra["think"]
         return payload
 
-    async def chat_stream(self, request: LlmRequest) -> AsyncIterator[LlmEvent]:
+    async def chat_stream(self, request: LlmRequest) -> AsyncGenerator[LlmEvent, None]:
         payload = self.serialize_request(request)
         timeout = httpx.Timeout(None, connect=5)
         async with httpx.AsyncClient(timeout=timeout) as client:

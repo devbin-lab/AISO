@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncIterator, Literal, Mapping, Protocol, Sequence
+from typing import Any, AsyncGenerator, Literal, Mapping, Protocol, Sequence
 
 
 CapabilityState = Literal["supported", "unsupported", "unknown"]
@@ -107,7 +107,9 @@ class LlmModelRuntime:
 class LlmRuntime(Protocol):
     """모든 공급자가 노출하는 최소 공용 인터페이스."""
 
-    def chat_stream(self, request: LlmRequest) -> AsyncIterator[LlmEvent]: ...
+    # AsyncIterator 가 아니라 AsyncGenerator 다 — 호출자가 finally 에서 aclose() 로
+    # 결정적으로 닫는 것을 전제하기 때문이다(agent_execution.py:137, main.py:874).
+    def chat_stream(self, request: LlmRequest) -> AsyncGenerator[LlmEvent, None]: ...
 
     async def list_models(self) -> list[str]: ...
 

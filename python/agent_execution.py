@@ -80,7 +80,11 @@ async def _chat_turn(
     """공용 LLM 이벤트 한 턴을 기존 Agent 최종 결과로 모은다."""
     content = ""
     thinking = ""
-    tool_calls: list[dict] = []
+    # 조립기를 쓰지 않는 공급자에서는 LlmEvent.tool_calls(Sequence[Mapping[str, Any]])가
+    # 그대로 쌓인다. 여기서 dict 로 복사하면 불필요한 사본이 생기므로, 누적 리스트의
+    # 실제 계약인 Mapping 으로 적는다. 아래 조립기 경로가 채우는 dict 리터럴도
+    # Mapping 이므로 두 경로 모두 이 타입을 만족한다.
+    tool_calls: list[Mapping[str, Any]] = []
     done_reason = None
     output_tokens = 0  # eval_count — 이 턴에 '생성'된 토큰
     # prompt_eval_count — 서버가 실제로 처리한 프롬프트 토큰. 사용량 집계가 아니라

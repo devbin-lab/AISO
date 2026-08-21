@@ -12,6 +12,8 @@ discord 미설치 환경에서도 toolspec/agent가 스키마·검증(순수 파
 """
 from __future__ import annotations
 
+from typing import Any  # 타입 표기 전용(런타임 의존 없음)
+
 MAX_OPS = 40      # 한 번에 적용할 수 있는 작업 수 상한(폭주 방지)
 NAME_MAX = 95     # 채널·카테고리 이름 길이 상한(디스코드 100보다 보수적)
 TOPIC_MAX = 1024  # 채널 주제 길이 상한(디스코드 규격)
@@ -272,6 +274,9 @@ def validate_ops(ops, snapshot: dict) -> tuple[list[dict], list[str]]:
         if err:
             errors.append(f"{i}번: {err}")
             return None
+        # _find(175행)는 (항목,None)·(None,오류) 중 하나만 낸다(모든 return이 상보적) —
+        # 오류 가드를 지난 지점에서 item은 반드시 있다.
+        assert item is not None
         if cmd_id and item.get("id") == cmd_id:
             errors.append(f"{i}번: 명령 채널(#{item.get('name')})은 변경·삭제할 수 없습니다(보호됨)")
             return None
@@ -360,7 +365,7 @@ def validate_ops(ops, snapshot: dict) -> tuple[list[dict], list[str]]:
     return (clean, errors) if not errors else ([], errors)
 
 
-def prepare_ops(ops, snapshot: dict) -> tuple["list | None", list[str], "str | None"]:
+def prepare_ops(ops, snapshot: dict) -> tuple["list[dict] | None", list[str], "str | None"]:
     """보호대상 분리 + 검증을 한 번에 — 두 적용 입구(에이전트 탭·디스코드)가 공유한다.
 
     반환 (clean, skipped, error_msg): error_msg가 있으면 적용하지 말고 그대로 사용자에게 보인다.
@@ -389,7 +394,8 @@ def render_map(snapshot: dict) -> str:
     cmd_id = _norm(snapshot.get("command_channel_id"))
     cats = list(snapshot.get("categories") or [])
     chans = list(snapshot.get("channels") or [])
-    icon = {"text": "#", "voice": "🔊", "etc": "•"}
+    # 조회 키는 스냅샷 dict에서 꺼낸 값(type 필드가 없으면 None)이라 키 타입을 Any로 열어 둔다.
+    icon: dict[Any, str] = {"text": "#", "voice": "🔊", "etc": "•"}
 
     def _line(ch: dict) -> str:
         mark = " ★명령채널(보호됨·삭제/변경 불가, 작업 목록에 넣지 말 것)" if cmd_id and ch.get("id") == cmd_id else ""
@@ -409,9 +415,12 @@ def render_map(snapshot: dict) -> str:
 def render_ops_preview(ops: list[dict], snapshot: dict) -> str:
     """승인 전 미리보기 — 삭제는 복구 불가임을 눈에 띄게 표시한다."""
 
-    def _disp(target: str) -> str:
+    def _disp(target: object) -> str:
+        # 호출부가 op.get("target")(=Any|None)을 그대로 넘기므로 target은 str로 못 좁힌다.
+        # 이름 역시 스냅샷에서 꺼낸 Any라 str()로 감싼다 — 네 호출부 모두 f-string 보간이라
+        # 값이 이미 str이면 같은 객체, 없더라도 "None"으로 렌더돼 출력이 바뀌지 않는다.
         item, _ = _find(snapshot, target)
-        return item.get("name") if item else str(target)
+        return str(item.get("name")) if item else str(target)
 
     lines: list[str] = []
     deletes = 0
@@ -462,8 +471,10 @@ def available() -> bool:
         return False
 
 
-def _live_guild():
-    """(guild, command_channel_id) 또는 (None, 사용자용 오류 문자열)."""
+def _live_guild() -> tuple["tuple[Any, str] | None", "str | None"]:
+    """(guild, command_channel_id) 또는 (None, 사용자용 오류 문자열).
+
+    guild는 discord.Guild지만 discord를 모듈 로드 시 import하지 않으므로 Any로 둔다."""
     db = _bot()
     if db is None or not db.is_running():
         return None, "[불가] 디스코드 봇이 연결되어 있지 않습니다. 설정 탭에서 디스코드 봇을 켜세요."
@@ -473,7 +484,7 @@ def _live_guild():
     return (guild, db.command_channel_id()), None
 
 
-def live_guild():
+def live_guild() -> tuple["tuple[Any, str] | None", "str | None"]:
     """Public read-only access to the currently bound guild and command channel id."""
     return _live_guild()
 
@@ -521,8 +532,11 @@ async def apply_ops_live(guild, ops: list[dict], snapshot: dict) -> str:
         obj = guild.get_channel(int(target_id)) if str(target_id).isdigit() else None
         return obj
 
-    def _cat_obj(name: str):
-        """카테고리 이름 → 라이브 객체(배치 내 생성분 우선). 없으면 (None, 오류)."""
+    def _cat_obj(name: object):
+        """카테고리 이름 → 라이브 객체(배치 내 생성분 우선). 없으면 (None, 오류).
+
+        호출부가 op.get("category")(=Any|None, 무소속이면 없음)를 그대로 넘기고 첫 줄의
+        _norm이 그 편차를 str로 흡수하므로 파라미터를 str로 좁힐 수 없다."""
         n = _norm(name)
         if not n:
             return None, None  # 무소속
@@ -640,11 +654,15 @@ def resolve_text_channel(channel) -> tuple["tuple[str, str] | None", "str | None
     got, err = _live_guild()
     if err:
         return None, err
+    # (값, 오류) 관용구는 상보적이다 — _live_guild(474행)의 세 return 중 오류를 낸 둘(480·483행)은
+    # 위에서 이미 돌아갔으므로 여기서 got은 반드시 있다. 아래 _find(175행)도 같다.
+    assert got is not None
     guild, cmd_id = got
     snap = snapshot_guild(guild, cmd_id)
     item, ferr = _find(snap, channel)
     if ferr:
         return None, ferr
+    assert item is not None
     if item.get("type") != "text":
         return None, f"'{item.get('name')}'은(는) 텍스트 채널이 아닙니다 — 메시지는 텍스트 채널로만 보낼 수 있습니다"
     return (item["id"], item["name"]), None
@@ -660,6 +678,7 @@ def validate_send(channel, message) -> tuple["tuple[str, str, str] | None", "str
     got, err = resolve_text_channel(channel)
     if err:
         return None, err
+    assert got is not None  # resolve_text_channel(652행)의 return은 (값,None)·(None,오류) 상보적
     ch_id, ch_name = got
     return (ch_id, ch_name, body), None
 
@@ -683,10 +702,12 @@ async def server_send(channel=None, message=None, **_ignored) -> str:
     got, err = validate_send(a["channel"], a["message"])
     if err:
         return f"[거부] {err}"
+    assert got is not None  # validate_send·_live_guild 모두 (값,None)·(None,오류) 상보적
     ch_id, _ch_name, body = got
     lg, gerr = _live_guild()
     if gerr:
         return gerr
+    assert lg is not None
     guild, _cmd = lg
     return await send_message_live(guild, ch_id, body)
 
@@ -696,6 +717,7 @@ async def server_map(**_ignored) -> str:
     got, err = _live_guild()
     if err:
         return err
+    assert got is not None  # 오류가 없으면 길드가 있다(_live_guild 474행)
     guild, cmd_id = got
     return render_map(snapshot_guild(guild, cmd_id))
 
@@ -704,9 +726,13 @@ async def server_apply(ops=None, **_ignored) -> str:
     got, err = _live_guild()
     if err:
         return err
+    assert got is not None
     guild, cmd_id = got
     snap = snapshot_guild(guild, cmd_id)
     clean, skipped, error_msg = prepare_ops(ops, snap)  # 보호대상 분리 + 검증(두 입구 공유)
     if error_msg:
         return error_msg
+    # prepare_ops가 clean=None을 내는 두 경로(375·380행)는 반드시 error_msg를 함께 내므로
+    # 여기까지 왔다면 clean은 리스트다.
+    assert clean is not None
     return (await apply_ops_live(guild, clean, snap)) + format_skipped_report(skipped)

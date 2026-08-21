@@ -905,11 +905,13 @@ def user_workflow_assets(profile: ModelProfile) -> tuple[tuple[WorkflowAssetBind
             "사용자 워크플로에서 등록 모델과 연결할 SafeTensors 로더를 찾지 못했습니다."
         )
     by_ref: dict[tuple[str, str], WorkflowAssetBinding] = {}
-    for binding in template.asset_bindings:
-        key = _workflow_binding_key(binding.node_id, binding.input_name)
+    # 아래 루프의 binding은 by_ref.get()이라 Optional이다. 색인 루프와 이름을
+    # 공유하면 그 사실이 가려지므로 여기서만 다른 이름을 쓴다.
+    for declared in template.asset_bindings:
+        key = _workflow_binding_key(declared.node_id, declared.input_name)
         if key in by_ref:
             raise WorkflowValidationError("사용자 워크플로 모델 연결이 중복되었습니다.")
-        by_ref[key] = binding
+        by_ref[key] = declared
     by_id = {asset.id: asset for asset in profile.assets}
     resolved: list[tuple[WorkflowAssetBinding, ModelAsset]] = []
     for node_id, input_name in expected:
@@ -1941,8 +1943,10 @@ def validate_runtime_options(
             raise WorkflowValidationError(
                 f"현재 ComfyUI가 '{value}' 선택값을 지원하지 않습니다: {node_class}.{input_name}"
             )
-    for node_class, input_name, value in numeric_checks:
-        _ensure_numeric_supported(node_class, node_infos[node_class], input_name, value)
+    # 위 enum 대조 루프의 value는 문자열 선택값, 이쪽은 수치값이다. 같은 이름을
+    # 재사용하면 두 목록의 원소 타입이 뒤섞여 보인다.
+    for node_class, input_name, numeric_value in numeric_checks:
+        _ensure_numeric_supported(node_class, node_infos[node_class], input_name, numeric_value)
 
 
 def _build_sd_workflow(

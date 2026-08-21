@@ -104,8 +104,16 @@ _TEXT_JS = """() => {
 }"""
 
 
-def _ip_blocked(ip_str: str) -> bool:
-    """사설·loopback·link-local·예약·멀티캐스트·unspecified IP면 True(차단 대상)."""
+def _ip_blocked(ip_str: str | int) -> bool:
+    """사설·loopback·link-local·예약·멀티캐스트·unspecified IP면 True(차단 대상).
+
+    인자 타입이 str | int인 이유: 호출부는 socket.getaddrinfo(...)[4][0]을 넘기는데,
+    typeshed의 sockaddr 타입에는 getaddrinfo가 절대 돌려주지 않는 AF_PACKET용
+    tuple[int, bytes]까지 들어 있어 첫 원소가 str | int로 보인다. proto=IPPROTO_TCP
+    호출은 AF_INET/AF_INET6만 돌려주므로 실제로는 항상 str이고(실측 확인),
+    ipaddress.ip_address는 int도 패킹된 주소로 받아 같은 판정을 내리므로
+    차단 로직은 그대로다 — 표기만 실제 인자 타입에 맞춘 것이다.
+    """
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:

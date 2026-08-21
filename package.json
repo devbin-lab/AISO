@@ -14,6 +14,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "typecheck:python": "cd python && .venv\\Scripts\\python.exe -m mypy .",
     "test:comfy-model-analysis": "node --experimental-strip-types --test src/main/comfy-model-analysis.test.ts src/main/comfy-workflow-template.test.ts",
     "test:gate2": "node --experimental-strip-types --test src/shared/nvidia.test.ts src/main/settings-storage.test.ts src/main/chromium-storage-paths.test.ts src/main/nvidia-credential-path.test.ts src/main/nvidia-credential-store.test.ts src/main/discord-token-path.test.ts",
     "test:gate3": "node --experimental-strip-types --test src/main/nvidia-execution.test.ts",
@@ -25,7 +26,7 @@
     "test:renderer": "vitest run --config vitest.config.ts",
     "test:python": "python\\.venv\\Scripts\\python.exe -m pytest python\\tests -q",
     "test": "npm run test:comfy-model-analysis && npm run test:gate2 && npm run test:gate3 && npm run test:gate4 && npm run test:gate5 && npm run test:gate6 && npm run test:mydb && npm run test:attachments && npm run test:renderer",
-    "test:all": "npm run typecheck && npm run test && npm run test:python",
+    "test:all": "npm run typecheck && npm run typecheck:python && npm run test && npm run test:python",
     "build:pyruntime": "powershell -ExecutionPolicy Bypass -File scripts/build-pyruntime.ps1",
     "build:win": "electron-vite build && electron-builder --win",
     "dist:win": "npm run build:pyruntime && npm run build:win"

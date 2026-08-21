@@ -155,7 +155,9 @@ def detect_response_language(text: str) -> str | None:
         code: sum(word in hints for word in words)
         for code, hints in _LATIN_HINTS.items()
     }
-    best = max(scores, key=scores.get)
+    # dict.get은 Optional을 돌려주는 오버로드라 정렬 키로 쓰면 타입이 흐려진다.
+    # 키가 전부 scores에서 나오므로 첨자 조회와 결과가 동일하다.
+    best = max(scores, key=lambda code: scores[code])
     best_score = scores[best]
     if best_score >= 2:
         return best

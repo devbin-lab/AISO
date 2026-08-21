@@ -55,3 +55,10 @@ jobs:
       # scripts의 test:python 은 로컬 개발용 venv 경로가 박혀 있어 CI에서 못 쓴다.
       - name: Pytest
         run: python -m pytest python/tests -q
+
+      # 타입 검사는 0건에서 시작한다(도입 시 130건을 전부 해소했다). 그래서
+      # 여기서 새로 뜨는 오류는 노이즈가 아니라 신호다 — 게이트로 세운 이유다.
+      # 설정과 그 수준을 고른 근거는 python/pyproject.toml 에 있다.
+      - name: Mypy
+        working-directory: python
+        run: python -m mypy .

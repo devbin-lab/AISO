@@ -9,7 +9,7 @@ import ipaddress
 import json
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Awaitable, Callable, Mapping
+from typing import Any, AsyncGenerator, Awaitable, Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -234,7 +234,10 @@ class NvidiaAdapter:
         request: LlmRequest,
         *,
         read_timeout: float | None,
-    ) -> AsyncIterator[LlmEvent]:
+    ) -> AsyncGenerator[LlmEvent, None]:
+        # 이 함수는 실제로 async generator다. 호출부(chat_stream·_inspect_*)가 조기
+        # 중단 시 aclose()로 SSE 연결을 정리하는데, AsyncIterator 계약에는 aclose가
+        # 없어 선언이 구현보다 넓었다. 계약을 실제 구현에 맞춰 좁힌다.
         parser = NvidiaSseParser()
         received_bytes = False
         done = False
@@ -423,7 +426,7 @@ class NvidiaAdapter:
                 received_bytes,
             )
 
-    async def chat_stream(self, request: LlmRequest) -> AsyncIterator[LlmEvent]:
+    async def chat_stream(self, request: LlmRequest) -> AsyncGenerator[LlmEvent, None]:
         configured_read_timeout = request.provider_options.get("response_read_timeout")
         if configured_read_timeout is None:
             read_timeout = None

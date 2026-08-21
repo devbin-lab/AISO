@@ -143,7 +143,10 @@ def render_plan(plan: list[dict]) -> str:
     """현재 계획을 시스템 메시지에 끼워넣을 텍스트로 렌더링한다 (항상 컨텍스트에 유지)."""
     if not plan:
         return ""
-    mark = {"completed": "[x]", "in_progress": "[~]", "pending": "[ ]"}
+    # plan 은 모델이 준 값이 그대로 실린 dict 라 status 키가 없을 수도 있다
+    # (그때 s.get("status") 는 None). 미지의 키·None 은 기본값 "[ ]"로 떨어지는 것이
+    # 의도한 동작이므로, 조회 키 타입에 None 을 포함시켜 그 계약을 적는다.
+    mark: dict[str | None, str] = {"completed": "[x]", "in_progress": "[~]", "pending": "[ ]"}
     lines = "\n".join(f"{mark.get(s.get('status'), '[ ]')} {s.get('content', '')}" for s in plan)
     return (
         "\n\n[현재 작업 계획]\n" + lines +
@@ -204,7 +207,7 @@ class ModelConversation(list):
         self.dropped_before = 0
         super().__init__(truncate_tool_message(m, self._tool_result_cap) for m in iterable)
 
-    def append(self, message: dict) -> None:  # type: ignore[override]
+    def append(self, message: dict) -> None:
         super().append(truncate_tool_message(message, self._tool_result_cap))
 
 
@@ -2455,7 +2458,11 @@ def _positive_ordinal_selection_index(text: str) -> int | None:
         }
         if value in words:
             return words[value]
-        return int(re.match(r"\d+", value).group()) - 1
+        # words 에 없다는 건 위 ordinal 패턴의 숫자 가지([1-9]\d{0,2}(st|nd|rd|th))로
+        # 잡혔다는 뜻이다 — 따라서 선두 숫자 매치는 반드시 성립한다.
+        digits = re.match(r"\d+", value)
+        assert digits is not None
+        return int(digits.group()) - 1
 
     korean = re.fullmatch(
         r"(?:(?P<word>첫|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*번째|"
@@ -2535,7 +2542,7 @@ def _fire_reindex(root: Path, host: str) -> None:
 
 
 def _maybe_reindex(
-    root: Path,
+    root: Path | None,
     host: str,
     dirty: bool,
     rag_available: bool,
@@ -2555,7 +2562,10 @@ def _maybe_reindex(
     뒤 백그라운드 재색인이 먼저 끝나버리면 _fire_reindex의 _reindexing 중복 방지가
     풀리므로, 그 창을 이 플래그로 닫는다.
     """
-    if not (dirty and rag_available):
+    # 작업 폴더 없는 런(WORKSPACE_FREE 도구만 쓰는 경우)에서도 종료 경로는 이 함수를
+    # 거친다. rag_available 이 그때 거짓이라 지금까지 무해했지만, 그건 두 값 사이의
+    # 암묵 관계였다. root 를 직접 보고 끊어 관계를 코드로 적는다.
+    if root is None or not (dirty and rag_available):
         return
     if state is not None:
         if state.get("reindex_fired"):
@@ -2618,7 +2628,9 @@ async def _run_agent_impl(
     enabled_tools: list[str] | None = None,
     user_request_text: str | None = None,
     image_context_verified: bool = False,
-    response_language: str | None = None,
+    # 위임 대상(agent_runner._run_agent_impl)은 str 만 받는다. None 을 허용하면
+    # normalize_response_language(None)=="en" 이 되어 한국어 폴백이 조용히 사라진다.
+    response_language: str = "ko",
     _cleanup_state: dict[str, Any] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Compatibility facade for the extracted agent orchestration loop."""

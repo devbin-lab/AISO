@@ -1,3 +1,6 @@
 # 개발/테스트 전용 의존성 (런타임 requirements.txt와 분리).
 # 하네스 특성화 테스트는 pytest-asyncio 없이 asyncio.run 기반으로 돈다.
 pytest>=8
+
+# 타입 검사 — mypy.ini 의 기준선에서 0건을 유지한다(CI 게이트).
+mypy>=2

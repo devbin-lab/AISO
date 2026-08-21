@@ -12,6 +12,7 @@ import zipfile
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
+from typing import cast
 from xml.etree import ElementTree as ET
 
 
@@ -389,7 +390,13 @@ def extract_hwp(target: Path) -> str:
             e for e in ole.listdir()
             if len(e) == 2 and e[0] == "BodyText" and e[1].lower().startswith("section")
         ]
-        sections.sort(key=lambda e: int((re.search(r"(\d+)", e[1]) or re.match("0", "0")).group()))
+        # 폴백 re.match("0", "0")은 리터럴끼리라 항상 매치한다 — 즉 이 식은 결코
+        # None이 아니지만, mypy는 매치 성공을 알 수 없어 Optional로 본다.
+        sections.sort(
+            key=lambda e: int(
+                cast("re.Match[str]", re.search(r"(\d+)", e[1]) or re.match("0", "0")).group()
+            )
+        )
         out: list[str] = []
         for entry in sections:
             raw = ole.openstream(entry).read()

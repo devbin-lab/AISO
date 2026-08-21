@@ -145,7 +145,8 @@ def _limit(value: Any, *, maximum: int, default: int) -> int:
 
 
 def _node_summary(node: dict[str, Any]) -> dict[str, Any]:
-    result = {
+    # file 노드에서 size(int)·tags(list[str])를 덧붙이므로 값 타입은 str이 아니다.
+    result: dict[str, Any] = {
         "id": str(node.get("id") or ""),
         "kind": str(node.get("kind") or ""),
         "title": str(node.get("title") or ""),

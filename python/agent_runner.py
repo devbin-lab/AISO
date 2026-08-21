@@ -681,6 +681,14 @@ async def _run_agent_impl(
         and not route_decision.skips_automatic_rag
     ):
         try:
+            # 이 분기의 조건에 not no_workspace 가 들어 있다. no_workspace 가 아니면
+            # root 는 위 초기화(186~192행)에서 validate_workspace 의 Path 로 확정된 뒤이며,
+            # 실패는 그 자리에서 error+return 이라 여기까지 오지 않는다.
+            #
+            # 이 단언을 try **안**에 두는 이유: 이 블록의 실패는 설계상 비치명이다
+            # (아래 except 가 삼키고 런은 계속된다). 만에 하나 위 불변식이 깨지더라도
+            # 런 전체를 죽이는 대신 RAG 없이 진행하는 편이 이 블록의 계약에 맞는다.
+            assert root is not None
             if deps.rag_status(root).get("indexed"):
                 rag_available = True
                 cleanup_state["rag_available"] = True
@@ -1039,7 +1047,7 @@ async def _run_agent_impl(
         )
         # 생성(오프로드 사다리 + 파싱오류 재생성 + 스트리밍)은 _generate_turn에 위임한다.
         # 스트림/알림은 그대로 흘리고, 종료 마커(_gen)에서 최종 결과 또는 치명 오류를 받는다.
-        final = None
+        final: dict[str, Any] | None = None
         gen_error = None
         generation_stream = (
             deps._generate_turn(host, base, reasoning_effort, model_runtime, offload_noticed)
@@ -1113,6 +1121,10 @@ async def _run_agent_impl(
             yield {"type": "error", "error": gen_error}
             deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
             return
+        # _generate_turn 의 종료 마커는 final 과 error 가 정확히 상보적이다
+        # (agent_execution.py:393·399·416 은 final=None+error, 419 는 final=dict+error=None).
+        # 아래 수십 줄이 final 을 dict 로 다루므로 그 계약을 여기서 한 번 못 박는다.
+        assert final is not None
 
         # 이번 턴 생성 토큰 누적 + 실시간 표시용 usage 이벤트 (출력 토큰만, 멀티턴이면 턴마다 증가)
         turn_tokens = final.get("output_tokens") or 0
@@ -1570,6 +1582,9 @@ async def _run_agent_impl(
                 )
             ]
         if route_requested_outside_phase:
+            # 이 목록은 바로 위에서 []로 초기화된 뒤 route_phase is not None 인 분기
+            # 안에서만 채워진다. 비어 있지 않다는 것은 route_phase 가 있다는 뜻이다.
+            assert route_phase is not None
             # No part of the batch has executed yet.  A narrow high-confidence
             # route may therefore recover one harmless model-selection mistake,
             # including a mutating tool, without risking partial side effects.
@@ -1754,12 +1769,14 @@ async def _run_agent_impl(
         batch_dependency_mutation_positions: dict[str, int] = {}
         for tool_index, tool_call in enumerate(tool_calls):
             function = tool_call.get("function") or {}
-            tool_name = function.get("name")
+            # 이 루프만 이름을 정규화하지 않은 원본 그대로 쓴다(비교는 전부 == / in).
+            # 앞선 두 루프의 tool_name(항상 str)과 구분하려고 이름을 따로 둔다.
+            raw_tool_name = function.get("name")
             target = _html_entry_path(deps._parse_args(function.get("arguments")))
-            tool_spec = deps.REGISTRY.get(str(tool_name or ""))
-            if (tool_spec is not None and tool_spec.mutates) or tool_name in skill_names:
+            tool_spec = deps.REGISTRY.get(str(raw_tool_name or ""))
+            if (tool_spec is not None and tool_spec.mutates) or raw_tool_name in skill_names:
                 effect_paths = _relative_tool_effect_paths(
-                    str(tool_name or ""),
+                    str(raw_tool_name or ""),
                     deps._parse_args(function.get("arguments")),
                     root,
                 )
@@ -1771,10 +1788,10 @@ async def _run_agent_impl(
                             batch_dependency_mutation_positions.setdefault(
                                 dependency_key, tool_index
                             )
-            if tool_name == "run_web":
+            if raw_tool_name == "run_web":
                 batch_run_targets.append(target)
                 batch_run_positions.append((tool_index, target))
-            elif tool_name in {"write_code_file", "edit_code_file", "multi_edit_code_file"}:
+            elif raw_tool_name in {"write_code_file", "edit_code_file", "multi_edit_code_file"}:
                 if target is not None:
                     batch_write_positions.setdefault(target[0], tool_index)
                     batch_write_policy_positions.setdefault(
@@ -2096,6 +2113,9 @@ async def _run_agent_impl(
                         yield {"type": "done"}
                         return
                     continue
+                # validation_error 가 비어 있다는 것은 run_target is None 분기를 지나쳤다는
+                # 뜻이다 — 그 분기는 반드시 메시지를 채우므로 여기선 대상이 확정돼 있다.
+                assert run_target is not None
                 # 요청됨과 실제 실행됨을 경로별로 분리해 승인 거부 및 복수 대상 누락을 추적한다.
                 existing_web_validation_run_requested.add(run_target[0])
                 existing_web_validation_execution_nudged.add(run_target[0])
@@ -2879,6 +2899,8 @@ async def _run_agent_impl(
                     spec = deps.REGISTRY.get(name)
                     if spec is None:
                         # 미등록 툴 → run_tool이 "알 수 없는 툴" ToolError를 낸다 (기존 동작 보존)
+                        # root=None 인 런(작업 폴더 미선택)도 여기 올 수 있다. run_tool 이
+                        # Path|None 을 받고 이름 조회에서 먼저 끊으므로 안전하다.
                         result, shot = deps.run_tool(root, name, args), None
                     else:
                         # 취소가 execute() 안에서 들어오면 도구가 이미 파일을 일부 바꿨을 수 있다.

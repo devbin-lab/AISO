@@ -71,7 +71,10 @@ from llm import (
 try:
     import discordbot
 except Exception:  # noqa: BLE001
-    discordbot = None
+    # 선택적 임포트의 표준형. ModuleType | None 으로 정직하게 넓히면 모든 사용처
+    # (314·1467·1474·1481)의 속성 접근이 Any 가 되어 discordbot API 검사 자체가
+    # 사라진다 — 이미 세 곳 모두 `is None` 가드를 통과한 뒤이므로 여기만 덮는다.
+    discordbot = None  # type: ignore[assignment]
 
 DEFAULT_OLLAMA = os.environ.get("AISO_OLLAMA_HOST", "http://localhost:11434")
 MAX_DISCORD_PARSE_RETRIES = 2  # 디스코드 툴 루프의 툴콜 파싱오류 재생성 상한(agent 경로와 동일)

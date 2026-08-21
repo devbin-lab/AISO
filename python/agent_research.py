@@ -134,9 +134,9 @@ async def run_research_chat(
             max_output_tokens=max_gen_tokens,
             provider_options={"keep_alive": keep_alive, "num_ctx": context_length},
         )
-        final = None
-        gen_error = None
-        gen_error_kind = None
+        final: dict[str, Any] | None = None
+        gen_error: str | None = None
+        gen_error_kind: Any = None
         generation_stream = (
             generate_turn(host, base, reasoning_effort, model_runtime, offload_noticed)
             if runtime is None and not strict_tool_protocol
@@ -163,6 +163,13 @@ async def run_research_chat(
                 continue
             yield {"type": "error", "error": gen_error}
             return
+
+        # generate_turn(=_generate_turn) 의 종료 마커는 final 과 error 가 정확히 상보적이다
+        # (agent_execution.py:393·399·416 은 final=None+error, 419 는 final=dict+error=None).
+        # 위 gen_error 관문을 지났다는 건 419 경로였다는 뜻이므로, 아래에서 final 을
+        # dict 로 다루는 계약을 여기서 한 번 못 박는다. 에이전트 루프도 같은 방식이다
+        # (agent_runner.py:1119).
+        assert final is not None
 
         turn_tokens = final.get("output_tokens") or 0
         if turn_tokens:

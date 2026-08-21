@@ -258,6 +258,7 @@ def bound_guild():
     """고정된 단일 서버의 라이브 길드 객체 — 없으면 None. (discordops가 서버 구성에 사용)"""
     if not is_running() or not _S.guild_id.isdigit():
         return None
+    assert _S.client is not None  # is_running()이 곧 client 존재 검사다(236~237행)
     return _S.client.get_guild(int(_S.guild_id))
 
 
@@ -458,6 +459,10 @@ async def _ask_owner_approval(channel, preview: str) -> bool:
         await channel.send(part)
     msg = await channel.send(parts[-1], view=view)
     await view.wait()
+    # _ApproveView의 자식은 @discord.ui.button 두 개(432·438행)뿐이라 모두 disabled를 갖지만,
+    # discord.py가 children을 기반 타입 Item[...]으로 선언해 그 속성이 보이지 않는다 —
+    # 분기를 추가하지 않고 루프 변수만 넓혀 둔다.
+    child: Any
     for child in view.children:
         child.disabled = True
     outcome = "✅ 승인됨 — 적용합니다." if view.approved else "❌ 취소됨(거부 또는 시간 초과)."
@@ -485,6 +490,9 @@ async def _apply_with_approval(channel, ops) -> str:
     clean, skipped, error_msg = discordops.prepare_ops(ops, snap)  # 보호대상 분리 + 검증(server_apply와 공유)
     if error_msg:
         return error_msg
+    # prepare_ops가 clean=None을 내는 두 경로(discordops.py 375·380행)는 반드시 error_msg를
+    # 함께 내므로, 오류 가드를 지나면 clean은 리스트다(server_apply도 같은 계약을 쓴다).
+    assert clean is not None
     preview = discordops.render_ops_preview(clean, snap)
     if skipped:
         preview += "\n제외됨(보호): " + " · ".join(skipped)
@@ -501,6 +509,7 @@ async def _send_with_approval(channel, args: dict) -> str:
     got, err = discordops.validate_send(a["channel"], a["message"])
     if err:
         return f"[거부] {err}"
+    assert got is not None  # validate_send(discordops.py 671행)의 거부 return은 모두 (None, 오류)다
     ch_id, ch_name, body = got
     # 본문을 자르지 않는다 — 소유자가 실제로 전송될 전체 내용을 보고 승인해야 한다
     # (서버구성 승인과 동일 원칙; _ask_owner_approval이 2000자 단위로 분할 전송한다).
@@ -525,6 +534,9 @@ async def _schedule_add_with_approval(channel, args: dict) -> str:
     got, err = discordops.resolve_text_channel(a["channel"])
     if err:
         return f"[거부] {err}"
+    # resolve_text_channel(discordops.py 652행)·build_job(discordsched.py 244행) 모두
+    # (값,None)·(None,오류)로 상보적이라 오류 가드를 지나면 값이 반드시 있다.
+    assert got is not None
     ch_id, ch_name = got
     draft, derr = discordsched.build_job(
         channel_id=ch_id, channel_name=ch_name, kind=a["kind"], text=a["text"],
@@ -532,6 +544,7 @@ async def _schedule_add_with_approval(channel, args: dict) -> str:
     )
     if derr:
         return f"[거부] {derr}"
+    assert draft is not None
     if not await _ask_owner_approval(channel, discordsched.render_add_preview(draft)):
         return _REJECTED
     return "예약이 등록되었습니다.\n" + discordsched.render_job(discordsched.commit_job(draft))
@@ -553,6 +566,9 @@ async def _channel_report_add_with_approval(channel, args: dict) -> str:
     draft, meta, error = await discordsched.prepare_channel_report(**(args or {}))
     if error:
         return error
+    # prepare_channel_report는 거부 시 (None, None, 오류)만 낸다(discordsched.py 386행) —
+    # 오류가 없으면 draft·meta가 함께 있다(channel_report_add도 같은 계약을 쓴다).
+    assert draft is not None and meta is not None
     if not await _ask_owner_approval(channel, discordsched.render_channel_report_preview(meta)):
         return _REJECTED
     return discordsched.render_channel_report_registered(discordsched.commit_job(draft), meta)
@@ -614,7 +630,9 @@ async def _tool_chat(channel, author_id: str, convo: list) -> str:
     import discordops  # noqa: PLC0415
     import discordsched  # noqa: PLC0415
 
-    tools = [
+    # 스키마 dict들의 값 타입이 제각각이라 리터럴만으로는 Collection[str]으로 좁게 추론된다 —
+    # 실제로 담기는 것(그리고 model_schemas_for가 돌려주는 것)은 툴 스키마 dict다.
+    tools: list[dict[str, Any]] = [
         discordops.MAP_SCHEMA, discordops.APPLY_SCHEMA, discordops.SEND_SCHEMA,
         discordsched.SCHEDULE_ADD_SCHEMA, discordsched.SCHEDULE_LIST_SCHEMA,
         discordsched.SCHEDULE_REMOVE_SCHEMA, discordsched.CHANNEL_REPORT_ADD_SCHEMA,
@@ -633,6 +651,9 @@ async def _tool_chat(channel, author_id: str, convo: list) -> str:
     completed_provider_calls: dict[str, tuple[str, str]] = {}
     for _ in range(MAX_TOOL_TURNS):
         async with _S.gen_lock:  # 생성만 직렬화한다 — 뒤이은 승인 대기는 락 밖에서
+            # 이 루프로 들어오는 유일한 경로가 _S.step 유무로 정해진다(827·828·877행:
+            # use_tools = _S.step is not None → route == "tools"일 때만 호출).
+            assert _S.step is not None
             resp = await _S.step(convo, tools)
         calls = resp.get("tool_calls") or []
         if not calls:

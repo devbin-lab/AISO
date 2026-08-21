@@ -132,7 +132,11 @@ class AgentExecutionLedger:
             try:
                 db.close()
             finally:
-                self._db = None
+                # `_db is None` 은 '닫혔다'의 **관측 가능한 표시**다 —
+                # test_nvidia_credential_channel 이 그것으로 원장 종료를 검증한다.
+                # _db 를 Optional 로 넓히면 열린 연결을 전제하는 40여 곳 전부에
+                # 가드가 필요해지고 런타임 이득은 없다. 이 한 줄만 좁혀서 무시한다.
+                self._db = None  # type: ignore[assignment]
 
     def __enter__(self) -> "AgentExecutionLedger":
         return self
