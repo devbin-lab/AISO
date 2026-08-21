@@ -484,6 +484,10 @@
 .viewwrap--graph {
   overflow: hidden;
 }
+/* 홈은 카드가 안에서 스크롤하므로 바깥 래퍼가 스크롤하면 두 겹이 된다. */
+.viewwrap--home {
+  overflow: hidden;
+}
 
 /* ---------- My DB: private library / relationship workspace ---------- */
 .mydb-view {
@@ -6194,12 +6198,16 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
 
 /* ---------- 홈 대시보드 ---------- */
 .home {
+  /* 홈은 훑어보는 화면이라 스크롤 없이 한 눈에 들어와야 한다. 바깥은 고정하고
+     넘치는 내용(할 일 목록·보고서 본문)은 각 카드가 안에서 스크롤한다. */
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
+  height: 100%;
   max-width: 1180px;
   margin: 0 auto;
-  padding: 26px 28px 34px;
+  padding: 20px 24px 22px;
+  overflow: hidden;
 }
 .home__head {
   display: flex;
@@ -6244,34 +6252,57 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
 
 .home__grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  flex: 1;
+  /* min-height:0 이 없으면 그리드 아이템이 내용 높이만큼 부풀어 바깥이 넘친다. */
+  min-height: 0;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   grid-template-areas:
-    'todos usage'
-    'reports reports';
-  gap: 14px;
+    'status usage'
+    'todos  reports';
+  gap: 12px;
 }
+.home-card--status { grid-area: status; }
 .home-card--todos { grid-area: todos; }
 .home-card--usage { grid-area: usage; }
 .home-card--reports { grid-area: reports; }
 @media (max-width: 900px) {
+  /* 좁은 창에서 한 화면에 욱여넣으면 각 칸이 읽을 수 없이 납작해진다.
+     이때만 세로로 쌓고 바깥 스크롤을 되살린다.
+     .home 만 풀면 래퍼가 여전히 hidden 이라 쌓인 내용이 잘려 도달할 수 없다 —
+     실측에서 656px 가 잘렸다. 래퍼도 함께 풀어야 한다. */
+  .viewwrap--home {
+    overflow-y: auto;
+  }
+  .home {
+    height: auto;
+    overflow: visible;
+  }
   .home__grid {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: 'todos' 'usage' 'reports';
+    grid-template-rows: none;
+    grid-template-areas: 'status' 'todos' 'usage' 'reports';
+  }
+  .home-todos,
+  .home-report__body {
+    overflow-y: visible;
   }
 }
 
 .home-card {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
-  padding: 16px 17px 17px;
+  min-height: 0;
+  padding: 14px 15px 15px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-elev);
 }
 .home-card__head {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 8px;
   color: var(--text-muted);
@@ -6309,19 +6340,75 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   font-size: 12.5px;
   line-height: 1.6;
 }
-.home-card__more {
+
+/* 연결 상태 */
+.home-status {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-height: 0;
   margin: 0;
-  color: var(--text-dim);
-  font-size: 11.5px;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
 }
+.home-status__row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+}
+.home-status__row:hover { background: var(--sidebar-hover); }
+.home-status__dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--text-dim);
+}
+.home-status__row--ok .home-status__dot { background: var(--ok); }
+.home-status__row--warning .home-status__dot { background: var(--warn); }
+.home-status__row--error .home-status__dot { background: var(--err); }
+.home-status__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12.5px;
+}
+.home-status__state {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.home-status__row--ok .home-status__state { color: var(--ok); }
+.home-status__row--warning .home-status__state { color: var(--warn); }
+.home-status__row--error .home-status__state { color: var(--err); }
+.home-status__summary {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--seg-on-bg);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 700;
+}
+.home-status__summary--ok { color: var(--ok); }
+.home-status__summary--warning { color: var(--warn); }
+.home-status__summary--error { color: var(--err); }
 
 /* 할 일 */
 .home-todos {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-height: 0;
   margin: 0;
   padding: 0;
+  overflow-y: auto;
   list-style: none;
 }
 .home-todo {
@@ -6419,15 +6506,10 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
 }
 
 /* My DB 보고서 */
-.home-reports {
+.home-report {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.home-report {
+  min-height: 0;
   padding: 11px 13px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -6435,15 +6517,10 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
 }
 .home-report__head {
   display: flex;
+  flex: none;
   align-items: baseline;
   gap: 9px;
   margin-bottom: 6px;
-}
-.home-report__date {
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
 }
 .home-report__count {
   color: var(--text-dim);
@@ -6451,6 +6528,8 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   font-variant-numeric: tabular-nums;
 }
 .home-report__body {
+  min-height: 0;
+  overflow-y: auto;
   margin: 0;
   /* 보고서 본문은 증거 기반 서술이라 줄바꿈이 의미를 갖는다. */
   white-space: pre-wrap;

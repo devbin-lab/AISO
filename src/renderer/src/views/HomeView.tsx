@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { BackendInfo } from '../../../shared/backend'
+import type { BackendInfo, HealthInfo } from '../../../shared/backend'
+import type { AppSettings } from '../../../shared/settings'
 import type { MyDbDailyReport } from '../../../shared/mydb'
 import type { UsageSummary } from '../../../shared/usage'
 import { authHeaders } from '../lib/backend'
+import { collectConnectionChecks, stateLabel, summarizeChecks, type Check } from '../lib/diagnostics'
 import { getMyDbBridge } from '../lib/mydb'
-import { DatabaseIcon, RefreshIcon, TodoIcon } from '../components/icons'
+import { DatabaseIcon, RefreshIcon, SlidersIcon, TodoIcon } from '../components/icons'
 
 type Priority = 'high' | 'medium' | 'low'
 
@@ -20,7 +22,9 @@ interface TodoItem {
 interface Props {
   active: boolean
   backend: BackendInfo
-  onNavigate: (view: 'todo' | 'graph') => void
+  health: HealthInfo | null
+  settings: AppSettings
+  onNavigate: (view: 'todo' | 'graph' | 'settings') => void
 }
 
 const PRIORITY_LABEL: Record<Priority, string> = { high: 'P1', medium: 'P2', low: 'P3' }
@@ -58,15 +62,29 @@ function formatTokens(value: number): string {
   return String(value)
 }
 
+/** 가장 나쁜 상태가 요약 색을 정한다 — 좋은 소식으로 나쁜 소식을 가리지 않는다. */
+function worstState(checks: Check[]): string {
+  if (checks.some((check) => check.state === 'error')) return 'error'
+  if (checks.some((check) => check.state === 'warning')) return 'warning'
+  return checks.length === 0 ? 'info' : 'ok'
+}
+
+/** 이 보고서가 오늘 작성된 것인지 — 앱을 며칠 꺼 뒀다면 오래된 보고서가 최신일 수 있다. */
+function reportFreshness(report: MyDbDailyReport): string {
+  const generated = report.generatedAt.slice(0, 10)
+  return generated === localDay(0) ? '오늘 작성' : `${generated.slice(5).replace('-', '월 ')}일 작성`
+}
+
 /** 최근 7일만 잘라 온다. summary.daily 는 최근 30일(과거→오늘)이다. */
 function lastWeek(daily: UsageSummary['daily']): UsageSummary['daily'] {
   return daily.slice(-7)
 }
 
-function HomeView({ active, backend, onNavigate }: Props): React.JSX.Element {
+function HomeView({ active, backend, health, settings, onNavigate }: Props): React.JSX.Element {
   const [todos, setTodos] = useState<TodoItem[]>([])
   const [usage, setUsage] = useState<UsageSummary | null>(null)
-  const [reports, setReports] = useState<MyDbDailyReport[]>([])
+  const [report, setReport] = useState<MyDbDailyReport | null>(null)
+  const [checks, setChecks] = useState<Check[]>([])
   const [loading, setLoading] = useState(false)
   const [todoError, setTodoError] = useState<string | null>(null)
 
@@ -74,7 +92,7 @@ function HomeView({ active, backend, onNavigate }: Props): React.JSX.Element {
     setLoading(true)
     // 세 원천은 서로 독립이다. 하나가 실패해도 나머지는 보여 준다 —
     // 대시보드가 통째로 비면 사용자는 무엇이 문제인지조차 알 수 없다.
-    const [todoResult, usageResult, reportResult] = await Promise.allSettled([
+    const [todoResult, usageResult, reportResult, checkResult] = await Promise.allSettled([
       backend.state === 'ready' && backend.port
         ? fetch(`http://127.0.0.1:${backend.port}/creator/todos`, { headers: authHeaders() })
             .then((response) => (response.ok ? response.json() : Promise.reject(new Error(String(response.status)))))
@@ -83,7 +101,8 @@ function HomeView({ active, backend, onNavigate }: Props): React.JSX.Element {
       window.api?.usage?.summary() ?? Promise.reject(new Error('no-usage-bridge')),
       // getMyDbBridge()는 브리지가 없으면 **동기 throw**다. allSettled 배열 안에서 그대로
       // 부르면 세 원천이 통째로 날아간다 — 반드시 거부된 프로미스로 바꿔서 넘긴다.
-      Promise.resolve().then(() => getMyDbBridge().history())
+      Promise.resolve().then(() => getMyDbBridge().history()),
+      collectConnectionChecks(backend, health, settings)
     ])
 
     if (todoResult.status === 'fulfilled') {
@@ -95,9 +114,11 @@ function HomeView({ active, backend, onNavigate }: Props): React.JSX.Element {
       )
     }
     if (usageResult.status === 'fulfilled') setUsage(usageResult.value)
-    if (reportResult.status === 'fulfilled') setReports(reportResult.value.dailyReports.slice(0, 3))
+    // dailyReports 는 report_date 내림차순이라 첫 항목이 가장 최근 보고서다.
+    if (reportResult.status === 'fulfilled') setReport(reportResult.value.dailyReports[0] ?? null)
+    if (checkResult.status === 'fulfilled') setChecks(checkResult.value)
     setLoading(false)
-  }, [backend.state, backend.port])
+  }, [backend, health, settings])
 
   useEffect(() => {
     if (!active) return
@@ -129,6 +150,30 @@ function HomeView({ active, backend, onNavigate }: Props): React.JSX.Element {
       </header>
 
       <div className="home__grid">
+        {/* ── 연결 상태 ── */}
+        <section className="home-card home-card--status" aria-label="연결 상태">
+          <div className="home-card__head">
+            <SlidersIcon size={15} />
+            <h2 className="home-card__title">연결 상태</h2>
+            <span className={`home-status__summary home-status__summary--${worstState(checks)}`}>
+              {checks.length === 0 ? '확인 중…' : summarizeChecks(checks)}
+            </span>
+            <button type="button" className="home-card__link" onClick={() => onNavigate('settings')}>
+              진단 센터
+            </button>
+          </div>
+          <ul className="home-status">
+            {checks.map((check) => (
+              <li key={check.id} className={`home-status__row home-status__row--${check.state}`} title={check.detail}>
+                <i className="home-status__dot" />
+                <span className="home-status__label">{check.label}</span>
+                <span className="home-status__state">{stateLabel(check.state)}</span>
+              </li>
+            ))}
+            {checks.length === 0 && <li className="home-status__row"><span className="home-status__label">연결을 확인하는 중입니다…</span></li>}
+          </ul>
+        </section>
+
         {/* ── 할 일 ── */}
         <section className="home-card home-card--todos" aria-label="오늘 할 일">
           <div className="home-card__head">
@@ -145,7 +190,7 @@ function HomeView({ active, backend, onNavigate }: Props): React.JSX.Element {
             <p className="home-card__empty">기한이 지났거나 오늘까지인 할 일이 없습니다.</p>
           ) : (
             <ul className="home-todos">
-              {pending.slice(0, 8).map((item) => (
+              {pending.map((item) => (
                 <li key={item.id} className={`home-todo${overdue(item) ? ' home-todo--overdue' : ''}`}>
                   <span className={`home-todo__pri home-todo__pri--${item.priority}`}>
                     {PRIORITY_LABEL[item.priority]}
@@ -159,9 +204,6 @@ function HomeView({ active, backend, onNavigate }: Props): React.JSX.Element {
                 </li>
               ))}
             </ul>
-          )}
-          {pending.length > 8 && (
-            <p className="home-card__more">외 {pending.length - 8}건</p>
           )}
         </section>
 
@@ -196,28 +238,24 @@ function HomeView({ active, backend, onNavigate }: Props): React.JSX.Element {
         </section>
 
         {/* ── My DB 히스토리 보고서 ── */}
-        <section className="home-card home-card--reports" aria-label="My DB 변경 보고서">
+        <section className="home-card home-card--reports" aria-label="My DB 일일 변경 보고서">
           <div className="home-card__head">
             <DatabaseIcon size={15} />
-            <h2 className="home-card__title">My DB 변경 보고서</h2>
+            <h2 className="home-card__title">My DB 일일 변경 보고서</h2>
+            {report !== null && <span className="home-card__count">{reportFreshness(report)}</span>}
             <button type="button" className="home-card__link" onClick={() => onNavigate('graph')}>
               My DB 열기
             </button>
           </div>
-          {reports.length === 0 ? (
+          {report === null ? (
             <p className="home-card__empty">아직 생성된 보고서가 없습니다. 전날 변경이 있으면 하루 한 번 작성됩니다.</p>
           ) : (
-            <ul className="home-reports">
-              {reports.map((report) => (
-                <li key={report.reportDate} className="home-report">
-                  <div className="home-report__head">
-                    <span className="home-report__date">{report.reportDate}</span>
-                    <span className="home-report__count">변경 {report.totalChanges}건</span>
-                  </div>
-                  <p className="home-report__body">{report.body}</p>
-                </li>
-              ))}
-            </ul>
+            <div className="home-report">
+              <div className="home-report__head">
+                <span className="home-report__count">변경 {report.totalChanges}건</span>
+              </div>
+              <p className="home-report__body">{report.body}</p>
+            </div>
           )}
         </section>
       </div>
