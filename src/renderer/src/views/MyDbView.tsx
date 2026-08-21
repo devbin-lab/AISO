@@ -16,6 +16,7 @@ import type {
 import { CloseIcon, DownloadIcon, EditIcon, FileIcon, FolderIcon, GraphIcon, LinkIcon, SearchIcon, TrashIcon, UnlinkIcon } from '../components/icons'
 import { confirmDialog } from '../components/ConfirmDialog'
 import { getMyDbBridge } from '../lib/mydb'
+import { buildMonth, countByDay, intensityOf, localDayKey, monthsWithHistory } from '../lib/history-calendar'
 import { applyRepulsion, BARNES_HUT_THETA, buildQuadTree } from './mydb-graph/quadtree'
 import { buildGraphRoutes } from './mydb-graph/routing'
 
@@ -1523,6 +1524,11 @@ function MyDbView({ active }: Props): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<MyDbSnapshot>(EMPTY_SNAPSHOT)
   const [history, setHistory] = useState<MyDbHistorySnapshot>(EMPTY_HISTORY)
   const [mode, setMode] = useState<MyDbViewMode>('graph')
+  // 히스토리 안에서 목록/달력 전환. 달력은 '언제 많이 했나'를, 목록은 '무엇을 했나'를 본다.
+  const [historyView, setHistoryView] = useState<'list' | 'calendar'>('list')
+  // 달력에서 고른 날. null 이면 전체를 본다.
+  const [historyDay, setHistoryDay] = useState<string | null>(null)
+  const [historyMonth, setHistoryMonth] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -1556,6 +1562,24 @@ function MyDbView({ active }: Props): React.JSX.Element {
   useEffect(() => {
     if (active && focusCoreId) setFocusZoomToken((token) => token + 1)
   }, [active, focusCoreId])
+
+  // ── 히스토리 달력 ──────────────────────────────────────────────
+  const historyCounts = useMemo(() => countByDay(history.entries), [history.entries])
+  const historyMonths = useMemo(() => monthsWithHistory(history.entries), [history.entries])
+  // 고른 달이 사라지면(이력이 지워졌을 때) 가장 최근 달로 되돌린다.
+  const activeMonth = historyMonth && historyMonths.includes(historyMonth)
+    ? historyMonth
+    : historyMonths[0] ?? localDayKey(new Date()).slice(0, 7)
+  const calendarMonth = useMemo(() => buildMonth(activeMonth, historyCounts), [activeMonth, historyCounts])
+  const monthPeak = useMemo(
+    () => calendarMonth.days.reduce((max, day) => Math.max(max, day.count), 0),
+    [calendarMonth]
+  )
+  // 날짜를 고르면 그 날 것만 보여 준다. 목록 보기에도 그대로 적용된다.
+  const visibleHistory = useMemo(
+    () => (historyDay ? history.entries.filter((entry) => localDayKey(entry.createdAt) === historyDay) : history.entries),
+    [history.entries, historyDay]
+  )
 
   const nodesById = useMemo(() => new Map(snapshot.nodes.map((node) => [node.id, node])), [snapshot.nodes])
   const selected = selectedId ? nodesById.get(selectedId) ?? null : null
@@ -2373,8 +2397,84 @@ function MyDbView({ active }: Props): React.JSX.Element {
               <div className="mydb-history">
                 <header className="mydb-history__head">
                   <h2>변경 이력</h2>
-                  <span>자동 보고 {history.dailyReports.length}개 · 변경 {history.entries.length}개</span>
+                  <div className="mydb-history__headright">
+                    <span>자동 보고 {history.dailyReports.length}개 · 변경 {history.entries.length}개</span>
+                    <div className="mydb-history__viewtabs" role="group" aria-label="이력 보기 방식">
+                      <button
+                        type="button"
+                        className={`mydb-history__viewtab${historyView === 'list' ? ' is-active' : ''}`}
+                        aria-pressed={historyView === 'list'}
+                        onClick={() => setHistoryView('list')}
+                      >목록</button>
+                      <button
+                        type="button"
+                        className={`mydb-history__viewtab${historyView === 'calendar' ? ' is-active' : ''}`}
+                        aria-pressed={historyView === 'calendar'}
+                        onClick={() => setHistoryView('calendar')}
+                      >달력</button>
+                    </div>
+                  </div>
                 </header>
+                {historyView === 'calendar' && (
+                  <section className="mydb-cal" aria-label="변경 이력 달력">
+                    <header className="mydb-cal__head">
+                      <button
+                        type="button"
+                        className="mydb-cal__nav"
+                        aria-label="이전 달"
+                        disabled={historyMonths.indexOf(activeMonth) >= historyMonths.length - 1}
+                        onClick={() => {
+                          const at = historyMonths.indexOf(activeMonth)
+                          const next = historyMonths[at + 1]
+                          if (next) { setHistoryMonth(next); setHistoryDay(null) }
+                        }}
+                      >‹</button>
+                      <strong>{calendarMonth.label}</strong>
+                      <button
+                        type="button"
+                        className="mydb-cal__nav"
+                        aria-label="다음 달"
+                        disabled={historyMonths.indexOf(activeMonth) <= 0}
+                        onClick={() => {
+                          const at = historyMonths.indexOf(activeMonth)
+                          const prev = historyMonths[at - 1]
+                          if (prev) { setHistoryMonth(prev); setHistoryDay(null) }
+                        }}
+                      >›</button>
+                      <span className="mydb-cal__total">이 달 {calendarMonth.total}건</span>
+                    </header>
+                    <div className="mydb-cal__grid" role="grid">
+                      {['일', '월', '화', '수', '목', '금', '토'].map((label) => (
+                        <div key={label} className="mydb-cal__dow" role="columnheader">{label}</div>
+                      ))}
+                      {calendarMonth.days.map((day, index) => (
+                        day.filler ? (
+                          <div key={`filler-${index}`} className="mydb-cal__cell mydb-cal__cell--filler" aria-hidden="true" />
+                        ) : (
+                          <button
+                            key={day.key}
+                            type="button"
+                            role="gridcell"
+                            className={`mydb-cal__cell mydb-cal__cell--l${intensityOf(day.count, monthPeak)}${day.isToday ? ' is-today' : ''}${historyDay === day.key ? ' is-picked' : ''}`}
+                            aria-label={`${day.key} 변경 ${day.count}건`}
+                            aria-pressed={historyDay === day.key}
+                            disabled={day.count === 0}
+                            onClick={() => setHistoryDay(historyDay === day.key ? null : day.key)}
+                          >
+                            <span className="mydb-cal__day">{day.day}</span>
+                            {day.count > 0 && <span className="mydb-cal__count">{day.count}</span>}
+                          </button>
+                        )
+                      ))}
+                    </div>
+                  </section>
+                )}
+                {historyDay && (
+                  <div className="mydb-history__filter">
+                    <span>{historyDay} 의 이력만 보는 중 · {visibleHistory.length}건</span>
+                    <button type="button" onClick={() => setHistoryDay(null)}>전체 보기</button>
+                  </div>
+                )}
                 {history.dailyReports.length > 0 && (
                   <section className="mydb-daily-reports" aria-label="My DB 일일 변경 보고서">
                     <h3>일일 변경 보고서</h3>
@@ -2389,9 +2489,9 @@ function MyDbView({ active }: Props): React.JSX.Element {
                     ))}
                   </section>
                 )}
-                {history.entries.length > 0 ? (
+                {visibleHistory.length > 0 ? (
                   <ol className="mydb-history__list">
-                    {history.entries.map((entry) => (
+                    {visibleHistory.map((entry) => (
                       <li key={entry.id} className={`mydb-history-entry mydb-history-entry--${entry.action}`}>
                         <span className="mydb-history-entry__mark" aria-hidden="true" />
                         <div className="mydb-history-entry__content">
@@ -2415,7 +2515,9 @@ function MyDbView({ active }: Props): React.JSX.Element {
                     ))}
                   </ol>
                 ) : (
-                  <div className="mydb-history__empty">아직 변경 이력이 없습니다.</div>
+                  <div className="mydb-history__empty">
+                    {historyDay ? '이 날짜에는 변경 이력이 없습니다.' : '아직 변경 이력이 없습니다.'}
+                  </div>
                 )}
               </div>
             </div>
