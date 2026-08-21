@@ -1519,7 +1519,12 @@ async def _run_agent_impl(
                             model_content, response_language
                         ),
                     }
+            # 이 블록은 '도구 호출 없이 답만 하고 끝남' 경로다. 대부분은 정상 완료이고,
+            # 아래 두 경우만 안전 한도에 걸린 중단이다. 신호를 이 분기 안에서만 세운다 —
+            # 공통 경로에 두면 정상 완료된 작업까지 '이어갈 수 있음'으로 표시된다.
+            limit_reason = ""
             if degenerate:
+                limit_reason = "repetition"
                 yield {
                     "type": "notice",
                     "text": (
@@ -1528,6 +1533,8 @@ async def _run_agent_impl(
                     ),
                 }
             elif truncated:
+                # 사용자가 말한 '컨텍스트 부족으로 강제 종료'가 실제로는 이것이다.
+                limit_reason = "truncated"
                 yield {
                     "type": "notice",
                     "text": "⚠ 컨텍스트 한도에 도달해 응답이 중간에 잘렸습니다. 설정에서 '컨텍스트 길이'를 늘리거나 '추론 강도'를 낮춰보세요.",
@@ -1548,6 +1555,8 @@ async def _run_agent_impl(
                 )
             # 파일이 변경됐고 색인이 있으면 백그라운드로 증분 재색인 (done을 막지 않음)
             deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+            if limit_reason:
+                yield {"type": "run_limit", "reason": limit_reason}
             yield {"type": "done"}
             return
 
@@ -1952,6 +1961,7 @@ async def _run_agent_impl(
                         "type": "run_summary",
                         "text": _run_progress_summary(executed_tool_records),
                     }
+                yield {"type": "run_limit", "reason": "tool_budget"}
                 yield {"type": "done"}
                 return
             substantive_batch_counts[batch_fingerprint] = next_batch_count
@@ -2330,6 +2340,7 @@ async def _run_agent_impl(
                         "text": _run_progress_summary(executed_tool_records),
                     }
                 deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+                yield {"type": "run_limit", "reason": "repeat"}
                 yield {"type": "done"}
                 return
 
@@ -2356,6 +2367,7 @@ async def _run_agent_impl(
                             "text": _run_progress_summary(executed_tool_records),
                         }
                     deps._maybe_reindex(root, host, dirty, rag_available, cleanup_state)
+                    yield {"type": "run_limit", "reason": "stall"}
                     yield {"type": "done"}
                     return
 
@@ -3380,6 +3392,7 @@ async def _run_agent_impl(
             "여기까지 한 내용은 유지됩니다 — 이어서 계속하려면 '계속해줘'라고 해주세요."
         ),
     }
+    yield {"type": "run_limit", "reason": "max_steps"}
     if _run_progress_summary(executed_tool_records):
         yield {"type": "run_summary", "text": _run_progress_summary(executed_tool_records)}
     if pending_html_validation:

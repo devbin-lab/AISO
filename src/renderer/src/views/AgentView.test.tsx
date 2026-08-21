@@ -4,6 +4,7 @@ import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import { DEFAULT_SETTINGS } from '../../../shared/settings'
 import { NVIDIA_BUILD_BASE_URL } from '../../../shared/nvidia'
 import AgentView from './AgentView'
+import { MAX_AUTO_CONTINUES } from '../lib/agent'
 
 
 const backend: BackendInfo = { state: 'ready', port: 8123 }
@@ -836,5 +837,89 @@ describe('AgentView NVIDIA capability gate', () => {
       expect(sandbox).not.toContain('allow-top-navigation')
       expect(sandbox).not.toContain('allow-modals')
     }
+  })
+
+  // ── 작업 자동 이어가기 ──────────────────────────────────────────────
+
+  const chr10 = String.fromCharCode(10)
+
+  function limitStream(encoder: TextEncoder) {
+    return (): Response => {
+      const events = [
+        { type: 'tool_call', id: 't1', name: 'write_file', args: { path: 'a.md' }, assistantTurnId: 'a1' },
+        { type: 'tool_result', id: 't1', ok: true, output: '됨', name: 'write_file', assistantTurnId: 'a1' },
+        { type: 'notice', text: '안전선에서 멈췄습니다.' },
+        { type: 'run_summary', text: '[이번 실행에서 실제로 수행한 도구] - write_file a.md — 성공' },
+        { type: 'run_limit', reason: 'max_steps' },
+        { type: 'done' }
+      ]
+      return {
+        ok: true,
+        status: 200,
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(events.map((e) => JSON.stringify(e)).join(chr10) + chr10))
+            controller.close()
+          }
+        })
+      } as unknown as Response
+    }
+  }
+
+  it('설정이 꺼져 있으면 한도에서 멈추고 스스로 이어가지 않는다', async () => {
+    const status = vi.fn().mockResolvedValue(null)
+    installApiStub(status)
+    const agentRequests: unknown[] = []
+    const encoder = new TextEncoder()
+    const stream = limitStream(encoder)
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).includes('/agent')) {
+        agentRequests.push(JSON.parse(String(init?.body ?? '{}')))
+        return stream()
+      }
+      return { ok: true, status: 200, json: vi.fn().mockResolvedValue({ indexed: false, count: 0, files: 0 }) }
+    }))
+    render(<AgentView {...commonProps}
+      settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'ollama', autoContinueOnLimit: false }} />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '긴 작업' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+    await waitFor(() => expect(agentRequests).toHaveLength(1))
+    await screen.findByText('안전선에서 멈췄습니다.')
+    // 잠깐 기다려도 두 번째 요청이 생기지 않는다.
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(agentRequests).toHaveLength(1)
+  })
+
+  it('설정이 켜져 있으면 한도에서 스스로 이어가되 상한을 넘지 않는다', async () => {
+    // 상한이 없으면 "한도 → 이어감 → 또 한도"가 무한히 돈다. 토큰이 사용자 모르게 계속 나간다.
+    const status = vi.fn().mockResolvedValue(null)
+    installApiStub(status)
+    const agentRequests: { messages?: unknown[] }[] = []
+    const encoder = new TextEncoder()
+    const stream = limitStream(encoder)
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).includes('/agent')) {
+        agentRequests.push(JSON.parse(String(init?.body ?? '{}')))
+        return stream()          // 매번 한도로 끝난다 = 최악의 경우
+      }
+      return { ok: true, status: 200, json: vi.fn().mockResolvedValue({ indexed: false, count: 0, files: 0 }) }
+    }))
+    render(<AgentView {...commonProps}
+      settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'ollama', autoContinueOnLimit: true }} />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '긴 작업' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+
+    // 최초 1회 + 자동 이어가기 MAX_AUTO_CONTINUES 회에서 **정확히 멈춘다**.
+    await waitFor(
+      () => expect(agentRequests).toHaveLength(1 + MAX_AUTO_CONTINUES),
+      { timeout: 4000 }
+    )
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    expect(agentRequests).toHaveLength(1 + MAX_AUTO_CONTINUES)
+
+    // 이어가는 요청은 백지가 아니다 — 이전 런이 실제로 한 일이 함께 넘어간다.
+    const second = JSON.stringify(agentRequests[1]?.messages ?? [])
+    expect(second).toContain('write_file a.md')
+    expect(second).toContain('이어서 계속 진행해라')
   })
 })

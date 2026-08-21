@@ -57,6 +57,13 @@ export interface AppSettings {
   embeddingModel: string
   /** RAG(검색 증강) 사용 — 에이전트가 색인된 작업 폴더에서 관련 조각을 자동 참고 */
   ragEnabled: boolean
+  /**
+   * 안전 한도(단계 상한·퇴행·정체)로 멈춘 작업을 사용자가 '계속해줘'라고 하지 않아도
+   * 하네스가 스스로 이어간다. 이어갈 때 이번 런에서 실제로 실행한 도구 요약과 최근
+   * 도구 결과가 함께 넘어가므로 백지에서 다시 시작하지 않는다.
+   * 기본값이 꺼짐인 이유: 이어갈 때마다 토큰과 시간을 더 쓴다.
+   */
+  autoContinueOnLimit: boolean
   /** RAG 색인 범위 — 색인할 최대 파일 수. 크면 커버리지↑·색인시간↑ (한계 도달 시 늘리라고 권고) */
   ragMaxFiles: number
   /** 자동 주입/검색할 관련 조각 수 */
@@ -171,6 +178,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   agentToolPolicy: createDefaultAgentToolPolicy(),
   embeddingModel: 'bge-m3',
   ragEnabled: true,
+  autoContinueOnLimit: false,
   ragMaxFiles: 300,
   ragTopK: 5,
   keepAlive: '30m',

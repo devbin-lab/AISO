@@ -12,7 +12,13 @@ import type {
   PlanStep
 } from '../../../shared/agent'
 import { TOOL_LABEL, APPROVAL_MODES } from '../../../shared/agent'
-import { streamAgent, approveAgent, type AgentMessage } from '../lib/agent'
+import {
+  streamAgent,
+  approveAgent,
+  AUTO_CONTINUE_PROMPT,
+  MAX_AUTO_CONTINUES,
+  type AgentMessage
+} from '../lib/agent'
 import { newConversationId, titleFromText } from '../lib/conversations'
 import { modelInstalled } from '../lib/ollama'
 import type { ConversationRequest } from '../components/Sidebar'
@@ -279,6 +285,10 @@ function AgentView({
   // 하네스가 관측한 실행 사실 요약. 안전 한도로 멈춘 런에서만 온다. finalText와 달리
   // 툴콜마다 초기화하지 않는다 — 런 전체의 기록이기 때문이다.
   const runSummaryRef = useRef<string>('')
+  // 이번 런이 안전 한도로 멈췄는지. 자동 이어가기 판단에만 쓴다.
+  const runLimitRef = useRef<string>('')
+  // 한 사용자 요청에서 자동으로 이어간 횟수. 무한 연장을 막는 유일한 장치다.
+  const autoContinuesRef = useRef(0)
   // NDJSON events can arrive after a newer run starts.  Keep the active execution
   // identity outside React state so a stale image_result cannot mutate this timeline.
   const activeAssistantTurnIdRef = useRef<string>('')
@@ -458,6 +468,10 @@ function AgentView({
     } else if (ev.type === 'run_summary') {
       runSummaryRef.current = ev.text
       return
+    } else if (ev.type === 'run_limit') {
+      // 한국어 안내문을 파싱하지 않는다 — 문구를 고칠 때마다 이어가기가 깨진다.
+      runLimitRef.current = ev.reason
+      return
     } else if (ev.type === 'notice') {
       if (ev.transient) {
         setTransientNote(ev.text)
@@ -576,8 +590,12 @@ function AgentView({
     }
   }
 
-  const send = async (): Promise<void> => {
-    const text = input.trim()
+  /**
+   * @param continueWith 사용자가 입력하지 않은 자동 이어가기 지시. 주면 입력창을
+   *   읽지도 비우지도 않는다.
+   */
+  const send = async (continueWith?: string): Promise<void> => {
+    const text = (continueWith ?? input).trim()
     if (!text || !ready || running || sendGuardRef.current) return
     if (requireProjectStart && !convIdRef.current) {
       setNote('왼쪽 사이드바에서 프로젝트를 만들고 “프로젝트 시작”을 눌러 대화를 시작해 주세요.')
@@ -599,6 +617,8 @@ function AgentView({
         ? crypto.randomUUID()
         : `${Date.now()}.${Math.random()}`
     let executionStarted = false
+    runLimitRef.current = ''
+    if (continueWith === undefined) autoContinuesRef.current = 0
 
     try {
       // A completion-looking assistant sentence is not evidence that ComfyUI
@@ -659,7 +679,7 @@ function AgentView({
         setConvTitle(titleFromText(text))
         onConversationActive(id)
       }
-      setInput('')
+      if (continueWith === undefined) setInput('')
       if (taRef.current) taRef.current.style.height = 'auto'
       const pendingAttachments = attachments
       runSummaryRef.current = ''
@@ -744,6 +764,28 @@ function AgentView({
         await window.api.nvidia.agent.finish({ sessionId: completedSessionId }).catch(() => {})
         sessionRef.current = ''
       }
+    }
+
+    // 안전 한도로 멈췄고 사용자가 켜 뒀다면 스스로 이어간다.
+    // 이 시점에는 이번 런의 실행 요약과 최근 도구 결과가 이미 historyRef 에 실려 있어
+    // 백지에서 다시 시작하지 않는다 — 그게 이 기능이 성립하는 이유다.
+    if (
+      settings.autoContinueOnLimit &&
+      runLimitRef.current &&
+      executionStarted &&
+      !ac.signal.aborted &&          // 사용자가 정지를 눌렀으면 이어가지 않는다
+      autoContinuesRef.current < MAX_AUTO_CONTINUES
+    ) {
+      autoContinuesRef.current += 1
+      const nth = autoContinuesRef.current
+      setNote(`안전 한도에서 멈춰 이어서 진행합니다 (${nth}/${MAX_AUTO_CONTINUES}). 중지하려면 정지를 누르세요.`)
+      // 다음 런이 시작되기 전에 정리 상태가 반영되도록 한 틱 넘긴다.
+      window.setTimeout(() => { void send(AUTO_CONTINUE_PROMPT) }, 0)
+    } else if (settings.autoContinueOnLimit && runLimitRef.current && autoContinuesRef.current >= MAX_AUTO_CONTINUES) {
+      setNote(
+        `자동 이어가기 ${MAX_AUTO_CONTINUES}회를 모두 썼습니다. 계속하려면 '계속해줘'라고 해주세요 — ` +
+        '요청을 더 작게 나누면 한도에 덜 걸립니다.'
+      )
     }
   }
 

@@ -57,6 +57,7 @@ export const APP_SETTING_KEYS = new Set<keyof AppSettings>([
   'agentToolPolicy',
   'embeddingModel',
   'ragEnabled',
+  'autoContinueOnLimit',
   'ragMaxFiles',
   'ragTopK',
   'keepAlive',
@@ -180,6 +181,8 @@ export function normalizeSettingsRecord(
     agentToolPolicy: resetToolPolicy ? createDefaultAgentToolPolicy() : agentToolPolicyValue(raw),
     embeddingModel: textValue(raw, 'embeddingModel', DEFAULT_SETTINGS.embeddingModel),
     ragEnabled: boolValue(raw, 'ragEnabled', DEFAULT_SETTINGS.ragEnabled),
+    // 없는 키는 기본값으로 채워진다 — 예전 설정 파일도 그대로 열린다(스키마 버전 불변).
+    autoContinueOnLimit: boolValue(raw, 'autoContinueOnLimit', DEFAULT_SETTINGS.autoContinueOnLimit),
     ragMaxFiles: numberValue(raw, 'ragMaxFiles', DEFAULT_SETTINGS.ragMaxFiles),
     ragTopK: numberValue(raw, 'ragTopK', DEFAULT_SETTINGS.ragTopK),
     keepAlive: textValue(raw, 'keepAlive', DEFAULT_SETTINGS.keepAlive),

@@ -23,6 +23,7 @@ import type { SkillMeta } from '../../../shared/skill'
 import type { DiscordStatus, DiscordSchedule } from '../../../shared/discord'
 import Select from '../components/Select'
 import Segmented from '../components/Segmented'
+import { MAX_AUTO_CONTINUES } from '../lib/agent'
 import Dropdown from '../components/Dropdown'
 import { confirmDialog } from '../components/ConfirmDialog'
 import ComfyModelManager from '../components/ComfyModelManager'
@@ -1198,6 +1199,25 @@ function SettingsView({
         <section>
           <div className="group__title">생성</div>
           <div className="group">
+            <div className="row">
+              <div>
+                <div className="row__label">작업 자동 이어가기</div>
+                <div className="row__hint">
+                  긴 작업이 안전 한도(단계 상한·같은 동작 반복)에 걸려 멈추면, ‘계속해줘’를
+                  입력하지 않아도 스스로 이어갑니다. 이어갈 때 이번 실행에서 실제로 수행한
+                  도구 요약과 최근 결과가 함께 넘어가므로 처음부터 다시 하지 않습니다.
+                  한 요청당 {MAX_AUTO_CONTINUES}회까지만 이어가며, 그때마다 토큰과 시간을 더 씁니다.
+                </div>
+              </div>
+              <Segmented
+                value={form.autoContinueOnLimit}
+                options={[
+                  { v: true, label: '사용' },
+                  { v: false, label: '끔' }
+                ]}
+                onChange={(v) => set('autoContinueOnLimit', v)}
+              />
+            </div>
             <div className="row">
               <div>
                 <div className="row__label">추론 강도</div>

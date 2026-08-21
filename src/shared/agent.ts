@@ -150,6 +150,12 @@ export type AgentEvent =
    * 넘어간다. 다음 실행의 대화 히스토리에 이어붙여 '계속해줘'가 근거를 갖게 한다.
    */
   | { type: 'run_summary'; text: string }
+  /**
+   * 런이 **안전 한도**에 걸려 멈췄다는 기계용 신호. 사용자에게 보이는 안내는
+   * 별도 notice 로 이미 나간다 — 그 한국어 문구를 파싱하게 두면 문구를 고칠
+   * 때마다 자동 이어가기가 조용히 깨진다.
+   */
+  | { type: 'run_limit'; reason: 'max_steps' | 'repetition' | 'repeat' | 'stall' | 'tool_budget' | 'truncated' }
   | { type: 'usage'; total: number }
   | { type: 'done' }
   | { type: 'error'; error: string }
