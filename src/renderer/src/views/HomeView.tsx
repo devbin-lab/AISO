@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import type { AppSettings } from '../../../shared/settings'
-import type { MyDbDailyReport } from '../../../shared/mydb'
+import type { MyDbDailyReport, MyDbHistoryEntry } from '../../../shared/mydb'
 import type { UsageSummary } from '../../../shared/usage'
 import { authHeaders } from '../lib/backend'
 import { collectConnectionChecks, stateLabel, summarizeChecks, type Check } from '../lib/diagnostics'
@@ -80,10 +80,39 @@ function lastWeek(daily: UsageSummary['daily']): UsageSummary['daily'] {
   return daily.slice(-7)
 }
 
+/** 홈에서 쓰는 짧은 동작 이름. 카드가 좁아 한 단어로 끊는다. */
+function historyActionLabel(action: MyDbHistoryEntry['action']): string {
+  const labels: Record<string, string> = {
+    core_created: '코어',
+    imported: '추가',
+    renamed: '이름',
+    moved_to_trash: '휴지통',
+    restored: '복원',
+    purged: '삭제',
+    linked: '연결',
+    unlinked: '해제',
+    content_changed: '변경',
+    revision_restored: '되돌림',
+    source_synced: '동기화'
+  }
+  return labels[action] ?? '변경'
+}
+
+/** 오늘이면 시:분, 아니면 월/일. 홈은 훑는 화면이라 짧을수록 좋다. */
+function shortWhen(iso: string): string {
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return ''
+  const isToday = localDay(0) === `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}`
+  return isToday
+    ? at.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
+    : `${at.getMonth() + 1}/${at.getDate()}`
+}
+
 function HomeView({ active, backend, health, settings, onNavigate }: Props): React.JSX.Element {
   const [todos, setTodos] = useState<TodoItem[]>([])
   const [usage, setUsage] = useState<UsageSummary | null>(null)
   const [report, setReport] = useState<MyDbDailyReport | null>(null)
+  const [recent, setRecent] = useState<MyDbHistoryEntry[]>([])
   const [checks, setChecks] = useState<Check[]>([])
   const [loading, setLoading] = useState(false)
   const [todoError, setTodoError] = useState<string | null>(null)
@@ -118,7 +147,12 @@ function HomeView({ active, backend, health, settings, onNavigate }: Props): Rea
     }
     if (usageResult.status === 'fulfilled') setUsage(usageResult.value)
     // dailyReports 는 report_date 내림차순이라 첫 항목이 가장 최근 보고서다.
-    if (reportResult.status === 'fulfilled') setReport(reportResult.value.dailyReports[0] ?? null)
+    if (reportResult.status === 'fulfilled') {
+      setReport(reportResult.value.dailyReports[0] ?? null)
+      // entries 는 이미 받아 오면서 버리고 있었다. 보고서는 하루가 끝나야 쓰이므로
+      // '오늘 무슨 일이 있었나'는 이력으로만 알 수 있다 — 홈에서 바로 보여 준다.
+      setRecent(reportResult.value.entries.slice(0, 40))
+    }
   }, [backend])
 
   /**
@@ -277,6 +311,32 @@ function HomeView({ active, backend, health, settings, onNavigate }: Props): Rea
               </div>
               <p className="home-report__body">{report.body}</p>
             </div>
+          )}
+        </section>
+        {/* ── 최근 변경 ── */}
+        <section className="home-card home-card--recent" aria-label="최근 My DB 변경">
+          <div className="home-card__head">
+            <DatabaseIcon size={15} />
+            <h2 className="home-card__title">최근 변경</h2>
+            {recent.length > 0 && <span className="home-card__count">{recent.length}</span>}
+            <button type="button" className="home-card__link" onClick={() => onNavigate('graph')}>
+              전체 보기
+            </button>
+          </div>
+          {recent.length === 0 ? (
+            <p className="home-card__empty">아직 기록된 변경이 없습니다.</p>
+          ) : (
+            <ul className="home-recent">
+              {recent.map((entry) => (
+                <li key={entry.id} className="home-recent__row">
+                  <span className={`home-recent__tag home-recent__tag--${entry.action}`}>
+                    {historyActionLabel(entry.action)}
+                  </span>
+                  <span className="home-recent__title" title={entry.subjectTitle}>{entry.subjectTitle}</span>
+                  <time className="home-recent__at" dateTime={entry.createdAt}>{shortWhen(entry.createdAt)}</time>
+                </li>
+              ))}
+            </ul>
           )}
         </section>
       </div>

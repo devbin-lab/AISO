@@ -25,7 +25,15 @@ function makeApi(): { usage: { summary: ReturnType<typeof vi.fn> }; discord: { s
   return {
     usage: { summary: vi.fn().mockResolvedValue({ today: 0, week: 0, month: 0, total: 0, daily: [] }) },
     discord: { status: vi.fn().mockResolvedValue({ running: false }) },
-    myDb: { history: vi.fn().mockResolvedValue({ entries: [], dailyReports: [] }) }
+    myDb: {
+      history: vi.fn().mockResolvedValue({
+        entries: [
+          { id: 'e1', action: 'imported', subjectTitle: 'test.txt', createdAt: new Date().toISOString() },
+          { id: 'e2', action: 'core_created', subjectTitle: '자료', createdAt: new Date().toISOString() }
+        ],
+        dailyReports: []
+      })
+    }
   }
 }
 
@@ -89,5 +97,20 @@ describe('홈 대시보드 새로고침', () => {
 
     expect(api.myDb.history).toHaveBeenCalledTimes(1)
     expect(api.usage.summary).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('최근 변경 카드', () => {
+  it('이미 받아 오던 이력을 화면에 보여 준다', async () => {
+    // history() 를 부르면서 entries 를 버리고 있었다 — 홈 아래가 빈 이유였다.
+    const { findByText } = render(<HomeView active {...props} health={healthTick()} />)
+    expect(await findByText('test.txt')).toBeTruthy()
+    expect(await findByText('자료')).toBeTruthy()
+  })
+
+  it('이력이 없으면 그 사실을 알린다', async () => {
+    api.myDb.history.mockResolvedValueOnce({ entries: [], dailyReports: [] })
+    const { findByText } = render(<HomeView active {...props} health={healthTick()} />)
+    expect(await findByText('아직 기록된 변경이 없습니다.')).toBeTruthy()
   })
 })
