@@ -187,37 +187,25 @@ function historyActionLabel(action: MyDbHistoryAction): string {
   return labels[action]
 }
 
-function historyDescription(entry: MyDbHistoryEntry): string {
-  const subject = `“${entry.subjectTitle}”`
+/**
+ * 태그와 제목만으로 전해지지 않는 것을 한마디로 덧붙인다.
+ *
+ * 예전에는 동작마다 완성된 문장을 만들었는데("…을(를) 추가했습니다"), 바로 위
+ * 태그가 같은 말을 하고 있었고 조사 처리(을/를, 과/와)도 괄호로 노출됐다.
+ * 대부분의 동작은 태그 + 제목으로 충분하므로 정말 필요한 것만 남긴다.
+ */
+function historyNote(entry: MyDbHistoryEntry): string {
   switch (entry.action) {
-    case 'core_created':
-      return `${subject} 코어를 만들었습니다.`
-    case 'imported':
-      return `${subject}을(를) My DB에 추가했습니다.`
-    case 'renamed':
-      return `${subject}의 이름을 변경했습니다.`
-    case 'moved_to_trash':
-      return `${subject}을(를) 휴지통으로 옮겼습니다.`
-    case 'restored':
-      return `${subject}을(를) 복원했습니다.`
     case 'purged':
-      return `${subject}을(를) 완전히 삭제했습니다. 되돌릴 수 없습니다.`
-    case 'linked':
-      return `${subject}과(와) “${entry.relatedTitle ?? '항목'}”을(를) 연결했습니다.`
-    case 'unlinked':
-      return `${subject}과(와) “${entry.relatedTitle ?? '항목'}”의 연결을 해제했습니다.`
+      return '되돌릴 수 없음'
     case 'content_changed':
-      return `${subject}의 변경 내용을 새 버전으로 보관했습니다.`
+      return '새 버전으로 보관'
     case 'revision_restored':
-      return `${subject}을(를) 이전 버전으로 복원했습니다.`
+      return '이전 버전으로 되돌림'
     case 'source_synced':
-      return `${subject}의 외부 원본 변경을 My DB에 반영했습니다.`
-    case 'source_linked':
-      return `${subject}에 외부 원본을 연결했습니다.`
-    case 'graph_restored':
-      return 'My DB의 코어와 연결 구조를 선택한 시점으로 복원했습니다.'
-    case 'exported':
-      return `${subject}의 하위 자료를 폴더로 내보냈습니다.`
+      return '외부 원본과 동기화'
+    default:
+      return ''
   }
 }
 
@@ -2536,18 +2524,37 @@ function MyDbView({ active }: Props): React.JSX.Element {
                       <li key={entry.id} className={`mydb-history-entry mydb-history-entry--${entry.action}`}>
                         <span className="mydb-history-entry__mark" aria-hidden="true" />
                         <div className="mydb-history-entry__content">
-                          <strong>{historyActionLabel(entry.action)}</strong>
-                          <p>{historyDescription(entry)}</p>
-                          {entry.detail && <small>{entry.detail}</small>}
-                          {entry.subjectKind === 'file'
-                            && entry.subjectId
-                            && (entry.action === 'content_changed' || entry.action === 'revision_restored' || entry.action === 'source_synced')
-                            && nodesById.get(entry.subjectId)?.kind === 'file' && (
-                              <button type="button" onClick={() => openVersionFromHistory(entry)}>변경 보기</button>
+                          {/* 무엇이 바뀌었는지(제목)가 주인공이다. 어떤 동작이었는지는
+                              태그로 옆에 붙인다 — 예전에는 '자료 추가' 라벨과
+                              '…추가했습니다' 문장이 같은 말을 두 번 했다. */}
+                          <p className="mydb-history-entry__line">
+                            <span className="mydb-history-entry__tag">{historyActionLabel(entry.action)}</span>
+                            <b title={entry.subjectTitle}>{entry.subjectTitle}</b>
+                            {entry.relatedTitle && (
+                              <>
+                                <span className="mydb-history-entry__arrow" aria-hidden="true">
+                                  {entry.action === 'unlinked' ? '⇢' : '→'}
+                                </span>
+                                <b title={entry.relatedTitle}>{entry.relatedTitle}</b>
+                              </>
                             )}
-                          {entry.graphCheckpointId && (
-                            <button type="button" onClick={() => setRestoreGraphState({ entry })}>그래프로 복원</button>
+                          </p>
+                          {(entry.detail || historyNote(entry)) && (
+                            <small>
+                              {[historyNote(entry), entry.detail].filter(Boolean).join(' · ')}
+                            </small>
                           )}
+                          <span className="mydb-history-entry__acts">
+                            {entry.subjectKind === 'file'
+                              && entry.subjectId
+                              && (entry.action === 'content_changed' || entry.action === 'revision_restored' || entry.action === 'source_synced')
+                              && nodesById.get(entry.subjectId)?.kind === 'file' && (
+                                <button type="button" onClick={() => openVersionFromHistory(entry)}>변경 보기</button>
+                              )}
+                            {entry.graphCheckpointId && (
+                              <button type="button" onClick={() => setRestoreGraphState({ entry })}>그래프로 복원</button>
+                            )}
+                          </span>
                         </div>
                         <time dateTime={entry.createdAt} title={new Date(entry.createdAt).toLocaleString('ko-KR')}>
                           {formatHistoryTime(entry.createdAt)}

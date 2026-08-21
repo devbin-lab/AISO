@@ -1039,13 +1039,45 @@
 .mydb-history-entry--content_changed .mydb-history-entry__mark,
 .mydb-history-entry--revision_restored .mydb-history-entry__mark { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 14%, transparent); }
 .mydb-history-entry__content { min-width: 0; }
-.mydb-history-entry__content strong { display: block; color: var(--text); font-size: 12px; font-weight: 700; }
-.mydb-history-entry__content p { margin: 3px 0 0; overflow-wrap: anywhere; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
-.mydb-history-entry__content small { display: block; margin-top: 4px; color: var(--text-dim); font-size: 10.5px; line-height: 1.4; }
+/* 태그와 제목을 한 줄에. 제목이 길면 제목만 줄어든다. */
+.mydb-history-entry__line {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  margin: 0;
+}
+.mydb-history-entry__line b {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: -.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 동작 이름은 태그로 — 제목 옆에서 읽히되 제목을 이기지 않는다. */
+.mydb-history-entry__tag {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  color: var(--text-muted);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.mydb-history-entry__arrow { flex: 0 0 auto; color: var(--text-dim); font-size: 11px; }
+/* text-dim 그대로면 대비 2.92 다(라이트, 계산). 파일 개수·이름이 담기는 줄이라
+   읽혀야 한다 — 조용하되 읽히는 선까지만 올린다. */
+.mydb-history-entry__content small { display: block; margin-top: 5px; color: color-mix(in srgb, var(--text-dim) 45%, var(--text)); font-size: 10.5px; line-height: 1.45; }
+.mydb-history-entry__acts { display: flex; flex-wrap: wrap; gap: 6px; }
+.mydb-history-entry__acts:not(:empty) { margin-top: 8px; }
 .mydb-history-entry__content button {
-  min-height: 25px;
-  margin-top: 7px;
-  padding: 0 8px;
+  min-height: 24px;
+  padding: 0 9px;
   color: var(--text-muted);
   background: transparent;
   border: 1px solid var(--border-strong);
@@ -1053,8 +1085,32 @@
   cursor: pointer;
   font: inherit;
   font-size: 10.5px;
+  white-space: nowrap;
 }
 .mydb-history-entry__content button:hover { color: var(--text); background: var(--sidebar-hover); }
+
+/* 동작별 태그 색 — 점(mark)과 같은 뜻을 쓰되 글자가 읽히는 선까지만 물들인다. */
+.mydb-history-entry--imported .mydb-history-entry__tag,
+.mydb-history-entry--core_created .mydb-history-entry__tag {
+  color: color-mix(in srgb, var(--accent) 45%, var(--text));
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--border));
+}
+.mydb-history-entry--moved_to_trash .mydb-history-entry__tag,
+.mydb-history-entry--purged .mydb-history-entry__tag {
+  color: color-mix(in srgb, var(--err) 45%, var(--text));
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+  border-color: color-mix(in srgb, var(--err) 22%, var(--border));
+}
+.mydb-history-entry--restored .mydb-history-entry__tag,
+.mydb-history-entry--revision_restored .mydb-history-entry__tag,
+.mydb-history-entry--content_changed .mydb-history-entry__tag {
+  color: color-mix(in srgb, var(--ok) 45%, var(--text));
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 22%, var(--border));
+}
+/* 완전 삭제만 왼쪽 띠로 한 번 더 짚는다 — 되돌릴 수 없는 유일한 동작이다. */
+.mydb-history-entry--purged { border-left: 2px solid color-mix(in srgb, var(--err) 55%, transparent); }
 .mydb-history-entry time { padding-top: 1px; color: var(--text-dim); font-size: 10.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .mydb-history__empty { display: grid; min-height: 220px; place-items: center; color: var(--text-dim); border: 1px dashed var(--border-strong); border-radius: 11px; font-size: 12px; }
 .mydb-legend {
