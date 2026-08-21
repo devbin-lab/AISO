@@ -637,18 +637,33 @@ export class MyDbStore {
     if (!checkpoint) throw new Error('복원할 그래프 시점을 찾을 수 없습니다.')
     const state = this.parseGraphSnapshot(checkpoint.snapshot_json)
     const restoredAt = now()
+    // A checkpoint is a snapshot of rows, and restoring re-inserts them.  Two
+    // things must never come back:
+    //  1) anything the user permanently deleted — the tombstone records that
+    //     decision, and it outranks any older snapshot;
+    //  2) a file row whose managed copy is gone for any other reason (disk
+    //     loss, external deletion).  Re-inserting it would put a node on the
+    //     graph that nothing can open.
+    // Skipping both keeps the invariant "every live file node has its bytes".
+    const purged = this.purgedIds()
+    const restorableCores = state.cores.filter((core) => !purged.has(core.id))
+    const restorableItems = state.items.filter(
+      (item) => !purged.has(item.id) && existsSync(this.resolveLibraryFile(item.relative_path))
+    )
+    const droppedCount =
+      state.cores.length - restorableCores.length + (state.items.length - restorableItems.length)
 
     this.transaction(() => {
-      const knownCoreIds = new Set(state.cores.map((core) => core.id))
-      const knownItemIds = new Set(state.items.map((item) => item.id))
-      for (const core of state.cores) {
+      const knownCoreIds = new Set(restorableCores.map((core) => core.id))
+      const knownItemIds = new Set(restorableItems.map((item) => item.id))
+      for (const core of restorableCores) {
         this.database.prepare(
           `INSERT INTO mydb_cores (id, title, created_at, updated_at, deleted_at)
            VALUES (?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at, deleted_at = excluded.deleted_at`
         ).run(core.id, core.title, core.created_at, core.updated_at, core.deleted_at)
       }
-      for (const item of state.items) {
+      for (const item of restorableItems) {
         this.database.prepare(
           `INSERT INTO mydb_items
            (id, title, extension, file_type, tags_json, size, relative_path, source_path, created_at, updated_at, deleted_at)
@@ -681,13 +696,21 @@ export class MyDbStore {
         `INSERT INTO mydb_edges (id, source_id, target_id, relation, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)`
       )
+      // An edge whose endpoint was not restored would point at nothing.  The
+      // graph view resolves edges through the node map, so a dangling edge
+      // renders as a line to an invisible node.
+      const restoredIds = new Set([...knownCoreIds, ...knownItemIds])
       for (const edge of state.edges) {
+        if (!restoredIds.has(edge.source_id) || !restoredIds.has(edge.target_id)) continue
         insertEdge.run(edge.id, edge.source_id, edge.target_id, edge.relation, edge.created_at, edge.updated_at)
       }
+      const when = new Date(checkpoint.created_at).toLocaleString('ko-KR')
       this.recordHistory({
         action: 'graph_restored',
         subjectTitle: 'My DB 그래프',
-        detail: `${new Date(checkpoint.created_at).toLocaleString('ko-KR')} 시점으로 복원`
+        detail: droppedCount > 0
+          ? `${when} 시점으로 복원 · 완전히 삭제됐거나 파일이 없는 ${droppedCount}개는 제외`
+          : `${when} 시점으로 복원`
       })
     })
     this.restartFileWatchers()
@@ -875,6 +898,71 @@ export class MyDbStore {
     this.organizeManagedFilesByCore()
     this.recordHistory({ action: 'restored', subject: restored })
     return restored
+  }
+
+  /**
+   * Permanently remove one trashed node: database rows, the managed library
+   * copy, and every revision snapshot.  This is the only path in My DB that
+   * destroys data, so it is deliberately narrow.
+   *
+   * Two-step by design.  Only a node that is already in the trash can be
+   * purged, so no single action can destroy something that was live.
+   *
+   * The reason this was blocked until now is `restoreGraphCheckpoint`: it
+   * re-inserts every core and item found in a snapshot, so restoring a
+   * checkpoint taken *before* a purge would resurrect a row whose file no
+   * longer exists — a node the graph shows but nothing can open.  A tombstone
+   * in `mydb_purged` records the decision, and the restore path consults it.
+   * Checkpoints stay immutable; the purge is expressed as new information
+   * rather than by rewriting history.
+   *
+   * History rows are kept.  They carry captured titles, not foreign keys, so
+   * the audit trail survives the subject's removal — and "기록이 남아서
+   * 복구할 수 있으면 좋겠다"는 요구는 기록 자체를 지우지 않는다는 뜻이다.
+   */
+  async purgeNode(id: string): Promise<void> {
+    const node = this.requireNodeRow(id, true)
+    if (!node.deleted_at) {
+      throw new Error('휴지통에 있는 항목만 완전히 삭제할 수 있습니다.')
+    }
+    const purgedAt = now()
+    // Collect the on-disk paths before the rows disappear.
+    const libraryFile = node.kind === 'file' && node.relative_path
+      ? this.resolveLibraryFile(node.relative_path)
+      : null
+    const revisionDirectory = node.kind === 'file' ? join(this.revisionsRoot, id) : null
+
+    // Watchers hold handles on the managed copy; on Windows an open handle
+    // makes the unlink fail.  Stop them before touching the filesystem.
+    this.stopWatching(id)
+
+    this.transaction(() => {
+      this.database.prepare('DELETE FROM mydb_edges WHERE source_id = ? OR target_id = ?').run(id, id)
+      if (node.kind === 'file') {
+        this.database.prepare('DELETE FROM mydb_revisions WHERE item_id = ?').run(id)
+        this.database.prepare('DELETE FROM mydb_items WHERE id = ?').run(id)
+      } else {
+        this.database.prepare('DELETE FROM mydb_cores WHERE id = ?').run(id)
+      }
+      this.database.prepare(
+        'INSERT OR REPLACE INTO mydb_purged (id, kind, title, purged_at) VALUES (?, ?, ?, ?)'
+      ).run(id, node.kind, node.title, purgedAt)
+      this.recordHistory({ action: 'purged', subject: nodeFromRow(node) })
+    })
+
+    // Filesystem last: a committed transaction with leftover bytes is
+    // recoverable noise, but deleted bytes with a rolled-back transaction
+    // would leave a live row pointing at nothing.
+    if (libraryFile) await rm(libraryFile, { force: true }).catch(() => undefined)
+    if (revisionDirectory) {
+      await rm(revisionDirectory, { recursive: true, force: true }).catch(() => undefined)
+    }
+    this.restartFileWatchers()
+  }
+
+  private purgedIds(): Set<string> {
+    const rows = this.database.prepare('SELECT id FROM mydb_purged').all() as Array<{ id: string }>
+    return new Set(rows.map((row) => row.id))
   }
 
   link(sourceId: string, targetId: string, relation: MyDbRelation = 'related'): MyDbEdge {
@@ -1210,6 +1298,12 @@ export class MyDbStore {
          snapshot_json TEXT NOT NULL,
          created_at TEXT NOT NULL
        );
+       CREATE TABLE IF NOT EXISTS mydb_purged (
+         id TEXT PRIMARY KEY,
+         kind TEXT NOT NULL,
+         title TEXT NOT NULL,
+         purged_at TEXT NOT NULL
+       );
        CREATE TABLE IF NOT EXISTS mydb_revisions (
          id TEXT PRIMARY KEY,
          item_id TEXT NOT NULL,
@@ -1228,15 +1322,16 @@ export class MyDbStore {
        CREATE INDEX IF NOT EXISTS idx_mydb_history_created ON mydb_history(created_at DESC);
        CREATE INDEX IF NOT EXISTS idx_mydb_daily_reports_generated ON mydb_daily_reports(generated_at DESC);
        CREATE INDEX IF NOT EXISTS idx_mydb_graph_checkpoints_created ON mydb_graph_checkpoints(created_at DESC);
-       CREATE INDEX IF NOT EXISTS idx_mydb_revisions_item ON mydb_revisions(item_id, sequence DESC);`
+       CREATE INDEX IF NOT EXISTS idx_mydb_revisions_item ON mydb_revisions(item_id, sequence DESC);
+       CREATE INDEX IF NOT EXISTS idx_mydb_purged_at ON mydb_purged(purged_at DESC);`
     )
     this.addColumnIfMissing('mydb_items', 'source_path TEXT')
     this.addColumnIfMissing('mydb_history', 'graph_checkpoint_id TEXT')
     // Existing libraries predate graph checkpoints. The column must be added
     // before creating its index or SQLite rejects the entire startup schema.
     this.database.exec('CREATE INDEX IF NOT EXISTS idx_mydb_history_checkpoint ON mydb_history(graph_checkpoint_id);')
-    this.database.prepare("INSERT OR IGNORE INTO mydb_meta (key, value) VALUES ('schema_version', '6')").run()
-    this.database.prepare("UPDATE mydb_meta SET value = '6' WHERE key = 'schema_version'").run()
+    this.database.prepare("INSERT OR IGNORE INTO mydb_meta (key, value) VALUES ('schema_version', '7')").run()
+    this.database.prepare("UPDATE mydb_meta SET value = '7' WHERE key = 'schema_version'").run()
   }
 
   private addColumnIfMissing(table: string, definition: string): void {
@@ -1756,6 +1851,25 @@ export class MyDbStore {
     }
   }
 
+  /**
+   * Release both watchers for one item before its file is unlinked.  A trashed
+   * item is normally unwatched already (watchManagedFile skips deleted rows),
+   * but purge must not depend on that: an open handle makes unlink fail on
+   * Windows and would leave the bytes behind after the row is gone.
+   */
+  private stopWatching(id: string): void {
+    const managed = this.watchedPaths.get(id)
+    if (managed) {
+      unwatchFile(managed)
+      this.watchedPaths.delete(id)
+    }
+    const source = this.watchedSourcePaths.get(id)
+    if (source) {
+      unwatchFile(source)
+      this.watchedSourcePaths.delete(id)
+    }
+  }
+
   private restartFileWatchers(): void {
     for (const path of this.watchedPaths.values()) unwatchFile(path)
     for (const path of this.watchedSourcePaths.values()) unwatchFile(path)
@@ -2217,6 +2331,11 @@ export async function myDbRenameNode(id: string, title: string): Promise<MyDbNod
 
 export function myDbDeleteNode(id: string, options?: MyDbDeleteOptions): void {
   getMyDbStore().deleteNode(id, options)
+}
+
+/** 휴지통 항목 완전 삭제. 사용자 전용 — 에이전트 브리지(mydb_agent)에는 없다. */
+export function myDbPurgeNode(id: string): Promise<void> {
+  return getMyDbStore().purgeNode(id)
 }
 
 export function myDbRestoreNode(id: string): MyDbNode {

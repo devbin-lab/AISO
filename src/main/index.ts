@@ -51,6 +51,7 @@ import {
   myDbRenameNode,
   myDbRestoreGraphCheckpoint,
   myDbRestoreRevision,
+  myDbPurgeNode,
   myDbRestoreNode,
   myDbSetSourcePath,
   myDbState,
@@ -985,6 +986,10 @@ app.whenReady().then(() => {
       options && typeof options === 'object' && (options as { cascade?: unknown }).cascade === true
     )
     myDbDeleteNode(myDbId(node), { cascade })
+  })
+  ipcMain.handle('mydb:purge-node', (e, node: unknown) => {
+    requireMyDbWindow(e.sender)
+    return myDbPurgeNode(myDbId(node))
   })
   ipcMain.handle('mydb:restore-node', (e, node: unknown) => {
     requireMyDbWindow(e.sender)
