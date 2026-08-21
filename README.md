@@ -8,7 +8,7 @@
 
 개인 파일, 문서, 일정, 지식 라이브러리와 로컬 AI를 한 곳에서 다룹니다.
 
-[![Version](https://img.shields.io/badge/version-1.0.1-F16522?style=flat-square)](docs/V1.0.1_RELEASE_NOTES.md)
+[![Version](https://img.shields.io/badge/version-1.0.2-F16522?style=flat-square)](docs/V1.0.2_RELEASE_NOTES.md)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6?style=flat-square)
 ![Desktop](https://img.shields.io/badge/desktop-Electron%2043-47848F?style=flat-square&logo=electron&logoColor=white)
 ![Runtime](https://img.shields.io/badge/default%20LLM-Ollama-111827?style=flat-square&logo=ollama)
@@ -249,7 +249,7 @@ My DB는 에이전트가 만든 파일을 자동으로 쌓아 두는 장소가 �
 
 ### 설치본 실행
 
-1. GitHub Releases에서 `Aiso-1.0.1-Setup.exe`를 내려받아 설치합니다.
+1. GitHub Releases에서 `Aiso-1.0.2-Setup.exe`를 내려받아 설치합니다.
 2. Aiso를 열면 홈의 **연결 상태** 카드가 백엔드, LLM, ComfyUI, Discord를 진단 센터와 같은 판정으로 보여 줍니다. 더 자세한 점검은 카드 오른쪽의 **진단 센터** 버튼이나 **설정 → 진단 센터**에서 합니다.
 3. 로컬 모델을 사용할 경우 Ollama를 실행하고 사용할 모델을 선택합니다.
 4. 파일 작업이 필요하면 에이전트 화면에서 작업 폴더를 지정합니다.
@@ -402,6 +402,7 @@ Apache License 2.0. 자세한 내용은 [LICENSE](LICENSE)를 참고하세요.
 
 | 버전 | 날짜 | 주요 내용 |
 |---|---|---|
+| **1.0.2** | 2026-08-21 | 창을 좁혔을 때 버튼 글자가 버튼 밖으로 새던 문제 수정. [릴리스 노트](docs/V1.0.2_RELEASE_NOTES.md) |
 | **1.0.1** | 2026-08-21 | 홈 대시보드, 작업 자동 이어가기, My DB 완전 삭제, 2차 출처 탐색, 렌더러 CSP와 `run_code` 봉쇄, 웹 조사 실패 보고 정정. [릴리스 노트](docs/V1.0.1_RELEASE_NOTES.md) |
 | **1.0.0** | 2026-08-17 | 캘린더, My DB, 요청별 도구 라우팅, 근거 중심 문서 정리, 로컬 ComfyUI, Discord, 진단 센터를 통합한 첫 정식 릴리스. [릴리스 노트](docs/V1.0.0_RELEASE_NOTES.md) |
 | **0.4.0-rc.4** | 2026-08-03 | 공급자별 도구 정책과 선택적 프로그래밍 묶음, 실행 경계·자격 증명 보호를 정비한 후보판. [릴리스 노트](docs/V0.4.0_RC4_RELEASE_NOTES.md) |
