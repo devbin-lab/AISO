@@ -672,7 +672,22 @@
 .mydb-history__filter button:hover { color: var(--text); background: var(--bg-input); }
 
 /* ── 달력 ── */
-.mydb-cal { margin: 0 0 20px; }
+/* 달력(고정 폭)과 보고서(남는 폭)를 나란히 둔다. 달력은 정사각형 셀 때문에
+   폭이 곧 높이라 더 넓힐 수 없고, 그 옆이 그대로 비어 있었다. */
+.mydb-cal-row {
+  display: grid;
+  /* 달력 폭을 못 박는다. auto 로 두면 격자가 최소 폭까지 쭈그러들어(실측 241px)
+     정사각형 셀이 34px 로 줄어든다. 700px 은 셀 97px 기준이다. */
+  grid-template-columns: 700px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+  margin: 0 0 20px;
+}
+/* 좁으면 옆에 세우지 않는다 — 보고서 본문이 읽을 수 없이 눌린다. */
+@container (max-width: 1040px) {
+  .mydb-cal-row { grid-template-columns: minmax(0, 1fr); }
+}
+.mydb-cal { margin: 0; }
 .mydb-cal__head {
   display: flex;
   align-items: center;
@@ -705,6 +720,12 @@
      쓰면 셀 한 변이 213px, 달력 높이가 1300px 를 넘어 화면을 삼킨다.
      700px 이면 셀 96px · 달력 616px 로 한눈에 들어온다. */
   max-width: 700px;
+}
+/* 좌우 배치에서는 열 폭(700px)이 이미 상한이라 격자는 그 열을 다 쓴다.
+   단 1열로 접힌 뒤에는(아래 @container) 열이 전체 폭이 되므로 700px 상한을
+   되살려야 한다 — 안 그러면 셀이 144px 까지 커진다(실측). */
+@container (min-width: 1041px) {
+  .mydb-cal-row .mydb-cal__grid { max-width: 100%; }
 }
 .mydb-cal__dow {
   padding-bottom: 4px;
@@ -760,6 +781,22 @@
 .mydb-history__head h2 { margin: 0; color: var(--text); font-size: clamp(19px, 2vw, 25px); letter-spacing: -.03em; }
 .mydb-history__head span { color: var(--text-dim); font-size: 12px; font-variant-numeric: tabular-nums; }
 .mydb-daily-reports { display: grid; gap: 9px; margin: 0 0 20px; }
+/* 달력 옆에서는 항상 세로 1열이다. 아래 2단 규칙(@container)이 여기까지
+   적용되지 않도록 이 자리에서 명시적으로 되돌린다. */
+.mydb-daily-reports--side {
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 8px;
+  margin: 0;
+  /* 달력과 키를 맞추고 넘치는 만큼은 이 안에서 스크롤한다 —
+     보고서가 쌓일수록 행 전체가 길어지면 달력이 위로 밀려 올라간다. */
+  max-height: 624px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+.mydb-daily-reports--side > h3 { position: sticky; top: 0; z-index: 1; padding: 2px 0 6px; background: var(--mydb-canvas-bg); }
+.mydb-daily-reports--side .mydb-daily-report pre { max-height: 150px; }
 .mydb-daily-reports > h3 { margin: 0; color: var(--text-muted); font-size: 12px; font-weight: 720; }
 .mydb-daily-report { overflow: hidden; background: color-mix(in srgb, var(--accent-soft) 36%, var(--bg-elev)); border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border)); border-radius: 10px; }
 .mydb-daily-report > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 13px; border-bottom: 1px solid color-mix(in srgb, var(--accent) 16%, var(--border)); }
@@ -771,8 +808,9 @@
    글자가 과하게 퍼지고 한 화면에 담기는 건수도 줄어든다. */
 @container (min-width: 1040px) {
   .mydb-history__list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .mydb-daily-reports { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .mydb-daily-reports > h3 { grid-column: 1 / -1; }
+  /* 달력 옆(--side)은 제외한다 — 거기서는 세로 1열이다. */
+  .mydb-daily-reports:not(.mydb-daily-reports--side) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mydb-daily-reports:not(.mydb-daily-reports--side) > h3 { grid-column: 1 / -1; }
 }
 .mydb-history-entry {
   display: grid;

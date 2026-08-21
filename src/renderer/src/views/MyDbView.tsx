@@ -2421,6 +2421,7 @@ function MyDbView({ active }: Props): React.JSX.Element {
                   </div>
                 </header>
                 {historyView === 'calendar' && (
+                  <div className="mydb-cal-row">
                   <section className="mydb-cal" aria-label="변경 이력 달력">
                     <header className="mydb-cal__head">
                       <button
@@ -2465,14 +2466,23 @@ function MyDbView({ active }: Props): React.JSX.Element {
                       ))}
                     </div>
                   </section>
-                )}
-                {historyDay && (
-                  <div className="mydb-history__filter">
-                    <span>{historyDay} 의 이력만 보는 중 · {visibleHistory.length}건</span>
-                    <button type="button" onClick={() => setHistoryDay(null)}>전체 보기</button>
+                  {history.dailyReports.length > 0 && (
+                    <section className="mydb-daily-reports mydb-daily-reports--side" aria-label="My DB 일일 변경 보고서">
+                      <h3>일일 변경 보고서</h3>
+                      {history.dailyReports.map((report) => (
+                        <article key={report.reportDate} className="mydb-daily-report">
+                          <header>
+                            <strong>{report.reportDate} 보고서</strong>
+                            <span>변경 {report.totalChanges}건</span>
+                          </header>
+                          <pre>{report.body}</pre>
+                        </article>
+                      ))}
+                    </section>
+                  )}
                   </div>
                 )}
-                {history.dailyReports.length > 0 && (
+                {historyView === 'list' && history.dailyReports.length > 0 && (
                   <section className="mydb-daily-reports" aria-label="My DB 일일 변경 보고서">
                     <h3>일일 변경 보고서</h3>
                     {history.dailyReports.map((report) => (
@@ -2485,6 +2495,12 @@ function MyDbView({ active }: Props): React.JSX.Element {
                       </article>
                     ))}
                   </section>
+                )}
+                {historyDay && (
+                  <div className="mydb-history__filter">
+                    <span>{historyDay} 의 이력만 보는 중 · {visibleHistory.length}건</span>
+                    <button type="button" onClick={() => setHistoryDay(null)}>전체 보기</button>
+                  </div>
                 )}
                 {visibleHistory.length > 0 ? (
                   <ol className="mydb-history__list">
