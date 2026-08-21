@@ -6173,7 +6173,9 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   flex: 0 0 auto;
   width: 29px;
   height: 29px;
-  margin-left: 2px;
+  /* 모드 드롭다운은 라벨 길이에 맞춰 줄었다 폈다 한다(.dd 가 width: fit-content).
+     홈 버튼을 그 옆에 붙이면 위치가 모드에 따라 흔들리므로 오른쪽 끝에 고정한다. */
+  margin-left: auto;
   border: 0;
   border-radius: 7px;
   color: var(--sidebar-muted);
