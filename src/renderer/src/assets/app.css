@@ -1535,7 +1535,6 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   font-weight: 700;
 }
 .todo-calendar__range-bar.is-drag-source,
-.todo-task-chip.is-drag-source,
 .todo-row.is-drag-source {
   opacity: .3;
   filter: saturate(.55);
@@ -1561,39 +1560,7 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   cursor: ew-resize;
 }
 .todo-calendar__range-handle:hover { color: var(--accent); background: var(--accent-soft); }
-.todo-task-chip {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  min-height: 20px;
-  padding: 0 4px;
-  border: 1px solid rgba(127,127,127,.18);
-  border-radius: 5px;
-  color: var(--text);
-  background: var(--bg);
-  font-size: 10.5px;
-  line-height: 1.25;
-  cursor: grab;
-  user-select: none;
-}
-.todo-task-chip:active { cursor: grabbing; }
-.todo-task-chip.is-done { opacity: .56; text-decoration: line-through; }
 
-
-
-.todo-task-chip__handle {
-  display: grid;
-  width: 18px;
-  min-height: 24px;
-  flex: 0 0 18px;
-  place-items: center;
-  border-radius: 4px;
-  color: var(--text-dim);
-  font-size: 15px;
-  line-height: 1;
-  cursor: ew-resize;
-}
-.todo-task-chip__handle:hover { color: var(--accent); background: var(--accent-soft); }
 .todo-calendar__year {
   flex: 1;
   display: grid;
@@ -1794,8 +1761,6 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
 .todo-empty { padding: 24px; }
 .todo-empty > b { font-size: 13px; }
 .todo-empty .btn { margin-top: 15px; }
-
-
 
 .todo-week__surface {
   position: relative;
@@ -2069,8 +2034,6 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
 .todo-context-menu__weekdays button { min-width: 0; min-height: 26px; padding: 0; border: 1px solid var(--border); border-radius: 99px; color: var(--text-dim); background: var(--bg); font: inherit; font-size: 9px; cursor: pointer; }
 .todo-context-menu__weekdays button.is-active { color: #fff; border-color: var(--accent); background: var(--accent); }
 
-
-
 @media (max-width: 860px) {
   .todo-layout { grid-template-columns: 1fr; }
 }
@@ -2206,22 +2169,12 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   height: 100%;
 }
 
-
-
 /* 고정(위) / 비고정(아래) 구분선 */
-
-
 
 /* 행 우측 동작 버튼(고정·이름변경·삭제) — 제목 위에 겹쳐 hover 시 나타난다.
    평소엔 제목이 패널 폭을 온전히 쓰고, 마우스를 올렸을 때만 우측에서 페이드 인. */
 
-
-
-
 /* 우클릭 컨텍스트 메뉴 (커서 위치, body 포털) */
-
-
-
 
 .view {
   max-width: 840px;

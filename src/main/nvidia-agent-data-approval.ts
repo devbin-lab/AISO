@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { isIP } from 'node:net'
 import type { ApprovalMode } from '../shared/agent.ts'
 import type { AppSettings } from '../shared/settings.ts'
@@ -8,9 +8,6 @@ import {
   canonicalizeNvidiaBinding,
   type NvidiaAgentDataManifest,
   type NvidiaAgentDataScopeRequest,
-  type NvidiaAgentManifestDecisionInput,
-  type NvidiaAgentManifestDecisionResult,
-  type NvidiaAgentManifestDescribeInput,
   type NvidiaCredentialBinding
 } from '../shared/nvidia.ts'
 
@@ -133,79 +130,9 @@ export function buildAutomaticNvidiaAgentDataScope(
   }
 }
 
-interface PendingRecord extends NvidiaAgentManifestAuthority {
-  manifestId: string
-  expiresAt: number
-}
-
 interface ApprovedRecord extends NvidiaAgentManifestAuthority {
   approvedAt: number
   expiresAt: number
-}
-
-function validSessionId(value: unknown): value is string {
-  return typeof value === 'string' && value.length >= 16 && value.length <= 256 &&
-    /^[A-Za-z0-9._:-]+$/.test(value)
-}
-
-function validateScope(raw: unknown): NvidiaAgentDataScopeRequest {
-  if (!raw || typeof raw !== 'object') throw new Error('NVIDIA Agent 전송 범위를 확인할 수 없습니다.')
-  const value = raw as Record<string, unknown>
-  if (
-    typeof value.workspace !== 'boolean' ||
-    typeof value.rag !== 'boolean' ||
-    typeof value.image !== 'boolean' ||
-    (value.todos !== undefined && typeof value.todos !== 'boolean') ||
-    (value.myDb !== undefined && typeof value.myDb !== 'boolean')
-  ) {
-    throw new Error('NVIDIA Agent 전송 범위 형식이 올바르지 않습니다.')
-  }
-  if (value.rag && !value.workspace) {
-    throw new Error('RAG 결과 전송은 작업 폴더 전송 승인과 함께 선택해야 합니다.')
-  }
-  let selectedComfyModelId: string | undefined
-  if (value.selectedComfyModelId !== undefined) {
-    if (
-      typeof value.selectedComfyModelId !== 'string' ||
-      !/^[A-Za-z0-9._-]{1,128}$/.test(value.selectedComfyModelId)
-    ) {
-      throw new Error('ComfyUI 선택 정보가 올바르지 않습니다.')
-    }
-    selectedComfyModelId = value.selectedComfyModelId
-  }
-  return {
-    workspace: value.workspace,
-    rag: value.rag,
-    image: value.image,
-    todos: value.todos === true,
-    myDb: value.myDb === true,
-    ...(selectedComfyModelId ? { selectedComfyModelId } : {})
-  }
-}
-
-export function validateManifestDescribeInput(raw: unknown): NvidiaAgentManifestDescribeInput {
-  if (!raw || typeof raw !== 'object') throw new Error('NVIDIA Agent 세션 정보가 필요합니다.')
-  const value = raw as Record<string, unknown>
-  if (!validSessionId(value.sessionId)) throw new Error('NVIDIA Agent 세션 형식이 올바르지 않습니다.')
-  return { sessionId: value.sessionId, scope: validateScope(value.scope) }
-}
-
-export function validateManifestDecisionInput(raw: unknown): NvidiaAgentManifestDecisionInput {
-  if (!raw || typeof raw !== 'object') throw new Error('NVIDIA Agent 승인 정보가 필요합니다.')
-  const value = raw as Record<string, unknown>
-  if (
-    !validSessionId(value.sessionId) ||
-    typeof value.manifestId !== 'string' ||
-    !/^[A-Za-z0-9_-]{32,128}$/.test(value.manifestId) ||
-    typeof value.approved !== 'boolean'
-  ) {
-    throw new Error('NVIDIA Agent 승인 형식이 올바르지 않습니다.')
-  }
-  return {
-    sessionId: value.sessionId,
-    manifestId: value.manifestId,
-    approved: value.approved
-  }
 }
 
 function canonical(value: unknown): string {
@@ -405,7 +332,6 @@ export function buildNvidiaAgentManifestAuthority(
 }
 
 export class NvidiaAgentDataApprovalStore {
-  private readonly pending = new Map<string, PendingRecord>()
   private readonly approved = new Map<string, ApprovedRecord>()
   private readonly now: () => number
   private revision = 0
@@ -416,13 +342,9 @@ export class NvidiaAgentDataApprovalStore {
 
   private prune(): void {
     const now = this.now()
-    for (const [id, record] of this.pending) {
-      if (record.expiresAt <= now) this.pending.delete(id)
-    }
     for (const [sessionId, record] of this.approved) {
       if (record.expiresAt <= now) this.approved.delete(sessionId)
     }
-    while (this.pending.size > 256) this.pending.delete(this.pending.keys().next().value!)
     while (this.approved.size > 256) this.approved.delete(this.approved.keys().next().value!)
   }
 
@@ -439,35 +361,13 @@ export class NvidiaAgentDataApprovalStore {
   }
 
   clearAll(): void {
-    this.pending.clear()
     this.approved.clear()
     this.revision++
   }
 
   clearSession(sessionId: string): void {
-    for (const [id, record] of this.pending) {
-      if (record.manifest.sessionId === sessionId) this.pending.delete(id)
-    }
     this.approved.delete(sessionId)
     this.revision++
-  }
-
-  describe(authority: NvidiaAgentManifestAuthority): NvidiaAgentDataManifest {
-    this.prune()
-    this.clearSession(authority.manifest.sessionId)
-    const manifestId = randomBytes(32).toString('base64url')
-    const expiresAt = this.now() + NVIDIA_AGENT_MANIFEST_TTL_MS
-    this.pending.set(manifestId, {
-      ...structuredClone(authority),
-      manifestId,
-      expiresAt
-    })
-    this.enforceRecordLimit(this.pending)
-    return {
-      ...structuredClone(authority.manifest),
-      manifestId,
-      expiresInSeconds: NVIDIA_AGENT_MANIFEST_TTL_MS / 1000
-    }
   }
 
   /**
@@ -483,31 +383,6 @@ export class NvidiaAgentDataApprovalStore {
       expiresAt: this.now() + NVIDIA_AGENT_MANIFEST_TTL_MS
     })
     this.enforceRecordLimit(this.approved)
-  }
-
-  decide(input: NvidiaAgentManifestDecisionInput): NvidiaAgentManifestDecisionResult {
-    this.prune()
-    const pending = this.pending.get(input.manifestId)
-    this.pending.delete(input.manifestId)
-    this.revision++
-    if (!pending || pending.manifest.sessionId !== input.sessionId || pending.expiresAt <= this.now()) {
-      this.approved.delete(input.sessionId)
-      throw new Error('NVIDIA Agent 전송 승인이 만료되었거나 현재 세션과 일치하지 않습니다.')
-    }
-    if (!input.approved) {
-      this.approved.delete(input.sessionId)
-      return { approved: false }
-    }
-    this.approved.set(input.sessionId, {
-      request: structuredClone(pending.request),
-      target: structuredClone(pending.target),
-      executionScope: structuredClone(pending.executionScope),
-      manifest: structuredClone(pending.manifest),
-      approvedAt: this.now(),
-      expiresAt: pending.expiresAt
-    })
-    this.enforceRecordLimit(this.approved)
-    return { approved: true }
   }
 
   approvedRequest(sessionId: string): NvidiaAgentDataScopeRequest {

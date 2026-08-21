@@ -1010,7 +1010,7 @@ function TodoView({ active, backend }: Props): React.JSX.Element {
 
   const startPointerTaskDrag = (event: ReactPointerEvent<HTMLElement>, item: TodoItem, kind: DragKind = 'move'): void => {
     if (event.button !== 0 || item.recurrence) return
-    if (kind === 'move' && event.target instanceof HTMLElement && event.target.closest('button, input, select, textarea, a, .todo-calendar__range-handle, .todo-task-chip__handle')) return
+    if (kind === 'move' && event.target instanceof HTMLElement && event.target.closest('button, input, select, textarea, a, .todo-calendar__range-handle')) return
     const payload = { id: item.id, kind } satisfies DragPayload
     event.preventDefault()
     activeDragRef.current = payload

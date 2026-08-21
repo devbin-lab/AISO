@@ -65,11 +65,6 @@ export interface NvidiaAgentDataScopeRequest {
   selectedComfyModelId?: string
 }
 
-export interface NvidiaAgentManifestDescribeInput {
-  sessionId: string
-  scope: NvidiaAgentDataScopeRequest
-}
-
 export interface NvidiaAgentDataManifest {
   schemaVersion: 1
   manifestId: string
@@ -96,16 +91,6 @@ export interface NvidiaAgentDataManifest {
   }
   localOnly: string[]
   allowedTools: string[]
-}
-
-export interface NvidiaAgentManifestDecisionInput {
-  sessionId: string
-  manifestId: string
-  approved: boolean
-}
-
-export interface NvidiaAgentManifestDecisionResult {
-  approved: boolean
 }
 
 export interface NvidiaAgentSessionFinishInput {
