@@ -159,6 +159,14 @@ function formatRevisionReason(reason: MyDbRevision['reason']): string {
   return '변경본'
 }
 
+/** '2026-08-21' → '8월 21일 (금)'. 연도는 달력 머리가 이미 말한다. */
+function formatReportDate(reportDate: string): string {
+  const at = new Date(`${reportDate}T00:00:00`)
+  if (Number.isNaN(at.getTime())) return reportDate
+  const weekday = ['일', '월', '화', '수', '목', '금', '토'][at.getDay()]
+  return `${at.getMonth() + 1}월 ${at.getDate()}일 (${weekday})`
+}
+
 function historyActionLabel(action: MyDbHistoryAction): string {
   const labels: Record<MyDbHistoryAction, string> = {
     core_created: '코어 생성',
@@ -2470,10 +2478,13 @@ function MyDbView({ active }: Props): React.JSX.Element {
                     <section className="mydb-daily-reports mydb-daily-reports--side" aria-label="My DB 일일 변경 보고서">
                       <h3>일일 변경 보고서</h3>
                       {history.dailyReports.map((report) => (
-                        <article key={report.reportDate} className="mydb-daily-report">
+                        <article
+                          key={report.reportDate}
+                          className={`mydb-daily-report${report.totalChanges === 0 ? ' mydb-daily-report--quiet' : ''}`}
+                        >
                           <header>
-                            <strong>{report.reportDate} 보고서</strong>
-                            <span>변경 {report.totalChanges}건</span>
+                            <strong>{formatReportDate(report.reportDate)}</strong>
+                            <span>{report.totalChanges === 0 ? '변경 없음' : `${report.totalChanges}건`}</span>
                           </header>
                           <pre>{report.body}</pre>
                         </article>
@@ -2486,10 +2497,13 @@ function MyDbView({ active }: Props): React.JSX.Element {
                   <section className="mydb-daily-reports" aria-label="My DB 일일 변경 보고서">
                     <h3>일일 변경 보고서</h3>
                     {history.dailyReports.map((report) => (
-                      <article key={report.reportDate} className="mydb-daily-report">
+                      <article
+                        key={report.reportDate}
+                        className={`mydb-daily-report${report.totalChanges === 0 ? ' mydb-daily-report--quiet' : ''}`}
+                      >
                         <header>
-                          <strong>{report.reportDate} 보고서</strong>
-                          <span>변경 {report.totalChanges}건</span>
+                          <strong>{formatReportDate(report.reportDate)}</strong>
+                          <span>{report.totalChanges === 0 ? '변경 없음' : `${report.totalChanges}건`}</span>
                         </header>
                         <pre>{report.body}</pre>
                       </article>
@@ -2498,7 +2512,7 @@ function MyDbView({ active }: Props): React.JSX.Element {
                 )}
                 {historyDay && (
                   <div className="mydb-history__filter">
-                    <span>{historyDay} 의 이력만 보는 중 · {visibleHistory.length}건</span>
+                    <span><strong>{historyDay ? formatReportDate(historyDay) : ''}</strong> 의 이력 {visibleHistory.length}건</span>
                     <button type="button" onClick={() => setHistoryDay(null)}>전체 보기</button>
                   </div>
                 )}

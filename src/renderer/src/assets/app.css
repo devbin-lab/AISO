@@ -630,7 +630,7 @@
   border-radius: 8px;
 }
 .mydb-history__viewtab {
-  padding: 4px 12px;
+  padding: 4px 13px;
   color: var(--text-dim);
   background: transparent;
   border: 0;
@@ -642,21 +642,28 @@
   white-space: nowrap;
 }
 .mydb-history__viewtab:hover { color: var(--text-muted); }
-.mydb-history__viewtab.is-active { color: var(--text); background: var(--bg-elev); }
+.mydb-history__viewtab.is-active {
+  color: var(--text);
+  background: var(--bg-elev);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--menu-shadow) 30%, transparent);
+}
 
 /* ── 날짜 필터 안내 ── */
 .mydb-history__filter {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   margin: 0 0 14px;
   padding: 8px 12px;
   color: var(--text-muted);
-  background: var(--accent-soft);
-  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
   border-radius: 9px;
   font-size: 11.5px;
 }
+/* 어느 날짜인지가 이 줄의 요점이다. */
+.mydb-history__filter strong { color: var(--text); font-weight: 650; font-variant-numeric: tabular-nums; }
 .mydb-history__filter button {
   margin-left: auto;
   padding: 3px 9px;
@@ -690,28 +697,43 @@
 .mydb-cal { margin: 0; }
 .mydb-cal__head {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 14px;
 }
-.mydb-cal__head strong { color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; }
-.mydb-cal__total { margin-left: auto; color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+/* 달 이름이 이 영역의 주인공이다 — 화살표보다 확실히 크게. */
+.mydb-cal__head strong {
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums;
+}
+.mydb-cal__total {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+/* 테두리 없는 조용한 화살표 — 달 이름 옆에서 시선을 끌 이유가 없다. */
 .mydb-cal__nav {
-  width: 24px;
-  height: 24px;
+  align-self: center;
+  width: 26px;
+  height: 26px;
   display: grid;
   place-items: center;
-  color: var(--text-muted);
+  color: var(--text-dim);
   background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 0;
+  border-radius: 7px;
   cursor: pointer;
   font: inherit;
-  font-size: 14px;
+  font-size: 17px;
   line-height: 1;
+  transition: background .12s, color .12s;
 }
-.mydb-cal__nav:hover:not(:disabled) { color: var(--text); background: var(--bg-input); }
-.mydb-cal__nav:disabled { opacity: .35; cursor: not-allowed; }
+.mydb-cal__nav:hover:not(:disabled) { color: var(--text); background: var(--sidebar-hover); }
+.mydb-cal__nav:disabled { opacity: .28; cursor: default; }
 .mydb-cal__grid {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
@@ -728,13 +750,15 @@
   .mydb-cal-row .mydb-cal__grid { max-width: 100%; }
 }
 .mydb-cal__dow {
-  padding-bottom: 4px;
-  /* 격자와 같은 열을 쓰므로 max-width 는 격자에만 걸면 된다. */
+  padding-bottom: 6px;
   color: var(--text-dim);
   font-size: 10.5px;
   font-weight: 600;
+  letter-spacing: .04em;
   text-align: center;
 }
+/* 주말은 한 톤 낮춘다 — 달력을 읽을 때 주 단위 리듬이 잡힌다. */
+.mydb-cal__dow:first-child, .mydb-cal__dow:nth-child(7) { color: color-mix(in srgb, var(--text-dim) 70%, transparent); }
 .mydb-cal__cell {
   position: relative;
   display: flex;
@@ -744,33 +768,86 @@
   gap: 2px;
   /* 직사각형이면 날짜 칸이라기보다 줄처럼 보인다. 정사각형이 달력답다. */
   aspect-ratio: 1;
-  padding: 6px 8px;
+  padding: 7px 9px;
+  overflow: hidden;
   color: var(--text-muted);
-  background: color-mix(in srgb, var(--bg-elev) 70%, var(--mydb-canvas-bg));
+  background: color-mix(in srgb, var(--bg-elev) 60%, transparent);
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 9px;
   cursor: pointer;
   font: inherit;
   text-align: left;
+  transition: border-color .12s, background .12s;
+}
+/* 활동량은 칸을 통째로 칠하는 대신 아래 띠로 보여 준다. 진한 주황으로 칸을
+   가득 채우면 달력이 아니라 히트맵 얼룩처럼 읽힌다(4단계가 srgb .52/.24/.11
+   였다). 띠는 정확하면서 조용하다. */
+.mydb-cal__cell::after {
+  content: '';
+  position: absolute;
+  left: 9px;
+  right: 9px;
+  bottom: 7px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  transform: scaleX(var(--fill, 0));
+  transform-origin: left;
+  opacity: var(--fill-o, 0);
+  transition: transform .16s ease, opacity .16s ease;
 }
 .mydb-cal__cell--filler { background: transparent; border-color: transparent; cursor: default; }
 .mydb-cal__cell:disabled { cursor: default; }
 .mydb-cal__cell:not(:disabled):hover { border-color: var(--border-strong); }
-.mydb-cal__day { font-size: 11px; font-variant-numeric: tabular-nums; }
+.mydb-cal__day {
+  /* text-dim 그대로면 대비 2.9 다. 빈 날도 날짜는 읽어야 하므로 한 단계 올린다. */
+  color: color-mix(in srgb, var(--text-dim) 55%, var(--text));
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+/* 활동이 있는 날은 날짜도 또렷하게 — 빈 날과 한눈에 갈린다. */
+.mydb-cal__cell:not(:disabled) .mydb-cal__day { color: var(--text); }
 .mydb-cal__count {
   align-self: flex-end;
-  color: var(--text);
-  font-size: 11.5px;
-  font-weight: 700;
+  margin-bottom: 5px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
-/* 활동량 농도 — 그 달의 최대치 대비 상대값이다(intensityOf). */
-.mydb-cal__cell--l1 { background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev)); }
-.mydb-cal__cell--l2 { background: color-mix(in srgb, var(--accent) 22%, var(--bg-elev)); }
-.mydb-cal__cell--l3 { background: color-mix(in srgb, var(--accent) 36%, var(--bg-elev)); }
-.mydb-cal__cell--l4 { background: color-mix(in srgb, var(--accent) 52%, var(--bg-elev)); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
-.mydb-cal__cell.is-today { box-shadow: inset 0 0 0 1px var(--accent); }
-.mydb-cal__cell.is-picked { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+/* 활동량 — 그 달의 최대치 대비 상대값이다(intensityOf). 띠 길이와 아주 옅은
+   배경 두 겹으로 표현한다. 배경은 '뭔가 있다'는 신호일 뿐 색으로 읽히지 않는다. */
+.mydb-cal__cell--l1 { --fill: .25; --fill-o: .55; background: color-mix(in srgb, var(--accent) 4%, var(--bg-elev)); }
+.mydb-cal__cell--l2 { --fill: .5;  --fill-o: .7;  background: color-mix(in srgb, var(--accent) 6%, var(--bg-elev)); }
+.mydb-cal__cell--l3 { --fill: .75; --fill-o: .85; background: color-mix(in srgb, var(--accent) 9%, var(--bg-elev)); }
+.mydb-cal__cell--l4 { --fill: 1;   --fill-o: 1;   background: color-mix(in srgb, var(--accent) 12%, var(--bg-elev)); }
+/* 활동이 있는 칸만 눌린다 — 그 사실을 테두리로도 알려 준다. */
+.mydb-cal__cell:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 18%, var(--border)); }
+.mydb-cal__cell:not(:disabled):hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); background: color-mix(in srgb, var(--accent) 8%, var(--bg-elev)); }
+/* 오늘은 칠하지 않고 날짜 아래 점으로 표시한다 — 칸을 칠하면 활동량과 헷갈린다.
+   글자까지 주황으로 바꾸면 라이트 테마에서 대비가 2.77 로 떨어진다(실측).
+   신호는 점이 지고, 숫자는 읽히는 색을 유지한다. */
+.mydb-cal__cell.is-today .mydb-cal__day {
+  color: var(--text);
+  font-weight: 700;
+}
+.mydb-cal__cell.is-today .mydb-cal__day::after {
+  content: '';
+  display: block;
+  width: 3px;
+  height: 3px;
+  margin: 2px auto 0;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.mydb-cal__cell.is-picked {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-elev));
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
 .mydb-history__head {
   display: flex;
   align-items: baseline;
@@ -779,6 +856,7 @@
   margin-bottom: 18px;
 }
 .mydb-history__head h2 { margin: 0; color: var(--text); font-size: clamp(19px, 2vw, 25px); letter-spacing: -.03em; }
+.mydb-history__headright > span { color: var(--text-dim); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .mydb-history__head span { color: var(--text-dim); font-size: 12px; font-variant-numeric: tabular-nums; }
 .mydb-daily-reports { display: grid; gap: 9px; margin: 0 0 20px; }
 /* 달력 옆에서는 항상 세로 1열이다. 아래 2단 규칙(@container)이 여기까지
@@ -797,12 +875,62 @@
 }
 .mydb-daily-reports--side > h3 { position: sticky; top: 0; z-index: 1; padding: 2px 0 6px; background: var(--mydb-canvas-bg); }
 .mydb-daily-reports--side .mydb-daily-report pre { max-height: 150px; }
-.mydb-daily-reports > h3 { margin: 0; color: var(--text-muted); font-size: 12px; font-weight: 720; }
-.mydb-daily-report { overflow: hidden; background: color-mix(in srgb, var(--accent-soft) 36%, var(--bg-elev)); border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border)); border-radius: 10px; }
-.mydb-daily-report > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 13px; border-bottom: 1px solid color-mix(in srgb, var(--accent) 16%, var(--border)); }
-.mydb-daily-report > header strong { color: var(--text); font-size: 12px; }
-.mydb-daily-report > header span { flex: 0 0 auto; color: var(--text-dim); font-size: 10.5px; font-variant-numeric: tabular-nums; }
-.mydb-daily-report pre { max-height: 260px; margin: 0; padding: 12px 13px; overflow: auto; color: var(--text-muted); font: 11.5px/1.6 var(--font-mono, ui-monospace, Consolas, monospace); white-space: pre-wrap; }
+.mydb-daily-reports > h3 {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+/* 카드는 기본적으로 조용하다. 예전에는 주황 배경 + 주황 테두리라 카드 자체가
+   내용보다 눈에 띄었고, '변경 0건' 카드까지 같은 무게로 늘어서 있었다. */
+.mydb-daily-report {
+  overflow: hidden;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  transition: border-color .12s;
+}
+.mydb-daily-report > header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 13px 9px;
+}
+.mydb-daily-report > header strong { color: var(--text); font-size: 12.5px; font-weight: 650; letter-spacing: -.01em; }
+/* 변경 건수는 알약으로 — 숫자가 제목과 같은 줄에서 경쟁하지 않는다. */
+.mydb-daily-report > header span {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 2px 7px;
+  /* 순수 accent 는 accent-soft 위에서 대비 2.8 이다(라이트 실측).
+     본문색을 섞어 브랜드 느낌은 남기고 읽히게 만든다. */
+  color: color-mix(in srgb, var(--accent) 45%, var(--text));
+  background: var(--accent-soft);
+  border-radius: 20px;
+  font-size: 10.5px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.mydb-daily-report pre {
+  max-height: 260px;
+  margin: 0 13px 12px;
+  padding: 10px 12px;
+  overflow: auto;
+  color: var(--text-muted);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font: 11px/1.7 var(--font-mono, ui-monospace, Consolas, monospace);
+  white-space: pre-wrap;
+}
+/* 변경이 없던 날은 뒤로 물린다. 기록으로는 남기되 눈이 머물 이유는 없다. */
+.mydb-daily-report--quiet { background: transparent; }
+.mydb-daily-report--quiet > header { padding-bottom: 10px; }
+.mydb-daily-report--quiet > header strong { color: var(--text-muted); font-weight: 550; }
+.mydb-daily-report--quiet > header span { color: var(--text-dim); background: transparent; padding: 0; }
+.mydb-daily-report--quiet pre { display: none; }
+.mydb-daily-report:not(.mydb-daily-report--quiet) { border-color: color-mix(in srgb, var(--accent) 20%, var(--border)); }
 .mydb-history__list { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
 /* 넓은 창에서는 남는 폭을 2단으로 쓴다. 이력 한 줄은 짧아서 한 단으로 늘리면
    글자가 과하게 퍼지고 한 화면에 담기는 건수도 줄어든다. */
@@ -818,11 +946,13 @@
   align-items: start;
   gap: 11px;
   min-width: 0;
-  padding: 13px 14px;
-  background: color-mix(in srgb, var(--bg-elev) 76%, var(--mydb-canvas-bg));
+  padding: 12px 14px;
+  background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: 10px;
+  transition: border-color .12s;
 }
+.mydb-history-entry:hover { border-color: var(--border-strong); }
 .mydb-history-entry__mark {
   width: 8px;
   height: 8px;
