@@ -92,6 +92,35 @@ export function buildMonth(
   return { year, month, label: `${year}년 ${month}월`, days, total }
 }
 
+/** `YYYY-MM` 에서 delta 개월 이동. 연도 경계를 넘어간다. */
+export function shiftMonth(yearMonth: string, delta: number): string {
+  const [year, month] = yearMonth.split('-').map(Number)
+  const at = new Date(year, month - 1 + delta, 1)
+  return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}`
+}
+
+/** 넘겨 볼 수 있는 최소 창(개월). 이력이 없거나 한 달뿐이어도 달력은 움직여야 한다. */
+export const MIN_BROWSE_MONTHS = 12
+
+/**
+ * 넘겨 볼 수 있는 달의 범위.
+ *
+ * 이력이 있는 달 사이로만 건너뛰게 했더니, 이력이 한 달뿐인 사용자는 양쪽
+ * 버튼이 동시에 비활성돼 달력이 멈춘 것처럼 보였다. 달력은 빈 달도 넘길 수
+ * 있어야 한다. 그래서 이력 유무와 무관하게 최소 12개월 창을 보장한다.
+ *
+ * 위쪽은 이번 달(또는 그보다 뒤에 기록이 있으면 그 달)까지다 — 미래를 끝없이
+ * 넘겨 봐야 빈 달만 나온다.
+ */
+export function monthRange(entries: MyDbHistoryEntry[], today: Date = new Date()): { min: string; max: string } {
+  const current = localDayKey(today).slice(0, 7)
+  const months = monthsWithHistory(entries)
+  const newest = months.length > 0 && months[0]! > current ? months[0]! : current
+  const oldest = months.length > 0 ? months[months.length - 1]! : current
+  const window = shiftMonth(newest, -(MIN_BROWSE_MONTHS - 1))
+  return { min: oldest < window ? oldest : window, max: newest }
+}
+
 /**
  * 건수를 0-4 단계로 바꾼다. 색 농도에 쓴다.
  * 절대 기준이 아니라 그 달의 최대치 대비 상대값이다 — 활동량은 사람마다 다르다.

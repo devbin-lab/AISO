@@ -16,7 +16,7 @@ import type {
 import { CloseIcon, DownloadIcon, EditIcon, FileIcon, FolderIcon, GraphIcon, LinkIcon, SearchIcon, TrashIcon, UnlinkIcon } from '../components/icons'
 import { confirmDialog } from '../components/ConfirmDialog'
 import { getMyDbBridge } from '../lib/mydb'
-import { buildMonth, countByDay, intensityOf, localDayKey, monthsWithHistory } from '../lib/history-calendar'
+import { buildMonth, countByDay, intensityOf, localDayKey, monthRange, monthsWithHistory, shiftMonth } from '../lib/history-calendar'
 import { applyRepulsion, BARNES_HUT_THETA, buildQuadTree } from './mydb-graph/quadtree'
 import { buildGraphRoutes } from './mydb-graph/routing'
 
@@ -1567,7 +1567,12 @@ function MyDbView({ active }: Props): React.JSX.Element {
   const historyCounts = useMemo(() => countByDay(history.entries), [history.entries])
   const historyMonths = useMemo(() => monthsWithHistory(history.entries), [history.entries])
   // 고른 달이 사라지면(이력이 지워졌을 때) 가장 최근 달로 되돌린다.
-  const activeMonth = historyMonth && historyMonths.includes(historyMonth)
+  // 넘겨 볼 수 있는 범위. 빈 달도 넘길 수 있어야 달력답다 — 이력이 있는 달
+  // 사이로만 건너뛰게 했더니 이력이 한 달뿐일 때 양쪽 버튼이 함께 잠겼다.
+  const historyRange = useMemo(() => monthRange(history.entries), [history.entries])
+  // 고른 달이 범위 안이면 그대로 존중한다. '이력이 있는 달'만 허용하면
+  // 빈 달로 넘어가는 순간 곧바로 되돌아와 버튼이 먹통처럼 보인다.
+  const activeMonth = historyMonth && historyMonth >= historyRange.min && historyMonth <= historyRange.max
     ? historyMonth
     : historyMonths[0] ?? localDayKey(new Date()).slice(0, 7)
   const calendarMonth = useMemo(() => buildMonth(activeMonth, historyCounts), [activeMonth, historyCounts])
@@ -2422,24 +2427,16 @@ function MyDbView({ active }: Props): React.JSX.Element {
                         type="button"
                         className="mydb-cal__nav"
                         aria-label="이전 달"
-                        disabled={historyMonths.indexOf(activeMonth) >= historyMonths.length - 1}
-                        onClick={() => {
-                          const at = historyMonths.indexOf(activeMonth)
-                          const next = historyMonths[at + 1]
-                          if (next) { setHistoryMonth(next); setHistoryDay(null) }
-                        }}
+                        disabled={activeMonth <= historyRange.min}
+                        onClick={() => { setHistoryMonth(shiftMonth(activeMonth, -1)); setHistoryDay(null) }}
                       >‹</button>
                       <strong>{calendarMonth.label}</strong>
                       <button
                         type="button"
                         className="mydb-cal__nav"
                         aria-label="다음 달"
-                        disabled={historyMonths.indexOf(activeMonth) <= 0}
-                        onClick={() => {
-                          const at = historyMonths.indexOf(activeMonth)
-                          const prev = historyMonths[at - 1]
-                          if (prev) { setHistoryMonth(prev); setHistoryDay(null) }
-                        }}
+                        disabled={activeMonth >= historyRange.max}
+                        onClick={() => { setHistoryMonth(shiftMonth(activeMonth, 1)); setHistoryDay(null) }}
                       >›</button>
                       <span className="mydb-cal__total">이 달 {calendarMonth.total}건</span>
                     </header>

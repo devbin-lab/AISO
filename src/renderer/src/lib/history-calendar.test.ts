@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildMonth, countByDay, intensityOf, localDayKey, monthsWithHistory } from './history-calendar'
+import { buildMonth, countByDay, intensityOf, localDayKey, monthRange, monthsWithHistory, shiftMonth } from './history-calendar'
 import type { MyDbHistoryEntry } from '../../../shared/mydb'
 
 function entry(createdAt: string, id = createdAt): MyDbHistoryEntry {
@@ -84,5 +84,57 @@ describe('히스토리 달력', () => {
     expect(intensityOf(1, 40)).toBe(1)
     expect(intensityOf(1, 1)).toBe(4)
     expect(intensityOf(3, 4)).toBe(3)
+  })
+})
+
+describe('달력 월 이동', () => {
+  it('앞뒤로 한 달씩 옮긴다', () => {
+    expect(shiftMonth('2026-08', -1)).toBe('2026-07')
+    expect(shiftMonth('2026-08', 1)).toBe('2026-09')
+  })
+
+  it('연도 경계를 넘는다', () => {
+    expect(shiftMonth('2026-01', -1)).toBe('2025-12')
+    expect(shiftMonth('2026-12', 1)).toBe('2027-01')
+  })
+
+  it('이력이 한 달뿐이어도 앞뒤로 넘길 수 있다', () => {
+    // 예전에는 '이력이 있는 달' 사이로만 건너뛰게 해서, 이력이 한 달뿐이면
+    // 양쪽 버튼이 동시에 비활성돼 달력이 멈춘 것처럼 보였다.
+    const entries = [
+      { id: 'a', action: 'imported' as const, subjectTitle: 'x', createdAt: '2026-08-16T01:00:00.000Z' }
+    ]
+    const range = monthRange(entries, new Date(2026, 7, 22))
+    // 범위가 한 점이면 양쪽 버튼이 동시에 잠긴다. 최소 12개월 창을 보장한다.
+    expect(range.max).toBe('2026-08')
+    expect(range.min).toBe('2025-09')
+    expect(range.min < range.max).toBe(true)
+  })
+
+  it('가장 오래된 이력 달부터 이번 달까지 묶는다', () => {
+    const entries = [
+      { id: 'a', action: 'imported' as const, subjectTitle: 'x', createdAt: '2026-05-02T03:00:00.000Z' },
+      { id: 'b', action: 'imported' as const, subjectTitle: 'y', createdAt: '2026-07-02T03:00:00.000Z' }
+    ]
+    const range = monthRange(entries, new Date(2026, 7, 22))
+    // 이력은 5월부터지만 최소 창(12개월)이 더 넓으면 그쪽을 쓴다.
+    expect(range.min).toBe('2025-09')
+    expect(range.max).toBe('2026-08')
+  })
+
+  it('이력이 없어도 넘겨 볼 수 있다', () => {
+    const range = monthRange([], new Date(2026, 7, 22))
+    // 이력이 없어도 달력은 넘길 수 있어야 한다.
+    expect(range.max).toBe('2026-08')
+    expect(range.min).toBe('2025-09')
+  })
+
+  it('미래에 기록된 이력도 볼 수 있다', () => {
+    // 시계를 바꿨거나 다른 기기에서 이관한 경우 미래 날짜가 있을 수 있다.
+    const entries = [
+      { id: 'a', action: 'imported' as const, subjectTitle: 'x', createdAt: '2026-12-02T03:00:00.000Z' }
+    ]
+    const range = monthRange(entries, new Date(2026, 7, 22))
+    expect(range.max).toBe('2026-12')
   })
 })
