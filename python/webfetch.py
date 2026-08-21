@@ -19,6 +19,10 @@ from urllib.parse import unquote_plus, urlparse
 from tools import ToolError
 
 FETCH_TIMEOUT = 20000     # 페이지 로드 상한(ms)
+# 드라이버(node.exe) 기동은 메모리가 빠듯하면 간헐적으로 실패한다. 한 번의 실패로
+# 런 전체가 멈추면(근거 없이 답하지 않는 계약) 사용자에겐 '항상 고장난 것'으로 보인다.
+BROWSER_START_RETRIES = 1
+BROWSER_START_BACKOFF = 0.8   # 초
 MAX_FETCH_CHARS = 30000   # 반환 텍스트 상한(문자)
 # URL 길이 상한 — 정상 웹 주소는 이보다 짧다(관용 한계 ~2048자). 이를 넘는 요청은
 # 대화/문맥을 쿼리스트링에 실어 외부로 보내는 유출(프롬프트 인젝션) 시도일 수 있어 차단한다.
@@ -191,7 +195,38 @@ def _blocked_reason(url: str) -> str | None:
     return None
 
 
-def _fetch_sync(url: str) -> str:
+# 브라우저가 아예 못 뜬 경우의 표식. 이 접두사가 붙은 결과만 재시도한다 —
+# 페이지 오류·차단은 서버가 준 답이라 다시 물어도 같은 답이 온다.
+_BROWSER_START_FAILURE = "[가져오기 불가]"
+
+
+def _driver_failure_reason(error: BaseException) -> str:
+    """Playwright 내부 예외를 사람이 읽을 수 있는 사유로 바꾼다.
+
+    드라이버가 접속하지 못하면 Playwright 는 `'PlaywrightContextManager' object has
+    no attribute '_playwright'` 를 낸다. 그 속성은 드라이버 접속 콜백에서만 대입되기
+    때문이다(sync_api/_context_manager.py). 그대로 사용자에게 내보내면 아무 의미가 없다.
+    """
+    if isinstance(error, AttributeError) and "_playwright" in str(error):
+        return "브라우저 드라이버가 기동하지 못했습니다(메모리 부족일 수 있음)"
+    return f"{type(error).__name__}: {error}"
+
+
+def _fetch_sync(url: str, *, sleep=None) -> str:
+    """브라우저 기동 실패만 재시도한다. 그 외 결과는 그대로 돌려준다."""
+    import time as _time
+
+    nap = sleep or _time.sleep
+    result = _fetch_once(url)
+    for _ in range(BROWSER_START_RETRIES):
+        if not result.startswith(_BROWSER_START_FAILURE):
+            break
+        nap(BROWSER_START_BACKOFF)
+        result = _fetch_once(url)
+    return result
+
+
+def _fetch_once(url: str) -> str:
     # SSRF 검사(DNS 포함)는 이벤트 루프를 막지 않도록 이 스레드에서 수행
     blocked = _blocked_reason(url)
     if blocked:
@@ -244,7 +279,7 @@ def _fetch_sync(url: str) -> str:
             finally:
                 browser.close()
     except Exception as e:  # noqa: BLE001 — 브라우저 자체가 안 뜨는 경우
-        return f"[가져오기 불가] 헤드리스 브라우저 실행 실패: {type(e).__name__}: {e}."
+        return f"{_BROWSER_START_FAILURE} 헤드리스 브라우저 실행 실패: {_driver_failure_reason(e)}."
 
     # 리다이렉트가 내부 주소로 갔는지 최종 재확인
     blocked = _blocked_reason(final_url)
