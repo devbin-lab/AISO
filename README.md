@@ -8,7 +8,7 @@
 
 개인 파일, 문서, 일정, 지식 라이브러리와 로컬 AI를 한 곳에서 다룹니다.
 
-[![Version](https://img.shields.io/badge/version-1.0.0-F16522?style=flat-square)](docs/V1.0.0_RELEASE_NOTES.md)
+[![Version](https://img.shields.io/badge/version-1.0.1-F16522?style=flat-square)](docs/V1.0.1_RELEASE_NOTES.md)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6?style=flat-square)
 ![Desktop](https://img.shields.io/badge/desktop-Electron%2043-47848F?style=flat-square&logo=electron&logoColor=white)
 ![Runtime](https://img.shields.io/badge/default%20LLM-Ollama-111827?style=flat-square&logo=ollama)
@@ -37,6 +37,7 @@ Aiso는 **개인 창작자의 작업을 정리해주는 데스크톱 워크스�
 
 | 영역 | 하는 일 | 데이터 경계 |
 |---|---|---|
+| **홈** | 연결 상태, 오늘 할 일, 주간 토큰, My DB 일일 보고서 요약 | 읽기 전용 — 다른 화면의 데이터를 모아 보여만 줍니다 |
 | **Aiso 채팅** | 일반 대화, 첨부 자료 질의, 선택적 웹 조사 | 대화 기록은 앱 데이터, 첨부는 별도 임시 보관소 |
 | **Aiso 에이전트** | 작업 폴더 기반 파일·문서·코드 작업과 검증 | 명시한 작업 폴더와 허용된 도구 범위만 사용 |
 | **캘린더** | 일정 생성·수정·반복 일정·우선순위·일/주/월 보기 | 앱의 중앙 캘린더 DB에 저장 |
@@ -47,15 +48,28 @@ Aiso는 **개인 창작자의 작업을 정리해주는 데스크톱 워크스�
 
 ## 핵심 기능
 
-### 1. 채팅과 에이전트, 프로젝트
+### 1. 홈 대시보드
+
+앱을 열면 지금 상태를 한 화면에서 확인합니다. 스크롤 없이 훑을 수 있도록 바깥은 고정하고, 넘치는 내용은 각 카드가 안에서 스크롤합니다.
+
+- **연결 상태** — 백엔드, LLM, ComfyUI, Discord 연결을 진단 센터와 **같은 판정**으로 보여 줍니다. 나쁜 소식이 먼저 요약됩니다.
+- **오늘 할 일** — 기한이 지났거나 오늘까지인 미완료 항목만 우선순위 순으로.
+- **이번 주 토큰** — 최근 7일 사용량과 오늘·30일·전체 합계.
+- **My DB 일일 변경 보고서** — 가장 최근 보고서 1건. 오늘 작성된 것인지 표시합니다.
+
+창이 좁아지면 한 화면 제약을 풀어 세로로 이어 봅니다.
+
+### 2. 채팅과 에이전트, 프로젝트
 
 - 좌측 상단에서 **Aiso 채팅**과 **Aiso 에이전트**를 전환합니다.
 - 채팅은 프로젝트에 묶이지 않은 일반 대화에도 적합합니다.
 - 에이전트는 프로젝트별 대화방 또는 독립 대화방에서 사용할 수 있습니다.
 - 대화·프로젝트는 사이드바에서 이름 변경, 고정, 삭제할 수 있습니다.
 - 에이전트 실행 중에는 현재 작업 폴더, RAG 상태, 실행된 도구와 결과가 대화 흐름에 표시됩니다.
+- 안전 한도로 멈추면 **왜** 멈췄는지(단계 상한·반복·출력 한도 등)와 그 상황에서 실제로 듣는 처방을 안내합니다.
+- **작업 자동 이어가기**(설정 → LLM, 기본 꺼짐)를 켜면 그런 중단에서 사용자가 `계속해줘`를 치지 않아도 이어서 진행합니다. 한 요청당 3회까지만 이어가고, 정지를 누른 뒤에는 이어가지 않습니다. 이어가는 실행은 백지가 아니라 직전 실행이 실제로 한 일과 그 결과를 함께 넘겨받습니다. 토큰을 더 쓰므로 기본값은 꺼짐입니다.
 
-### 2. 요청별 도구 라우팅
+### 3. 요청별 도구 라우팅
 
 일반 요청에 모든 도구를 한꺼번에 노출하지 않습니다. 요청 원문만 바탕으로 우선 의도를 분류하고, 필요한 도구군과 단계를 제한합니다.
 
@@ -70,7 +84,7 @@ Aiso는 **개인 창작자의 작업을 정리해주는 데스크톱 워크스�
 
 명시적 이미지 생성은 ComfyUI 준비 상태와 선택한 모델 프로필을 확인합니다. 문서 원문이나 첨부 내용이 사용자의 실제 요청 분류를 오염시키지 않도록, 라우팅은 원본 사용자 입력을 기준으로 합니다.
 
-### 3. 문서 읽기, 근거 중심 정리, 캘린더
+### 4. 문서 읽기, 근거 중심 정리, 캘린더
 
 Aiso는 PDF뿐 아니라 다양한 작업 문서를 읽어 요약하거나, 실제 근거가 있는 작업 후보를 추출할 수 있습니다.
 
@@ -90,7 +104,7 @@ Aiso는 PDF뿐 아니라 다양한 작업 문서를 읽어 요약하거나, 실�
 - 전체 일정 삭제는 명확한 전체 범위 표현에서만 실행합니다.
 - 캘린더는 작업 폴더가 없어도 앱 중앙 DB에서 동작합니다.
 
-### 4. My DB — 개인 NAS형 지식 라이브러리
+### 5. My DB — 개인 NAS형 지식 라이브러리
 
 My DB는 에이전트가 만든 파일을 자동으로 쌓아 두는 장소가 아닙니다. 사용자가 직접 넣고 연결하는 **독립적인 개인 파일 저장소와 관계형 지식 그래프**입니다.
 
@@ -127,7 +141,7 @@ My DB는 에이전트가 만든 파일을 자동으로 쌓아 두는 장소가 �
 - 컴퓨터가 켜져 있으면 전날 변경 사항을 하루 한 번 보고서로 작성합니다. 이미 작성한 날짜의 보고서는 중복 생성하지 않습니다.
 - 보고서 검사 주기는 DB 설정에서 정하며, 기본값은 6시간입니다.
 
-### 5. 로컬 ComfyUI 이미지 생성
+### 6. 로컬 ComfyUI 이미지 생성
 
 - ComfyUI URL과 모델 폴더를 연결해 로컬 이미지 생성을 실행합니다.
 - 설치된 모델을 검사해 SD 1.5, SDXL, FLUX 계열 및 사용자 워크플로 프로필을 관리합니다.
@@ -136,7 +150,7 @@ My DB는 에이전트가 만든 파일을 자동으로 쌓아 두는 장소가 �
 - 실제 `image_result`가 도착한 경우에만 이미지 생성 완료 카드가 대화에 남습니다. 생성하지 않은 이미지를 생성했다고 말하는 후속 대화 오염을 막습니다.
 - 검색 기반 캐릭터 생성은 웹 조사 근거를 확인한 뒤 이미지 생성 단계로 넘어갑니다.
 
-### 6. 웹 조사와 Discord
+### 7. 웹 조사와 Discord
 
 #### 웹 조사
 
@@ -159,7 +173,7 @@ My DB는 에이전트가 만든 파일을 자동으로 쌓아 두는 장소가 �
 - Discord에서 받은 첨부 파일도 허용된 형식이면 분석 흐름에 넣을 수 있습니다.
 - 최신 정보 요청은 웹 조사 흐름을 거쳐 출처와 함께 채널에 게시할 수 있습니다.
 
-### 7. 작업 폴더, RAG, 코드와 웹 검증
+### 8. 작업 폴더, RAG, 코드와 웹 검증
 
 - 작업 폴더는 에이전트가 파일을 읽거나 수정할 수 있는 명시적 경계입니다.
 - 대용량 작업 폴더를 위한 로컬 RAG 색인과 검색 문맥을 사용할 수 있습니다.
@@ -180,6 +194,7 @@ My DB는 에이전트가 만든 파일을 자동으로 쌓아 두는 장소가 �
 
 ### 기본 보호 장치
 
+- 렌더러 콘텐츠 보안 정책(CSP) — 외부 출처를 차단하고 로컬 사이드카 포트만 정확히 엽니다
 - 작업 폴더 상대 경로 검증과 심볼릭 링크/상위 경로 우회 방지
 - 명시한 보존 파일과 디렉터리에 대한 변경 전 차단
 - 도구 인자 JSON의 엄격한 검증 및 잘못된 호출의 실행 전 차단
@@ -228,13 +243,14 @@ My DB는 에이전트가 만든 파일을 자동으로 쌓아 두는 장소가 �
 
 - Windows 10 또는 Windows 11, 64비트
 - 로컬 모델을 사용할 경우 [Ollama](https://ollama.com/)와 호환 모델
+- 작업 폴더 RAG 색인을 사용할 경우 **임베딩 모델**(기본값 `bge-m3`). 채팅 모델과 별개이며, 설정에서 원클릭으로 내려받을 수 있습니다. 채팅 모델을 바꿔도 다시 색인할 필요는 없습니다.
 - 이미지 생성을 사용할 경우 별도 설치·실행한 ComfyUI
 - 선택 기능: NVIDIA 계정/런타임, Discord 봇 토큰 및 서버 권한
 
 ### 설치본 실행
 
-1. GitHub Releases에서 `Aiso-1.0.0-Setup.exe`를 내려받아 설치합니다.
-2. Aiso를 열고 **설정 → 진단 센터**에서 백엔드와 모델 상태를 확인합니다.
+1. GitHub Releases에서 `Aiso-1.0.1-Setup.exe`를 내려받아 설치합니다.
+2. Aiso를 열면 홈의 **연결 상태** 카드가 백엔드, LLM, ComfyUI, Discord를 진단 센터와 같은 판정으로 보여 줍니다. 더 자세한 점검은 카드 오른쪽의 **진단 센터** 버튼이나 **설정 → 진단 센터**에서 합니다.
 3. 로컬 모델을 사용할 경우 Ollama를 실행하고 사용할 모델을 선택합니다.
 4. 파일 작업이 필요하면 에이전트 화면에서 작업 폴더를 지정합니다.
 5. 캘린더와 My DB는 작업 폴더를 지정하지 않아도 독립적으로 사용할 수 있습니다.
@@ -255,13 +271,27 @@ latest.yml
 
 ### 저장소 준비
 
+필요한 런타임: **Node.js 24**, **Python 3.12** (CI가 검사하는 버전이며, `python/requirements.lock`도 Windows x64 / Python 3.12 기준으로 고정돼 있습니다).
+
 ```powershell
 git clone https://github.com/devbin-lab/AISO.git
 cd AISO
 npm ci
+
+# 번들 C/C++ 툴체인(w64devkit). tools/ 는 저장소에 커밋되지 않으므로
+# 클론 직후 한 번 받아야 합니다 — 패키징이 이 경로를 그대로 설치본에 담습니다.
+powershell -ExecutionPolicy Bypass -File scripts/fetch-toolchain.ps1
 ```
 
-Python 백엔드의 의존성은 `python/requirements.txt`를 따릅니다. 개발 환경에서는 Python 가상환경을 준비한 뒤 해당 요구 사항을 설치하세요.
+Python 가상환경은 **`python\.venv`** 에 만들어야 합니다. npm 스크립트가 이 경로를 그대로 사용합니다.
+
+```powershell
+python -m venv python\.venv
+python\.venv\Scripts\python.exe -m pip install -r python\requirements.txt -c python\requirements.lock
+python\.venv\Scripts\python.exe -m pip install -r python\requirements-dev.txt
+```
+
+런타임 의존성(`python/requirements.txt`)과 개발·검사 도구(`python/requirements-dev.txt`)는 분리돼 있습니다. 후자를 빼먹으면 `npm run test:python`(pytest)과 `npm run typecheck:python`(mypy)이 모듈 없음으로 실패하고, `npm run dev`의 uvicorn `--reload`도 동작하지 않습니다.
 
 ### 개발 실행
 
@@ -278,12 +308,17 @@ npm run typecheck
 # 렌더러 및 Node 테스트
 npm run test
 
-# Python 전체 테스트
-python\.venv\Scripts\python.exe -m pytest python\tests -q
+# Python 타입 검사 (mypy — 0건 기준선)
+npm run typecheck:python
 
-# 전체 검사
+# Python 전체 테스트
+npm run test:python
+
+# 전체 검사 (typecheck + mypy + Node/Renderer + Python)
 npm run test:all
 ```
+
+`npm run test:all`이 위 네 가지를 모두 돌립니다. mypy는 0건을 기준선으로 두므로, 새 경고가 하나라도 생기면 그대로 실패합니다.
 
 ### 아이콘 생성
 
@@ -305,6 +340,8 @@ npm run build:win
 npm run dist:win
 ```
 
+두 명령 모두 `tools/`(툴체인)와 `pyruntime/`(임베디드 Python)을 설치본에 담습니다. `build:win`은 이미 준비된 두 폴더를 쓰고, `dist:win`은 `pyruntime/`을 먼저 다시 만듭니다. `tools/`는 어느 쪽도 만들어 주지 않으므로 `scripts/fetch-toolchain.ps1`을 미리 실행해 두어야 합니다.
+
 생성물은 `dist/`에 위치합니다. 릴리스 전에는 버전, 설치 파일, blockmap, `latest.yml`이 서로 같은 버전을 가리키는지 확인하세요.
 
 ## 프로젝트 구조
@@ -319,7 +356,11 @@ AISO/
 ├─ python/              # FastAPI sidecar, agent, tool execution, document/RAG
 ├─ build/               # Windows 아이콘 원본과 패키징 리소스
 ├─ docs/                # 릴리스 노트와 README 로고
-├─ scripts/             # 아이콘·Python runtime 빌드 스크립트, 진단 스모크
+├─ scripts/             # 아이콘·Python runtime 빌드, 툴체인 내려받기, 진단 스모크
+├─ .github/workflows/   # Windows CI (typecheck · Node/renderer 테스트 · pytest · mypy)
+├─ tools/               # 번들 C/C++ 툴체인(w64devkit) — git 제외, fetch-toolchain.ps1 로 획득
+├─ pyruntime/           # 임베디드 Python 런타임 — git 제외, build-pyruntime.ps1 로 생성
+├─ out/                 # electron-vite 빌드 산출물(package.json "main" 이 가리킴)
 └─ dist/                # 로컬 패키징 산출물(배포 대상)
 ```
 
@@ -361,6 +402,7 @@ Apache License 2.0. 자세한 내용은 [LICENSE](LICENSE)를 참고하세요.
 
 | 버전 | 날짜 | 주요 내용 |
 |---|---|---|
+| **1.0.1** | 2026-08-21 | 홈 대시보드, 작업 자동 이어가기, My DB 완전 삭제, 2차 출처 탐색, 렌더러 CSP와 `run_code` 봉쇄, 웹 조사 실패 보고 정정. [릴리스 노트](docs/V1.0.1_RELEASE_NOTES.md) |
 | **1.0.0** | 2026-08-17 | 캘린더, My DB, 요청별 도구 라우팅, 근거 중심 문서 정리, 로컬 ComfyUI, Discord, 진단 센터를 통합한 첫 정식 릴리스. [릴리스 노트](docs/V1.0.0_RELEASE_NOTES.md) |
 | **0.4.0-rc.4** | 2026-08-03 | 공급자별 도구 정책과 선택적 프로그래밍 묶음, 실행 경계·자격 증명 보호를 정비한 후보판. [릴리스 노트](docs/V0.4.0_RC4_RELEASE_NOTES.md) |
 | **0.4.0-rc.2** | 2026-08-02 | NVIDIA 자격 증명 재실행 안정성, Agent 모델 표시와 승인 UX를 보완한 후보판. [릴리스 노트](docs/V0.4.0_RC2_RELEASE_NOTES.md) |

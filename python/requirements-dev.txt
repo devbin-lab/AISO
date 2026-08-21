@@ -6,5 +6,5 @@ pytest>=8
 # 런타임 목록에 두면 배포본에 헛되이 실린다.
 watchfiles==1.2.0
 
-# 타입 검사 — mypy.ini 의 기준선에서 0건을 유지한다(CI 게이트).
+# 타입 검사 — pyproject.toml 의 [tool.mypy] 기준선에서 0건을 유지한다(CI 게이트).
 mypy>=2
