@@ -701,9 +701,14 @@
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 4px;
+  /* 셀이 정사각형이라 격자 폭이 곧 높이를 정한다. 내용 폭(1520px)을 그대로
+     쓰면 셀 한 변이 213px, 달력 높이가 1300px 를 넘어 화면을 삼킨다.
+     700px 이면 셀 96px · 달력 616px 로 한눈에 들어온다. */
+  max-width: 700px;
 }
 .mydb-cal__dow {
   padding-bottom: 4px;
+  /* 격자와 같은 열을 쓰므로 max-width 는 격자에만 걸면 된다. */
   color: var(--text-dim);
   font-size: 10.5px;
   font-weight: 600;
@@ -716,8 +721,9 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 2px;
-  min-height: 52px;
-  padding: 5px 7px;
+  /* 직사각형이면 날짜 칸이라기보다 줄처럼 보인다. 정사각형이 달력답다. */
+  aspect-ratio: 1;
+  padding: 6px 8px;
   color: var(--text-muted);
   background: color-mix(in srgb, var(--bg-elev) 70%, var(--mydb-canvas-bg));
   border: 1px solid var(--border);
