@@ -487,6 +487,10 @@
 /* 홈은 카드가 안에서 스크롤하므로 바깥 래퍼가 스크롤하면 두 겹이 된다. */
 .viewwrap--home {
   overflow: hidden;
+  /* 열 수를 이 폭 기준으로 정한다. 뷰포트로 재면 사이드바(256px)가 포함돼
+     실제 쓸 수 있는 폭보다 넓게 잡힌다 — 사이드바를 접었는지에 따라
+     같은 창에서도 배치가 달라져야 한다. */
+  container-type: inline-size;
 }
 
 /* ---------- My DB: private library / relationship workspace ---------- */
@@ -6647,7 +6651,9 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   flex-direction: column;
   gap: 14px;
   height: 100%;
-  max-width: 1180px;
+  /* 1180px 고정이라 전체화면(1800px)에서 가로의 34% 가 빈 채로 남았다(실측).
+     넓히되 무한정 늘리지는 않는다 — 카드 하나가 1000px 를 넘으면 훑기 어렵다. */
+  max-width: 1560px;
   margin: 0 auto;
   padding: 20px 24px 22px;
   overflow: hidden;
@@ -6699,11 +6705,27 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   /* min-height:0 이 없으면 그리드 아이템이 내용 높이만큼 부풀어 바깥이 넘친다. */
   min-height: 0;
   grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr);
+  /* 행을 1fr 로 늘리면 내용이 없어도 카드가 화면 끝까지 뻗어 속 빈 상자가 된다
+     (실측: 할 일 카드 내용 64px, 카드 높이는 화면 절반). 내용 높이를 따르게
+     하고 위로 붙인다 — 남는 자리는 카드가 아니라 여백으로 둔다. */
+  grid-template-rows: auto auto;
+  align-content: start;
   grid-template-areas:
     'status usage'
     'todos  reports';
   gap: 12px;
+}
+/* 아주 넓은 화면에서는 열을 늘린다. 2열로 두면 카드 하나가 770px 까지 벌어져
+   상태 목록이나 사용량 같은 짧은 내용이 가로로 흩어진다. 3열이면 카드가
+   ~500px 로 좁아지고, 세로로 쌓이던 보고서가 옆에 붙어 화면이 촘촘해진다. */
+@container (min-width: 1260px) {
+  .home { max-width: 1720px; }
+  .home__grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-areas:
+      'status usage   reports'
+      'todos  todos   reports';
+  }
 }
 .home-card--status { grid-area: status; }
 .home-card--todos { grid-area: todos; }
@@ -6728,6 +6750,9 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   }
   .home-todos,
   .home-report__body {
+    /* 세로로 쌓고 바깥이 스크롤하므로 카드 안 상한도 함께 푼다 —
+       max-height 만 남으면 내용이 잘려 도달할 수 없다. */
+    max-height: none;
     overflow-y: visible;
   }
 }
@@ -6849,9 +6874,13 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   flex-direction: column;
   gap: 2px;
   min-height: 0;
+  /* 행이 내용 높이를 따르므로(align-content:start) 상한이 없으면 긴 목록이
+     그리드를 밀어 바깥이 잘린다. 여기서 끊고 카드 안에서 스크롤한다. */
+  max-height: min(46vh, 480px);
   margin: 0;
   padding: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   list-style: none;
 }
 .home-todo {
@@ -6972,7 +7001,9 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
 }
 .home-report__body {
   min-height: 0;
+  max-height: min(40vh, 420px);
   overflow-y: auto;
+  overscroll-behavior: contain;
   margin: 0;
   /* 보고서 본문은 증거 기반 서술이라 줄바꿈이 의미를 갖는다. */
   white-space: pre-wrap;
