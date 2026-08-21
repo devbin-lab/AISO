@@ -195,6 +195,32 @@ def _blocked_reason(url: str) -> str | None:
     return None
 
 
+# 실패 결과의 표식. web_fetch 는 어떤 실패도 예외로 던지지 않고 **문자열로** 돌려준다
+# (툴 계약이 문자열이라 그렇다). 그래서 호출자가 "돌아왔으니 읽은 것"으로 세면
+# 차단 페이지를 근거로 취급하게 된다 — 실제로 그런 오답이 있었다.
+_FETCH_FAILURE_PREFIXES = ("[차단]", "[가져오기 실패]", "[가져오기 불가]", "[오류]")
+_NO_BODY_MARKER = "본문 텍스트를 추출하지 못했습니다"
+# 실측: 정상 문서의 본문은 17,000~30,000자, 차단·부재 페이지는 0자였다. 그 사이
+# 어딘가에 "인터스티셜은 통과시키고 기사만 남기는" 바닥이 필요하다. 200자는
+# 어떤 실제 기사보다 훨씬 낮고 어떤 대기 페이지보다 훨씬 높다.
+MIN_EVIDENCE_BODY_CHARS = 200
+
+
+def fetch_result_is_evidence(result: str) -> bool:
+    """이 결과가 모델이 인용할 수 있는 **실제 본문**인가.
+
+    차단·오류·추출 실패 안내는 사람에게는 유용한 설명이지만 근거가 아니다.
+    이걸 '읽었다'로 세면 상위 루프가 교차확인 넛지를 건너뛰고, 모델은 검색
+    스니펫이나 기억으로 답하면서 '출처를 읽었다'고 말한다.
+    """
+    text = str(result or "").strip()
+    if not text or text.startswith(_FETCH_FAILURE_PREFIXES) or _NO_BODY_MARKER in text:
+        return False
+    # 성공 형식은 "[url] · title" + 빈 줄 + 본문이다.
+    _header, _, body = text.partition('\n\n')
+    return len(body.strip()) >= MIN_EVIDENCE_BODY_CHARS
+
+
 # 브라우저가 아예 못 뜬 경우의 표식. 이 접두사가 붙은 결과만 재시도한다 —
 # 페이지 오류·차단은 서버가 준 답이라 다시 물어도 같은 답이 온다.
 _BROWSER_START_FAILURE = "[가져오기 불가]"

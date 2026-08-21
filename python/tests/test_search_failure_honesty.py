@@ -53,10 +53,21 @@ def test_extract_script_reports_block_count():
 
 # ── 조사 루프가 근거 없는 검색을 성공으로 보고하지 않는다 ──────────────
 
+NL = chr(10)
+
+
 def test_research_loop_marks_evidence_free_search_as_failed():
     from agent_research import _tool_result_ok
 
     assert _tool_result_ok("web_search", "1. 예시 — https://example.com/a") is True
     assert _tool_result_ok("web_search", "[검색 파싱 실패] 'x' — 결과 블록을 찾지 못했습니다") is False
-    # 다른 도구는 이 판정을 적용하지 않는다
-    assert _tool_result_ok("web_fetch", "본문 없음") is True
+    # web_fetch 도 같은 판정을 받는다. 차단·추출 실패를 예외가 아니라 문자열로
+    # 돌려주므로, "돌아왔으니 성공"으로 두면 대기 페이지를 읽고도 성공으로 보고된다.
+    body = "본문 " * 80
+    assert _tool_result_ok("web_fetch", "[https://e.com] . 제목" + NL + NL + body) is True
+    assert _tool_result_ok("web_fetch", "[차단] 사설/내부 IP") is False
+    assert _tool_result_ok(
+        "web_fetch", "[https://e.com] 본문 텍스트를 추출하지 못했습니다 (JS 전용/차단 페이지일 수 있음)."
+    ) is False
+    # 도구가 아닌 이름은 이 판정을 적용하지 않는다
+    assert _tool_result_ok("read_file", "무엇이든") is True

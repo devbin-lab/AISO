@@ -15,6 +15,7 @@ from typing import Any, AsyncGenerator, Awaitable, Callable, Mapping
 
 from agent_prompting import final_response_language_prompt
 from response_language import normalize_response_language
+from webfetch import fetch_result_is_evidence
 from websearch import search_result_is_evidence
 from toolspec import model_tool_schemas
 
@@ -66,15 +67,20 @@ def top_urls_from_search(text: str, n: int) -> list[str]:
 
 
 def _tool_result_ok(name: str, result: str) -> bool:
-    """검색이 근거를 못 냈으면 성공으로 보고하지 않는다.
+    """근거를 못 낸 조사 도구는 성공으로 보고하지 않는다.
 
     예전에는 예외가 없으면 무조건 ok=True 였다. 그래서 검색이 차단되거나 마크업이
     바뀌어 링크를 하나도 못 뽑아도 조사 루프는 '검색 성공'으로 이어갔고, 모델은
     웹을 못 읽은 채 기억으로 답을 썼다 — 예외로 죽는 것보다 나쁜 조용한 오답이다.
+
+    web_fetch 도 같은 병을 앓았다. 차단·추출 실패를 예외가 아니라 문자열로 돌려주므로
+    "돌아왔으니 성공"이 되어, 대기 페이지(예: 'Just a moment…')를 읽고도 ✅ 로 표시됐다.
     """
-    if name != "web_search":
-        return True
-    return search_result_is_evidence(result)
+    if name == "web_search":
+        return search_result_is_evidence(result)
+    if name == "web_fetch":
+        return fetch_result_is_evidence(result)
+    return True
 
 
 async def run_research_chat(
@@ -113,6 +119,7 @@ async def run_research_chat(
     tools_disabled = False
     searched_any = False
     fetched_any = False
+    got_evidence = False
     fetch_nudged = False
     auto_fetched = 0
     seen_urls: set[str] = set()
@@ -260,8 +267,6 @@ async def run_research_chat(
                 continue
             if name == "web_search":
                 searched_any = True
-            else:
-                fetched_any = True
 
             spec = registry[name]
             previous_provider_result = completed_provider_calls.get(provider_tool_call_id) if strict_tool_protocol and isinstance(provider_tool_call_id, str) else None
@@ -290,6 +295,12 @@ async def run_research_chat(
             # 넛지가 "URL을 열어 확인하라"고 밀어붙이는데 열 URL이 없어 모델이 지어낸다.
             if name == "web_search" and not search_result_is_evidence(result):
                 searched_any = False
+            # web_fetch 는 차단·추출 실패도 예외가 아니라 **문자열**로 돌려준다. 돌아왔다는
+            # 이유로 '읽었다'로 세면 아래 교차확인 넛지가 건너뛰어지고, 모델은 스니펫으로
+            # 답하면서 '출처를 읽었다'고 말한다. 실제로 그런 오답이 있었다.
+            if name == "web_fetch" and fetch_result_is_evidence(result):
+                fetched_any = True
+                got_evidence = True
             convo.append({"role": "tool", **({"tool_call_id": provider_tool_call_id} if strict_tool_protocol else {}), "content": result})
 
             if not strict_tool_protocol and name == "web_search" and auto_fetched < AUTO_FETCH_BUDGET:
@@ -303,16 +314,21 @@ async def run_research_chat(
                         fetched_result, _shot = await execute_tool(registry["web_fetch"], Path("."), host, {"url": url})
                         if len(fetched_result) > AUTO_FETCH_CHARS:
                             fetched_result = fetched_result[:AUTO_FETCH_CHARS] + "\n…(원문 일부만 표시)"
-                        yield {"type": "tool_result", "id": auto_call_id, "name": "web_fetch", "ok": True, "output": fetched_result}
+                        fetched_ok = fetch_result_is_evidence(fetched_result)
+                        yield {"type": "tool_result", "id": auto_call_id, "name": "web_fetch", "ok": fetched_ok, "output": fetched_result}
+                        if fetched_ok:
+                            fetched_any = True
+                            got_evidence = True
                     except Exception as error:  # noqa: BLE001
                         fetched_result = f"[오류] 원문 읽기 실패 ({type(error).__name__}): {error}"
                         yield {"type": "tool_result", "id": auto_call_id, "name": "web_fetch", "ok": False, "output": fetched_result}
                     convo.append({"role": "tool", "content": fetched_result})
-                    fetched_any = True
                     auto_fetched += 1
                     did_autofetch = True
 
-        if did_autofetch and not answer_nudged:
+        # 한 페이지도 실제 본문을 얻지 못했다면 "위에서 읽은 출처로 답하라"는 지시는
+        # 없는 것을 가리킨다. 그때는 넛지하지 않고 루프를 돌려 다른 URL을 열게 둔다.
+        if did_autofetch and got_evidence and not answer_nudged:
             answer_nudged = True
             convo.append({
                 "role": "user",
