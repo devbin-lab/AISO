@@ -5361,10 +5361,6 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   background: color-mix(in srgb, var(--bg) 94%, transparent);
   backdrop-filter: blur(10px);
 }
-.settings-savebar .btn {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
 .settings-savebar .form-error { min-width: 0; }
 .saved {
   font-size: 12px;
@@ -6000,6 +5996,17 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
 }
 
 .btn {
+  /* 높이가 고정이므로 글자가 두 줄이 되면 그대로 버튼 밖으로 넘친다.
+     .row 는 가로 flex 라서 창이 좁아지면 버튼도 함께 눌리는데, 그때 한글이
+     아무 데서나 줄바꿈돼 "AI 언로/드"처럼 잘렸다. 세 줄이 함께 막는다:
+     nowrap 으로 줄바꿈 자체를 없애고, flex-shrink:0 으로 눌리지 않게 하고,
+     inline-flex 로 남는 공간에서도 글자를 가운데 둔다.
+     같은 처방이 .settings-savebar .btn 에 국소로 있었는데 여기로 올렸다. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  white-space: nowrap;
   height: 30px;
   padding: 0 14px;
   font: inherit;
