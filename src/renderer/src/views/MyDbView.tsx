@@ -1588,6 +1588,14 @@ function MyDbView({ active }: Props): React.JSX.Element {
     () => calendarMonth.days.reduce((max, day) => Math.max(max, day.count), 0),
     [calendarMonth]
   )
+  const reportsByDate = useMemo(
+    () => new Map(history.dailyReports.map((report) => [report.reportDate, report])),
+    [history.dailyReports]
+  )
+  const todayKey = localDayKey(new Date())
+  // 보고서 패널이 보여 줄 날짜. 달력에서 고르지 않았으면 오늘이다.
+  const reportDate = historyDay ?? todayKey
+  const shownReport = reportsByDate.get(reportDate) ?? null
   // 날짜를 고르면 그 날 것만 보여 준다. 목록 보기에도 그대로 적용된다.
   const visibleHistory = useMemo(
     () => (historyDay ? history.entries.filter((entry) => localDayKey(entry.createdAt) === historyDay) : history.entries),
@@ -2462,9 +2470,11 @@ function MyDbView({ active }: Props): React.JSX.Element {
                             type="button"
                             role="gridcell"
                             className={`mydb-cal__cell mydb-cal__cell--l${intensityOf(day.count, monthPeak)}${day.isToday ? ' is-today' : ''}${historyDay === day.key ? ' is-picked' : ''}`}
-                            aria-label={`${day.key} 변경 ${day.count}건`}
+                            aria-label={`${day.key} 변경 ${day.count}건${day.key && reportsByDate.has(day.key) ? ' · 보고서 있음' : ''}`}
                             aria-pressed={historyDay === day.key}
-                            disabled={day.count === 0}
+                            {...(day.key && reportsByDate.has(day.key) ? { 'data-report': 'yes' } : {})}
+                            /* 변경이 0건이어도 보고서가 있으면 눌러서 볼 수 있어야 한다. */
+                            disabled={day.count === 0 && !(day.key && reportsByDate.has(day.key))}
                             onClick={() => setHistoryDay(historyDay === day.key ? null : day.key)}
                           >
                             <span className="mydb-cal__day">{day.day}</span>
@@ -2474,23 +2484,26 @@ function MyDbView({ active }: Props): React.JSX.Element {
                       ))}
                     </div>
                   </section>
-                  {history.dailyReports.length > 0 && (
-                    <section className="mydb-daily-reports mydb-daily-reports--side" aria-label="My DB 일일 변경 보고서">
+                  <section className="mydb-report-panel" aria-label="My DB 일일 변경 보고서">
+                    <header className="mydb-report-panel__head">
                       <h3>일일 변경 보고서</h3>
-                      {history.dailyReports.map((report) => (
-                        <article
-                          key={report.reportDate}
-                          className={`mydb-daily-report${report.totalChanges === 0 ? ' mydb-daily-report--quiet' : ''}`}
-                        >
-                          <header>
-                            <strong>{formatReportDate(report.reportDate)}</strong>
-                            <span>{report.totalChanges === 0 ? '변경 없음' : `${report.totalChanges}건`}</span>
-                          </header>
-                          <pre>{report.body}</pre>
-                        </article>
-                      ))}
-                    </section>
-                  )}
+                      <strong>{formatReportDate(reportDate)}</strong>
+                      {shownReport && (
+                        <span className="mydb-report-panel__count">
+                          {shownReport.totalChanges === 0 ? '변경 없음' : `${shownReport.totalChanges}건`}
+                        </span>
+                      )}
+                    </header>
+                    {shownReport ? (
+                      <pre className="mydb-report-panel__body">{shownReport.body}</pre>
+                    ) : (
+                      <p className="mydb-report-panel__empty">
+                        {reportDate === todayKey
+                          ? '오늘 보고서는 내일 작성됩니다. 달력에서 날짜를 눌러 지난 보고서를 볼 수 있습니다.'
+                          : '이 날짜의 보고서가 없습니다.'}
+                      </p>
+                    )}
+                  </section>
                   </div>
                 )}
                 {historyView === 'list' && history.dailyReports.length > 0 && (
