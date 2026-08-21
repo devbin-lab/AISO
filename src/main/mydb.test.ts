@@ -797,3 +797,96 @@ test('purge is idempotent enough to survive a double click', async () => {
     await library.dispose()
   }
 })
+
+
+test('일일 보고서가 추가된 자료를 형식·크기·출처까지 알아볼 수 있게 적는다', async () => {
+  const library = await temporaryLibrary()
+  try {
+    // 외부에서 가져온 자료 두 개 — 이름만으로는 무엇인지 알기 어렵다.
+    const plan = join(library.source, '강의계획서.pdf')
+    const sheet = join(library.source, '예산표.xlsx')
+    await writeFile(plan, Buffer.alloc(240_000, 1))
+    await writeFile(sheet, Buffer.alloc(18_000, 1))
+    const core = library.store.createCore('2026-2학기')
+    await library.store.importPaths([plan, sheet], core.id)
+
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000)
+    const report = library.store.ensurePreviousDayReport(tomorrow)
+    assert.ok(report)
+
+    // 무엇이 들어왔는지 — 이름
+    assert.match(report.body, /강의계획서\.pdf/)
+    assert.match(report.body, /예산표\.xlsx/)
+    // 어떤 형식인지
+    assert.match(report.body, /PDF|XLSX|SPREADSHEET|DOCUMENT/i)
+    // 얼마나 큰지 — 크기 표기가 붙는다
+    assert.match(report.body, /\d+(\.\d+)?(KB|MB)/)
+    // 어디서 온 자료인지 — 외부 원본 경로
+    assert.match(report.body, /원본: /)
+    assert.ok(report.body.includes(plan), '외부 원본 경로가 보고서에 남아야 한다')
+    // 요약 줄이 코어와 자료를 구분한다
+    assert.match(report.body, /새 자료 2개/)
+    assert.match(report.body, /추가 용량 /)
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('자료 추가 이력이 어떤 파일이 들어왔는지 이름으로 남긴다', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const a = join(library.source, '회의록.md')
+    const b = join(library.source, '설문결과.csv')
+    await writeFile(a, '# 회의록', 'utf8')
+    await writeFile(b, 'a,b', 'utf8')
+    const core = library.store.createCore('연구')
+    await library.store.importPaths([a, b], core.id)
+
+    // 예전에는 "2개 항목 (파일 2개)" 뿐이라 무엇이 들어왔는지 알 수 없었다.
+    const imported = library.store.history().entries.find((entry) => entry.action === 'imported')
+    assert.ok(imported)
+    assert.match(imported.detail ?? '', /회의록\.md/)
+    assert.match(imported.detail ?? '', /설문결과\.csv/)
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('이미 저장된 보고서는 생성 로직이 바뀌어도 그대로 남는다', async () => {
+  // 보고서는 본문을 텍스트로 굳혀 저장한다. 새 형식이 과거 보고서를 덮어쓰거나
+  // 다시 만들면 사용자가 쌓아 온 기록이 조용히 바뀐다 — 그러면 안 된다.
+  // temporaryLibrary 의 dispose 는 스토어를 닫는데, 이 테스트는 스토어를 두 번
+  // 열었다 닫으므로 직접 정리한다(이중 close 는 'database is not open' 이다).
+  const root = await mkdtemp(join(tmpdir(), 'aiso-mydb-legacy-'))
+  const seed = new MyDbStore(root)   // 스키마를 만든 뒤 닫는다
+  seed.close()
+  try {
+    const database = new DatabaseSync(join(root, 'library.sqlite3'))
+    const legacyBody = '2026-08-10 My DB 변경 보고\n총 3건의 변경 · 새 항목 2개\n\n[예전 형식 본문]'
+    database
+      .prepare(`INSERT INTO mydb_daily_reports (report_date, generated_at, total_changes, body)
+       VALUES (?, ?, ?, ?)`)
+      .run('2026-08-10', '2026-08-11T00:10:00.000Z', 3, legacyBody)
+    database.close()
+
+    const reopened = new MyDbStore(root)
+    try {
+      const stored = reopened.history().dailyReports.find((r) => r.reportDate === '2026-08-10')
+      assert.ok(stored, '예전 보고서가 그대로 조회되어야 한다')
+      assert.equal(stored.body, legacyBody, '예전 본문이 한 글자도 바뀌면 안 된다')
+      assert.equal(stored.totalChanges, 3)
+
+      // 같은 날짜를 다시 만들려 해도 덮어쓰지 않는다.
+      const again = reopened.ensurePreviousDayReport(new Date('2026-08-11T10:00:00+09:00'))
+      assert.equal(again, null, '이미 있는 날짜는 다시 만들지 않는다')
+      const after = reopened.history().dailyReports.find((r) => r.reportDate === '2026-08-10')
+      assert.equal(after?.body, legacyBody)
+    } finally {
+      reopened.close()
+    }
+  } finally {
+    // Windows 는 방금 닫은 sqlite 핸들을 잠시 붙들고 있어 unlink 가 EBUSY 로 실패한다.
+    // 검증은 이미 끝났고 남는 건 OS 임시 폴더뿐이므로 정리 실패로 테스트를 깨뜨리지 않는다.
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {})
+  }
+})

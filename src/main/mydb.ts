@@ -135,6 +135,12 @@ interface DailyCreatedNodeRow {
   kind: MyDbNodeKind
   title: string
   created_at: string
+  /** 파일에만 있다. 코어에는 전부 null 이 들어온다. */
+  extension: string | null
+  file_type: string | null
+  size: number | null
+  /** 외부 원본에서 가져온 파일이면 그 경로. 직접 만든 파일은 null. */
+  source_path: string | null
 }
 
 interface RevisionRow {
@@ -329,6 +335,26 @@ function previousLocalDay(reference: Date): Date {
   result.setHours(0, 0, 0, 0)
   result.setDate(result.getDate() - 1)
   return result
+}
+
+/** 보고서에 쓰는 파일 크기 표기. 소수 한 자리까지만 — 읽으려고 넣은 값이다. */
+function formatBytes(size: number): string {
+  if (!Number.isFinite(size) || size <= 0) return ''
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = size
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${unit === 0 ? value : Number(value.toFixed(1))}${units[unit]}`
+}
+
+/** 변경 이력 줄과 같은 24시간 표기(HH:MM). 파싱 불가한 값은 조용히 비운다. */
+function reportTimeOf(iso: string): string {
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return ''
+  return at.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
 function historyActionReportLabel(action: string): string {
@@ -602,12 +628,16 @@ export class MyDbStore {
        WHERE created_at >= ? AND created_at < ?
        ORDER BY created_at ASC, id ASC`
     ).all(reportDay.toISOString(), dayEnd.toISOString()) as unknown as HistoryRow[]
+    // 파일은 무엇이 들어왔는지 알아볼 수 있게 형식·크기·외부 원본까지 함께 읽는다.
+    // 코어에는 해당 열이 없으므로 NULL 을 채워 UNION 의 열 수를 맞춘다.
     const createdNodes = this.database.prepare(
-      `SELECT id, 'core' AS kind, title, created_at
+      `SELECT id, 'core' AS kind, title, created_at,
+              NULL AS extension, NULL AS file_type, NULL AS size, NULL AS source_path
        FROM mydb_cores
        WHERE created_at >= ? AND created_at < ?
        UNION ALL
-       SELECT id, 'file' AS kind, title, created_at
+       SELECT id, 'file' AS kind, title, created_at,
+              extension, file_type, size, source_path
        FROM mydb_items
        WHERE created_at >= ? AND created_at < ?
        ORDER BY created_at ASC, title COLLATE NOCASE`
@@ -1030,7 +1060,19 @@ export class MyDbStore {
     if (result.createdNodes.length > 0) {
       const coreCount = result.createdNodes.filter((node) => node.kind === 'core').length
       const fileCount = result.createdNodes.filter((node) => node.kind === 'file').length
-      const detail = [coreCount > 0 ? `코어 ${coreCount}개` : '', fileCount > 0 ? `파일 ${fileCount}개` : ''].filter(Boolean).join(' · ')
+      // 개수만 남기면 나중에 "무엇이 들어왔는지" 알 수 없다. 이름을 함께 적되,
+      // 대량 가져오기에서 detail 이 무한정 길어지지 않게 앞 5개까지만 남긴다.
+      // (전체 목록은 보고서의 [새로 생성된 코어와 파일] 절이 항상 보여 준다.)
+      const names = result.createdNodes.filter((node) => node.kind === 'file').map((node) => node.title)
+      // 한 개만 들어왔으면 subjectTitle 이 이미 그 이름이다 — 같은 이름을 두 번 적지 않는다.
+      const listed = names.length > 1 ? names : []
+      const shown = listed.slice(0, 5).join(', ')
+      const rest = listed.length > 5 ? ` 외 ${listed.length - 5}개` : ''
+      const detail = [
+        coreCount > 0 ? `코어 ${coreCount}개` : '',
+        fileCount > 0 ? `파일 ${fileCount}개` : '',
+        shown ? `${shown}${rest}` : ''
+      ].filter(Boolean).join(' · ')
       this.recordHistory({
         action: 'imported',
         subjectTitle: result.createdNodes.length === 1 ? result.createdNodes[0]!.title : `${result.createdNodes.length}개 항목`,
@@ -1178,20 +1220,41 @@ export class MyDbStore {
       }
     }
 
+    /**
+     * 추가된 자료가 무엇인지 알아볼 수 있게 붙이는 꼬리표.
+     * 이름만으로는 "무엇이 들어왔는지" 확인이 안 돼서, 형식·크기·시각과
+     * 외부에서 가져온 파일이면 그 원본 경로까지 함께 적는다.
+     */
+    const fileFacts = (created: DailyCreatedNodeRow): string => {
+      const facts: string[] = []
+      // 확장자가 있으면 그쪽이 구체적이다 — file_type 은 'document' 처럼 뭉뚱그려진다.
+      const kind = (created.extension || created.file_type || '').replace(/^\./, '')
+      if (kind) facts.push(kind.toUpperCase())
+      if (typeof created.size === 'number' && created.size > 0) facts.push(formatBytes(created.size))
+      const time = reportTimeOf(created.created_at)
+      if (time) facts.push(time)
+      return facts.join(' · ')
+    }
+
     const createdGroups = new Map<string, { title: string; cores: string[]; files: string[] }>()
     const unlinkedCreated: string[] = []
     for (const created of createdNodes) {
       const node = nodesById.get(created.id) ?? created
       const { rootId, path } = displayPathFor(node, created.title)
       const label = path.slice(1).join(' > ') || path[0] || created.title
+      const isFile = created.kind === 'file'
+      const facts = isFile ? fileFacts(created) : reportTimeOf(created.created_at)
+      // 외부 원본에서 가져온 자료는 출처를 남긴다 — 어디서 온 자료인지가 곧 근거다.
+      const origin = isFile && created.source_path ? `\n      원본: ${created.source_path}` : ''
+      const entry = `${label}${facts ? ` (${facts})` : ''}${origin}`
       if (!rootId) {
-        unlinkedCreated.push(`- ${created.kind === 'core' ? '코어' : '파일'}: ${label}`)
+        unlinkedCreated.push(`- ${isFile ? '파일' : '코어'}: ${entry}`)
         continue
       }
       const root = nodesById.get(rootId)
       const group = createdGroups.get(rootId) ?? { title: root?.title ?? '연결 경로 확인 필요', cores: [], files: [] }
-      if (created.kind === 'core') group.cores.push(label)
-      else group.files.push(label)
+      if (created.kind === 'core') group.cores.push(entry)
+      else group.files.push(entry)
       createdGroups.set(rootId, group)
     }
     const createdSections = [...createdGroups.values()]
@@ -1233,7 +1296,18 @@ export class MyDbStore {
     const changeBody = sections.length > 0
       ? sections.join('\n').trimEnd()
       : '전날 기록된 My DB 변경이 없습니다.'
-    return `${reportDate} My DB 변경 보고\n총 ${rows.length}건의 변경 · 새 항목 ${createdNodes.length}개\n\n[새로 생성된 코어와 파일]\n${creationBody}\n\n[변경 이력]\n${changeBody}`
+    // 요약 줄은 "무엇이 얼마나 늘었는지"를 한눈에 보여 준다. 항목 수만 적으면
+    // 코어가 늘었는지 자료가 들어왔는지 구분이 안 된다.
+    const newCores = createdNodes.filter((node) => node.kind === 'core').length
+    const newFiles = createdNodes.filter((node) => node.kind === 'file').length
+    const addedBytes = createdNodes.reduce((sum, node) => sum + (node.size ?? 0), 0)
+    const summary = [
+      `총 ${rows.length}건의 변경`,
+      newCores > 0 ? `새 코어 ${newCores}개` : '',
+      newFiles > 0 ? `새 자료 ${newFiles}개` : '',
+      addedBytes > 0 ? `추가 용량 ${formatBytes(addedBytes)}` : ''
+    ].filter(Boolean).join(' · ')
+    return `${reportDate} My DB 변경 보고\n${summary}\n\n[새로 생성된 코어와 파일]\n${creationBody}\n\n[변경 이력]\n${changeBody}`
   }
 
   private initializeSchema(): void {
