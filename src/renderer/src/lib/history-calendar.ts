@@ -99,6 +99,32 @@ export function shiftMonth(yearMonth: string, delta: number): string {
   return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}`
 }
 
+/** 어제(로컬). 보고서는 하루가 끝나야 쓸 수 있으므로 '가장 최근에 완성된 날'이다. */
+export function previousDayKey(today: Date = new Date()): string {
+  const at = new Date(today)
+  at.setHours(0, 0, 0, 0)
+  at.setDate(at.getDate() - 1)
+  return localDayKey(at)
+}
+
+/**
+ * 보고서 패널이 처음 보여 줄 날짜.
+ *
+ * 오늘로 두면 늘 비어 있다 — 보고서는 하루가 끝난 뒤(다음 날) 쓰이기 때문이다
+ * (ensurePreviousDayReport). 그래서 기본은 **전날**이다.
+ *
+ * 앱을 며칠 꺼 두면 전날 보고서도 없을 수 있다. 그때는 있는 것 중 가장 최근
+ * 보고서를 보여 준다 — 빈 화면보다 낫고, 어느 날짜인지는 패널이 크게 적는다.
+ * 보고서가 하나도 없으면 전날을 그대로 돌려준다(빈 상태 문구용).
+ */
+export function defaultReportDate(reportDates: Iterable<string>, today: Date = new Date()): string {
+  const yesterday = previousDayKey(today)
+  const dates = [...reportDates]
+  if (dates.includes(yesterday)) return yesterday
+  const past = dates.filter((date) => date <= yesterday).sort()
+  return past.length > 0 ? past[past.length - 1]! : yesterday
+}
+
 /** 넘겨 볼 수 있는 최소 창(개월). 이력이 없거나 한 달뿐이어도 달력은 움직여야 한다. */
 export const MIN_BROWSE_MONTHS = 12
 

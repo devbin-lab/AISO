@@ -16,7 +16,7 @@ import type {
 import { CloseIcon, DownloadIcon, EditIcon, FileIcon, FolderIcon, GraphIcon, LinkIcon, SearchIcon, TrashIcon, UnlinkIcon } from '../components/icons'
 import { confirmDialog } from '../components/ConfirmDialog'
 import { getMyDbBridge } from '../lib/mydb'
-import { buildMonth, countByDay, intensityOf, localDayKey, monthRange, monthsWithHistory, shiftMonth } from '../lib/history-calendar'
+import { buildMonth, countByDay, defaultReportDate, intensityOf, localDayKey, monthRange, monthsWithHistory, previousDayKey, shiftMonth } from '../lib/history-calendar'
 import { applyRepulsion, BARNES_HUT_THETA, buildQuadTree } from './mydb-graph/quadtree'
 import { buildGraphRoutes } from './mydb-graph/routing'
 
@@ -1592,9 +1592,10 @@ function MyDbView({ active }: Props): React.JSX.Element {
     () => new Map(history.dailyReports.map((report) => [report.reportDate, report])),
     [history.dailyReports]
   )
-  const todayKey = localDayKey(new Date())
-  // 보고서 패널이 보여 줄 날짜. 달력에서 고르지 않았으면 오늘이다.
-  const reportDate = historyDay ?? todayKey
+  const yesterdayKey = previousDayKey()
+  // 보고서 패널이 보여 줄 날짜. 달력에서 고르지 않았으면 전날이다 —
+  // 오늘 보고서는 하루가 끝나야 쓰이므로 기본값으로 두면 늘 비어 있다.
+  const reportDate = historyDay ?? defaultReportDate(reportsByDate.keys())
   const shownReport = reportsByDate.get(reportDate) ?? null
   // 날짜를 고르면 그 날 것만 보여 준다. 목록 보기에도 그대로 적용된다.
   const visibleHistory = useMemo(
@@ -2498,8 +2499,8 @@ function MyDbView({ active }: Props): React.JSX.Element {
                       <pre className="mydb-report-panel__body">{shownReport.body}</pre>
                     ) : (
                       <p className="mydb-report-panel__empty">
-                        {reportDate === todayKey
-                          ? '오늘 보고서는 내일 작성됩니다. 달력에서 날짜를 눌러 지난 보고서를 볼 수 있습니다.'
+                        {reportDate === yesterdayKey
+                          ? '아직 작성된 보고서가 없습니다. 보고서는 하루가 끝난 뒤 작성됩니다.'
                           : '이 날짜의 보고서가 없습니다.'}
                       </p>
                     )}

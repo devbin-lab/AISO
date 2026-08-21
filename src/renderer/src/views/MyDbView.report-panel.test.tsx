@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { localDayKey } from '../lib/history-calendar'
+import { defaultReportDate, localDayKey, previousDayKey } from '../lib/history-calendar'
 import type { MyDbDailyReport, MyDbHistoryEntry } from '../../../shared/mydb'
 
 /**
@@ -8,9 +8,8 @@ import type { MyDbDailyReport, MyDbHistoryEntry } from '../../../shared/mydb'
  * MyDbView 는 통째로 렌더하기엔 무겁고(그래프 캔버스·브리지) 이 규칙은 순수
  * 계산이라, 화면이 쓰는 것과 같은 식을 여기서 고정한다.
  *
- * 규칙: 달력에서 고른 날(historyDay)이 있으면 그 날, 없으면 오늘.
- * 보고서는 **전날 것**을 다음 날 만들기 때문에 오늘 보고서는 대개 없다 —
- * 그때 빈 화면 대신 왜 없는지 알려 줘야 한다.
+ * 규칙: 달력에서 고른 날(historyDay)이 있으면 그 날, 없으면 **전날**.
+ * 보고서는 하루가 끝난 뒤 쓰이므로 오늘을 기본으로 두면 늘 비어 있다.
  */
 
 function report(reportDate: string, totalChanges = 0): MyDbDailyReport {
@@ -20,26 +19,27 @@ function report(reportDate: string, totalChanges = 0): MyDbDailyReport {
 /** 화면과 같은 선택 규칙. */
 function pick(historyDay: string | null, reports: MyDbDailyReport[], today: Date) {
   const byDate = new Map(reports.map((r) => [r.reportDate, r]))
-  const todayKey = localDayKey(today)
-  const reportDate = historyDay ?? todayKey
-  return { reportDate, shown: byDate.get(reportDate) ?? null, isToday: reportDate === todayKey }
+  const reportDate = historyDay ?? defaultReportDate(byDate.keys(), today)
+  return { reportDate, shown: byDate.get(reportDate) ?? null, isYesterday: reportDate === previousDayKey(today) }
 }
 
 const TODAY = new Date(2026, 7, 22)
 const REPORTS = [report('2026-08-21', 5), report('2026-08-20'), report('2026-08-16', 5)]
 
 describe('보고서 패널이 보여 줄 날짜', () => {
-  it('기본은 오늘이다', () => {
-    const { reportDate, isToday } = pick(null, REPORTS, TODAY)
-    expect(reportDate).toBe('2026-08-22')
-    expect(isToday).toBe(true)
+  it('기본은 전날이고 내용이 채워져 있다', () => {
+    // 오늘(8/22)로 두면 늘 비어 있다. 전날(8/21) 보고서를 바로 보여 준다.
+    const { reportDate, shown, isYesterday } = pick(null, REPORTS, TODAY)
+    expect(reportDate).toBe('2026-08-21')
+    expect(isYesterday).toBe(true)
+    expect(shown?.totalChanges).toBe(5)
   })
 
-  it('오늘 보고서가 아직 없으면 비어 있다 — 전날 것을 다음 날 만들기 때문', () => {
-    const { shown, isToday } = pick(null, REPORTS, TODAY)
-    expect(shown).toBeNull()
-    // 화면은 이때 '오늘 보고서는 내일 작성됩니다' 를 보여 준다.
-    expect(isToday).toBe(true)
+  it('전날 보고서가 없으면 있는 것 중 가장 최근을 보여 준다', () => {
+    // 앱을 며칠 꺼 두면 전날 보고서가 없다.
+    const { reportDate, shown } = pick(null, [report('2026-08-18', 3)], TODAY)
+    expect(reportDate).toBe('2026-08-18')
+    expect(shown?.totalChanges).toBe(3)
   })
 
   it('달력에서 고른 날의 보고서를 보여 준다', () => {
@@ -57,9 +57,9 @@ describe('보고서 패널이 보여 줄 날짜', () => {
   })
 
   it('보고서가 없는 날을 고르면 그 사실을 알린다', () => {
-    const { shown, isToday } = pick('2026-08-19', REPORTS, TODAY)
+    const { shown, isYesterday } = pick('2026-08-19', REPORTS, TODAY)
     expect(shown).toBeNull()
-    expect(isToday).toBe(false) // 오늘이 아니므로 '이 날짜의 보고서가 없습니다'
+    expect(isYesterday).toBe(false) // '이 날짜의 보고서가 없습니다'
   })
 })
 

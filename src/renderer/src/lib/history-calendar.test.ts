@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildMonth, countByDay, intensityOf, localDayKey, monthRange, monthsWithHistory, shiftMonth } from './history-calendar'
+import { buildMonth, countByDay, defaultReportDate, intensityOf, localDayKey, monthRange, monthsWithHistory, previousDayKey, shiftMonth } from './history-calendar'
 import type { MyDbHistoryEntry } from '../../../shared/mydb'
 
 function entry(createdAt: string, id = createdAt): MyDbHistoryEntry {
@@ -136,5 +136,35 @@ describe('달력 월 이동', () => {
     ]
     const range = monthRange(entries, new Date(2026, 7, 22))
     expect(range.max).toBe('2026-12')
+  })
+})
+
+describe('보고서 패널 기본 날짜', () => {
+  const TODAY = new Date(2026, 7, 22)
+
+  it('전날을 기본으로 한다', () => {
+    // 오늘로 두면 늘 비어 있다 — 보고서는 하루가 끝난 뒤 쓰인다.
+    expect(previousDayKey(TODAY)).toBe('2026-08-21')
+    expect(defaultReportDate(['2026-08-21', '2026-08-20'], TODAY)).toBe('2026-08-21')
+  })
+
+  it('달 경계를 넘는다', () => {
+    expect(previousDayKey(new Date(2026, 8, 1))).toBe('2026-08-31')
+    expect(previousDayKey(new Date(2026, 0, 1))).toBe('2025-12-31')
+  })
+
+  it('전날 보고서가 없으면 있는 것 중 가장 최근을 보여 준다', () => {
+    // 앱을 며칠 꺼 두면 전날 보고서가 없다. 빈 화면보다 최근 것이 낫다.
+    expect(defaultReportDate(['2026-08-18', '2026-08-16'], TODAY)).toBe('2026-08-18')
+  })
+
+  it('미래 날짜 보고서는 기본으로 고르지 않는다', () => {
+    // 시계를 바꿨거나 이관한 경우 미래 기록이 있을 수 있다.
+    expect(defaultReportDate(['2026-09-30', '2026-08-16'], TODAY)).toBe('2026-08-16')
+  })
+
+  it('보고서가 하나도 없으면 전날을 돌려준다', () => {
+    // 빈 상태 문구가 '아직 작성된 보고서가 없습니다' 를 고를 수 있어야 한다.
+    expect(defaultReportDate([], TODAY)).toBe('2026-08-21')
   })
 })
