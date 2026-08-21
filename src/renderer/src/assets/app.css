@@ -6649,6 +6649,10 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
      넘치는 내용(할 일 목록·보고서 본문)은 각 카드가 안에서 스크롤한다. */
   display: flex;
   flex-direction: column;
+  /* 카드가 화면을 다 채우면 속이 빈 채로 커진다. 자연 높이로 두고 남는 자리를
+     위아래로 나눠 화면 중앙에 놓는다 — 내용이 많아지면 아래 카드 안에서
+     스크롤하므로 중앙 정렬이 풀리지 않는다. */
+  justify-content: center;
   gap: 14px;
   height: 100%;
   /* 1180px 고정이라 전체화면(1800px)에서 가로의 34% 가 빈 채로 남았다(실측).
@@ -6701,14 +6705,16 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
 
 .home__grid {
   display: grid;
-  flex: 1;
+  /* 남는 높이를 삼키지 않는다(예전 flex:1). 그래야 위 justify-content 가
+     의미를 갖고, 카드도 내용에 맞는 크기로 남는다. */
+  flex: 0 1 auto;
   /* min-height:0 이 없으면 그리드 아이템이 내용 높이만큼 부풀어 바깥이 넘친다. */
   min-height: 0;
   grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
-  /* 위 줄은 짧은 요약(상태·사용량)이라 내용 높이로 두고, 아래 줄이 남는 높이를
-     가져간다. 카드를 전부 늘리면 속 빈 상자가 되고(할 일 내용 64px), 전부
-     내용 높이로 두면 화면 아래가 통째로 빈다 — 목록이 든 줄만 늘린다. */
-  grid-template-rows: auto minmax(0, 1fr);
+  /* 두 줄 모두 내용 높이. 아래 줄이 남는 높이를 다 가져가면 목록이 짧을 때
+     카드 아래가 그대로 빈다(실측: 카드 600px 에 내용 200px). 대신 목록에
+     상한을 둬 아래 줄이 위 줄의 두 배를 넘지 않게 한다. */
+  grid-template-rows: auto auto;
   grid-template-areas:
     'status  usage'
     'todos   reports'
@@ -6744,6 +6750,9 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   }
   .home {
     height: auto;
+    /* 세로로 쌓고 바깥이 스크롤하므로 중앙 정렬은 의미가 없다 —
+       남겨 두면 내용이 위로 잘려 도달할 수 없다. */
+    justify-content: flex-start;
     overflow: visible;
   }
   .home__grid {
@@ -6754,7 +6763,9 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   .home-todos,
   .home-recent,
   .home-report__body {
-    /* 세로로 쌓고 바깥이 스크롤하므로 카드 안 스크롤을 푼다. */
+    /* 세로로 쌓고 바깥이 스크롤하므로 카드 안 스크롤과 상한을 함께 푼다 —
+       max-height 만 남으면 내용이 잘려 도달할 수 없다. */
+    max-height: none;
     overflow-y: visible;
   }
 }
@@ -6876,9 +6887,9 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   flex-direction: column;
   gap: 2px;
   min-height: 0;
-  /* 상한을 두지 않는다 — 행이 남는 높이를 가져가므로(1fr) 카드가 화면에 맞고,
-     넘치는 만큼만 여기서 스크롤한다. 고정 상한을 두면 카드는 큰데 목록만
-     중간에서 끊겨 아래가 빈다. */
+  /* 아래 줄 높이를 정하는 값이다. 예전에는 남는 높이를 전부 가져가 카드가
+     600px 인데 내용은 200px 이었다. 여기서 끊고 넘치면 스크롤한다. */
+  max-height: min(30vh, 320px);
   margin: 0;
   padding: 0;
   overflow-y: auto;
@@ -7007,6 +7018,7 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   flex-direction: column;
   gap: 1px;
   min-height: 0;
+  max-height: min(30vh, 320px);
   margin: 0;
   padding: 0;
   overflow-y: auto;
@@ -7062,6 +7074,8 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
 
 .home-report__body {
   min-height: 0;
+  /* 보고서는 두 줄을 걸치므로 아래 줄 두 개를 합한 만큼까지 허용한다. */
+  max-height: min(52vh, 560px);
   overflow-y: auto;
   overscroll-behavior: contain;
   margin: 0;
