@@ -531,3 +531,269 @@ test('My DB clear removes only library-owned data and starts a fresh library', a
     ])
   }
 })
+
+// ── 보존 정책 — 무한 누적 차단 ─────────────────────────────────────────
+
+test('My DB keeps graph checkpoints bounded and drops the restore button for pruned ones', async () => {
+  // 구조 변경마다 전체 그래프 JSON을 저장하므로 정리가 없으면 라이브러리가 커질수록
+  // 저장량이 2차로 증가한다. 복원 버튼은 히스토리 목록에서만 노출되므로 한도 밖
+  // 시점은 UI에서 도달할 수 없다 — 지워도 잃는 기능이 없다.
+  const library = await temporaryLibrary()
+  try {
+    const core = library.store.createCore('보존 테스트')
+    for (let index = 0; index < 240; index += 1) {
+      await library.store.renameNode(core.id, `이름 ${index}`)
+    }
+
+    const db = new DatabaseSync(join(library.root, 'library.sqlite3'), { readOnly: true })
+    try {
+      const total = db.prepare('SELECT COUNT(*) AS n FROM mydb_graph_checkpoints').get() as { n: number }
+      assert.ok(total.n <= 200, `체크포인트가 한도를 넘었다: ${total.n}`)
+      assert.ok(total.n > 0, '전부 지워졌다 — 최신 시점은 남아야 한다')
+
+      // 잘려나간 시점을 가리키던 히스토리 행은 버튼이 사라져야 한다(id가 NULL).
+      const dangling = db.prepare(
+        `SELECT COUNT(*) AS n FROM mydb_history
+          WHERE graph_checkpoint_id IS NOT NULL
+            AND graph_checkpoint_id NOT IN (SELECT id FROM mydb_graph_checkpoints)`
+      ).get() as { n: number }
+      assert.equal(dangling.n, 0, '없는 시점을 가리키는 복원 버튼이 남았다')
+    } finally {
+      db.close()
+    }
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('My DB keeps every item first revision while bounding the rest', async () => {
+  // "수정되면 어떻게 수정되었는지 기록이 남아서 복구할 수 있으면 좋겠다"가 요구사항이다.
+  // 초기본으로 되돌리기는 한도와 무관하게 언제나 보장돼야 한다.
+  const library = await temporaryLibrary()
+  try {
+    const sourceFile = join(library.source, 'note.md')
+    await writeFile(sourceFile, 'v0\n', 'utf8')
+    const imported = await library.store.importPaths([sourceFile])
+    const file = imported.createdNodes[0]!
+
+    for (let index = 1; index <= 40; index += 1) {
+      await writeFile(library.store.resolveItemPath(file.id), `v${index}\n`, 'utf8')
+      await library.store.fileHistory(file.id)   // 변경을 감지해 리비전을 남긴다
+    }
+
+    const db = new DatabaseSync(join(library.root, 'library.sqlite3'), { readOnly: true })
+    try {
+      const rows = db.prepare(
+        'SELECT sequence FROM mydb_revisions WHERE item_id = ? ORDER BY sequence'
+      ).all(file.id) as Array<{ sequence: number }>
+      assert.ok(rows.length <= 31, `리비전이 한도를 넘었다: ${rows.length}`)
+      assert.equal(rows[0]?.sequence, 1, '초기본이 사라졌다 — 처음 상태로 복구할 수 없다')
+
+      // 남은 리비전의 스냅샷 파일이 실제로 존재해야 한다(행만 남고 파일이 없으면
+      // 복구 버튼이 있는데 열 수 없다).
+      const kept = db.prepare(
+        'SELECT snapshot_relative_path FROM mydb_revisions WHERE item_id = ?'
+      ).all(file.id) as Array<{ snapshot_relative_path: string }>
+      for (const row of kept) {
+        assert.ok(
+          existsSync(join(library.root, row.snapshot_relative_path)),
+          `남은 리비전의 파일이 없다: ${row.snapshot_relative_path}`
+        )
+      }
+    } finally {
+      db.close()
+    }
+  } finally {
+    await library.dispose()
+  }
+})
+
+// ─── 휴지통 완전 삭제 ────────────────────────────────────────────────────
+
+test('purge refuses a node that is not in the trash', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const core = library.store.createCore('살아 있는 코어')
+    await assert.rejects(
+      () => library.store.purgeNode(core.id),
+      /휴지통에 있는 항목만/,
+      '휴지통을 거치지 않고 지울 수 있으면 두 단계 삭제가 아니다'
+    )
+    assert.equal(library.store.snapshot().nodes.some((n) => n.id === core.id), true)
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('purging a file removes its row, its managed copy and every revision snapshot', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const sourceFile = join(library.source, 'notes.md')
+    await writeFile(sourceFile, '# v1\n', 'utf8')
+    const imported = await library.store.importPaths([sourceFile], null)
+    const file = imported.createdNodes[0]!
+
+    // 두 번째 버전을 만들어 리비전 스냅숏이 실제로 존재하게 한다.
+    const managed = join(library.root, file.relativePath!)
+    await writeFile(managed, '# v2\n', 'utf8')
+    const history = await library.store.fileHistory(file.id)
+    assert.ok(history.revisions.length >= 2, '리비전이 만들어져야 이 테스트가 의미를 갖는다')
+
+    const revisionDir = join(library.root, 'revisions', file.id)
+    assert.equal(existsSync(managed), true)
+    assert.equal(existsSync(revisionDir), true)
+
+    library.store.deleteNode(file.id)
+    await library.store.purgeNode(file.id)
+
+    assert.equal(existsSync(managed), false, '보관 파일이 남았다')
+    assert.equal(existsSync(revisionDir), false, '버전 스냅숏이 남았다')
+    assert.equal(library.store.trash().nodes.some((n) => n.id === file.id), false)
+    assert.equal(library.store.snapshot().nodes.some((n) => n.id === file.id), false)
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('purging never touches the user original outside My DB', async () => {
+  // My DB는 원본의 복사본만 관리한다. 완전 삭제가 사용자의 원본까지 지우면 재앙이다.
+  const library = await temporaryLibrary()
+  try {
+    const sourceFile = join(library.source, 'original.md')
+    await writeFile(sourceFile, '# 원본\n', 'utf8')
+    const file = (await library.store.importPaths([sourceFile], null)).createdNodes[0]!
+
+    library.store.deleteNode(file.id)
+    await library.store.purgeNode(file.id)
+
+    assert.equal(existsSync(sourceFile), true, '사용자 원본을 지웠다')
+    assert.equal(await readFile(sourceFile, 'utf8'), '# 원본\n')
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('purge keeps the history trail and records the deletion', async () => {
+  // "수정되면 어떻게 수정되었는지 기록이 남아서" — 완전 삭제는 대상만 지우고 기록은 남긴다.
+  const library = await temporaryLibrary()
+  try {
+    const sourceFile = join(library.source, 'kept.md')
+    await writeFile(sourceFile, 'x', 'utf8')
+    const file = (await library.store.importPaths([sourceFile], null)).createdNodes[0]!
+
+    library.store.deleteNode(file.id)
+    await library.store.purgeNode(file.id)
+
+    const actions = library.store.history().entries.map((e) => e.action)
+    assert.equal(actions.includes('imported'), true, '과거 기록이 사라졌다')
+    assert.equal(actions.includes('moved_to_trash'), true)
+    assert.equal(actions.includes('purged'), true)
+    const purged = library.store.history().entries.find((e) => e.action === 'purged')
+    assert.equal(purged?.subjectTitle, 'kept.md', '무엇을 지웠는지 남아야 한다')
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('restoring a checkpoint taken before a purge does not resurrect the purged node', async () => {
+  // 이것이 완전 삭제를 막고 있던 이유다. 체크포인트 복원은 스냅숏의 모든 행을
+  // 다시 INSERT 하므로, 묘비가 없으면 파일 없는 노드가 그래프에 되살아난다.
+  const library = await temporaryLibrary()
+  try {
+    const sourceFile = join(library.source, 'doomed.md')
+    await writeFile(sourceFile, 'x', 'utf8')
+    const file = (await library.store.importPaths([sourceFile], null)).createdNodes[0]!
+    const core = library.store.createCore('시점 확보용')  // 체크포인트를 만드는 동작
+
+    const checkpointId = library.store.history().entries
+      .find((e) => e.graphCheckpointId)?.graphCheckpointId
+    assert.ok(checkpointId, '체크포인트가 있어야 이 테스트가 의미를 갖는다')
+
+    library.store.deleteNode(file.id)
+    await library.store.purgeNode(file.id)
+    library.store.restoreGraphCheckpoint(checkpointId!)
+
+    const all = [...library.store.snapshot().nodes, ...library.store.trash().nodes]
+    assert.equal(all.some((n) => n.id === file.id), false, '완전 삭제한 노드가 되살아났다')
+    // 같은 시점의 다른 노드는 정상 복원되어야 한다 — 가드가 과하게 작동하면 안 된다.
+    assert.equal(
+      [...library.store.snapshot().nodes, ...library.store.trash().nodes].some((n) => n.id === core.id),
+      true
+    )
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('checkpoint restore skips a file whose bytes vanished outside My DB', async () => {
+  // 묘비와 별개의 안전망. 어떤 이유로든 보관 파일이 사라졌다면 되살리지 않는다 —
+  // 그래프에는 보이지만 아무것도 열 수 없는 노드가 생기기 때문이다.
+  const root = await mkdtemp(join(tmpdir(), 'aiso-mydb-library-'))
+  const source = await mkdtemp(join(tmpdir(), 'aiso-mydb-source-'))
+  const first = new MyDbStore(root)
+  let reopened: MyDbStore | null = null
+  try {
+    const sourceFile = join(source, 'lost.md')
+    await writeFile(sourceFile, 'x', 'utf8')
+    const file = (await first.importPaths([sourceFile], null)).createdNodes[0]!
+    first.createCore('시점 확보용')
+    const checkpointId = first.history().entries.find((e) => e.graphCheckpointId)?.graphCheckpointId
+    assert.ok(checkpointId, '체크포인트가 있어야 이 테스트가 의미를 갖는다')
+
+    first.close()
+    await rm(join(root, file.relativePath!), { force: true })
+
+    reopened = new MyDbStore(root)
+    reopened.restoreGraphCheckpoint(checkpointId!)
+    // 살아 있는 그래프에는 올라오지 않는다 — 열 수 없는 노드를 보여주면 안 된다.
+    assert.equal(
+      reopened.snapshot().nodes.some((n) => n.id === file.id), false,
+      '바이트가 없는 파일을 살아 있는 그래프에 되살렸다'
+    )
+    // 다만 행 자체를 지우지는 않는다. 휴지통에 남겨 사용자가 판단하게 한다 —
+    // 파일이 없어졌다는 이유로 시스템이 기록을 소멸시키면 복구 여지가 사라진다.
+    assert.equal(
+      reopened.trash().nodes.some((n) => n.id === file.id), true,
+      '휴지통에도 남지 않아 사용자가 상황을 알 수 없다'
+    )
+  } finally {
+    reopened?.close()
+    await Promise.all([
+      rm(root, { recursive: true, force: true }),
+      rm(source, { recursive: true, force: true })
+    ])
+  }
+})
+
+test('purging a core drops its edges so no dangling link survives a restore', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const core = library.store.createCore('지울 코어')
+    const sourceFile = join(library.source, 'child.md')
+    await writeFile(sourceFile, 'x', 'utf8')
+    const child = (await library.store.importPaths([sourceFile], core.id)).createdNodes[0]!
+    assert.equal(library.store.snapshot().edges.length, 1)
+
+    library.store.deleteNode(core.id)
+    await library.store.purgeNode(core.id)
+
+    assert.equal(library.store.snapshot().edges.length, 0, '끊긴 코어를 가리키는 엣지가 남았다')
+    // 자식은 그대로 살아 있어야 한다 — 코어 하나를 지웠다고 자료가 사라지면 안 된다.
+    const all = [...library.store.snapshot().nodes, ...library.store.trash().nodes]
+    assert.equal(all.some((n) => n.id === child.id), true, '코어를 지우면서 자식 자료까지 없앴다')
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('purge is idempotent enough to survive a double click', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const core = library.store.createCore('두 번 눌림')
+    library.store.deleteNode(core.id)
+    await library.store.purgeNode(core.id)
+    await assert.rejects(() => library.store.purgeNode(core.id), /찾을 수 없습니다|없습니다/)
+  } finally {
+    await library.dispose()
+  }
+})

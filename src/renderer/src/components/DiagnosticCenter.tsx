@@ -4,17 +4,15 @@ import type { AppSettings } from '../../../shared/settings'
 import type { PingResult } from '../../../shared/ipc'
 import type { UsageSummary } from '../../../shared/usage'
 import { authHeaders } from '../lib/backend'
+import {
+  backendUrl,
+  collectConnectionChecks,
+  stateLabel,
+  summarizeChecks,
+  type Check
+} from '../lib/diagnostics'
 import { RefreshIcon } from './icons'
 import SetupCard from './SetupCard'
-
-type CheckState = 'ok' | 'warning' | 'error' | 'info'
-
-interface Check {
-  id: string
-  label: string
-  state: CheckState
-  detail: string
-}
 
 interface Scenario {
   id: string
@@ -47,14 +45,6 @@ const fmtTokens = (n: number): string =>
       ? `${(n / 1000).toFixed(0)}K`
       : n.toLocaleString('en-US')
 
-function backendUrl(backend: BackendInfo, path: string): string | null {
-  return backend.state === 'ready' && backend.port != null ? `http://127.0.0.1:${backend.port}${path}` : null
-}
-
-function stateLabel(state: CheckState): string {
-  return state === 'ok' ? '정상' : state === 'warning' ? '확인 필요' : state === 'error' ? '오류' : '정보'
-}
-
 function DiagnosticRow({ check }: { check: Check | undefined }): React.JSX.Element | null {
   if (!check) return null
   return <li className={`kv__diagnostic kv__diagnostic--${check.state}`}>
@@ -79,46 +69,7 @@ export default function DiagnosticCenter({ backend, health, settings, onSaveSett
   const refreshChecks = useCallback(async (): Promise<void> => {
     setBusy(true)
     setMessage('')
-    const next: Check[] = []
-    next.push({
-      id: 'backend', label: 'Aiso 백엔드',
-      state: backend.state === 'ready' ? 'ok' : backend.state === 'starting' ? 'warning' : 'error',
-      detail: backend.state === 'ready' ? `로컬 사이드카가 포트 ${backend.port}에서 준비되었습니다.` : backend.detail || '백엔드를 준비하고 있습니다.'
-    })
-    if (settings.activeLlmProvider === 'ollama') {
-      next.push({
-        id: 'llm', label: '로컬 LLM (Ollama)',
-        state: health?.ollama ? 'ok' : 'warning',
-        detail: health?.ollama ? `${health.models.length}개 모델을 확인했습니다.` : health?.detail || 'Ollama 연결 또는 모델 목록을 확인하지 못했습니다.'
-      })
-    } else {
-      try {
-        const credential = await window.api.nvidia.credential.status({ deploymentMode: settings.nvidiaDeploymentMode, endpoint: settings.nvidiaDeploymentMode === 'nim' ? settings.nvidiaNimEndpoint : undefined })
-        next.push({
-          id: 'llm', label: 'NVIDIA LLM 연결', state: credential.usableForCurrentBinding ? 'ok' : 'warning',
-          detail: credential.usableForCurrentBinding ? `API 키와 ${settings.nvidiaModel || '선택 모델'} 구성이 준비되었습니다.` : '현재 배포 대상에 사용할 수 있는 API 키 또는 모델 설정을 확인하세요.'
-        })
-      } catch {
-        next.push({ id: 'llm', label: 'NVIDIA LLM 연결', state: 'warning', detail: '보안 저장소의 NVIDIA 키 상태를 확인하지 못했습니다.' })
-      }
-    }
-    if (backend.state === 'ready' && backend.port != null && settings.comfyBaseUrl) {
-      try {
-        const response = await fetch(`${backendUrl(backend, '/comfy/health')}?base_url=${encodeURIComponent(settings.comfyBaseUrl)}`, { headers: authHeaders() })
-        next.push({ id: 'comfy', label: 'ComfyUI 연결', state: response.ok ? 'ok' : 'warning', detail: response.ok ? '설정한 ComfyUI 서버에 응답이 있습니다.' : 'ComfyUI 서버 응답을 확인하지 못했습니다.' })
-      } catch {
-        next.push({ id: 'comfy', label: 'ComfyUI 연결', state: 'warning', detail: 'ComfyUI 연결을 확인하지 못했습니다.' })
-      }
-    } else {
-      next.push({ id: 'comfy', label: 'ComfyUI 연결', state: 'info', detail: 'ComfyUI를 연결하지 않았거나 백엔드를 준비 중입니다.' })
-    }
-    try {
-      const discord = await window.api.discord.status()
-      next.push({ id: 'discord', label: '디스코드 봇', state: discord.running ? 'ok' : 'info', detail: discord.running ? '봇이 Discord에 연결되어 있습니다.' : '연결하지 않았거나 현재 중지되어 있습니다.' })
-    } catch {
-      next.push({ id: 'discord', label: '디스코드 봇', state: 'warning', detail: '디스코드 연결 상태를 확인하지 못했습니다.' })
-    }
-    setChecks(next)
+    setChecks(await collectConnectionChecks(backend, health, settings))
     setBusy(false)
   }, [backend, health, settings])
 
@@ -171,11 +122,7 @@ export default function DiagnosticCenter({ backend, health, settings, onSaveSett
     }
   }
 
-  const summary = useMemo(() => {
-    const failed = checks.filter((check) => check.state === 'error').length
-    const warnings = checks.filter((check) => check.state === 'warning').length
-    return failed ? `오류 ${failed}` : warnings ? `확인 필요 ${warnings}` : '핵심 연결 정상'
-  }, [checks])
+  const summary = useMemo(() => summarizeChecks(checks), [checks])
 
   const connText = conn === 'ok' ? 'IPC 정상' : conn === 'checking' ? '확인 중' : '연결 안 됨'
   const daily = usage?.daily ?? []

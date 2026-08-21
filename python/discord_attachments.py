@@ -22,6 +22,10 @@ from extract import EXTRACTORS, ExtractError
 MAX_DISCORD_ATTACHMENTS = 5
 MAX_SINGLE_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024
+# 아래 다섯 개는 attachments.py 와 값이 같지만 **의도적으로 독립된 손잡이**다.
+# 디스코드 첨부는 신뢰 경계가 다르다 — 데스크톱 첨부는 사용자가 직접 고른 파일이고,
+# 이쪽은 서버의 아무나 올린 파일이다. 한쪽을 조일 이유가 생겼을 때 다른 쪽을 끌고
+# 가지 않도록 따로 둔다. 공유 상수로 합치지 말 것.
 MAX_CONTEXT_CHARS = 120_000
 MAX_SINGLE_TEXT_CHARS = 30_000
 MAX_IMAGE_COUNT = 5

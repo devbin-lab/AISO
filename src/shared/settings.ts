@@ -57,6 +57,13 @@ export interface AppSettings {
   embeddingModel: string
   /** RAG(검색 증강) 사용 — 에이전트가 색인된 작업 폴더에서 관련 조각을 자동 참고 */
   ragEnabled: boolean
+  /**
+   * 안전 한도(단계 상한·퇴행·정체)로 멈춘 작업을 사용자가 '계속해줘'라고 하지 않아도
+   * 하네스가 스스로 이어간다. 이어갈 때 이번 런에서 실제로 실행한 도구 요약과 최근
+   * 도구 결과가 함께 넘어가므로 백지에서 다시 시작하지 않는다.
+   * 기본값이 꺼짐인 이유: 이어갈 때마다 토큰과 시간을 더 쓴다.
+   */
+  autoContinueOnLimit: boolean
   /** RAG 색인 범위 — 색인할 최대 파일 수. 크면 커버리지↑·색인시간↑ (한계 도달 시 늘리라고 권고) */
   ragMaxFiles: number
   /** 자동 주입/검색할 관련 조각 수 */
@@ -115,24 +122,6 @@ export const TEMP_MODE_OPTIONS: { value: TempPreset; label: string; hint: string
   { value: 'custom', label: '커스텀', hint: '슬라이더로 직접 값을 고정' }
 ]
 
-/** ComfyUI 설정 화면의 모델 선택 제어 옵션. */
-export const COMFY_MODEL_SELECTION_MODE_OPTIONS: {
-  value: ComfyModelSelectionMode
-  label: string
-  hint: string
-}[] = [
-  {
-    value: 'auto',
-    label: '자동 선택',
-    hint: 'Agent가 등록·검증된 모델의 태그와 우선순위를 기준으로 선택합니다.'
-  },
-  {
-    value: 'manual',
-    label: '직접 선택',
-    hint: '이미지 요청 전 사용자가 고른 등록 모델만 사용합니다.'
-  }
-]
-
 // 'auto' 분류용 키워드 — 정리 관련 문구면 organize, 그 외(코딩 지시·질문 등)는 balanced로 떨어진다.
 const ORGANIZE_KEYWORDS = [
   '정리', '분류', '정돈', '폴더', '옮겨', '이동해', '삭제', '중복', '더미', '미완성',
@@ -189,6 +178,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   agentToolPolicy: createDefaultAgentToolPolicy(),
   embeddingModel: 'bge-m3',
   ragEnabled: true,
+  autoContinueOnLimit: false,
   ragMaxFiles: 300,
   ragTopK: 5,
   keepAlive: '30m',

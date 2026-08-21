@@ -16,6 +16,7 @@ REGISTRY에는 넣어 실행 디스패치에 쓴다.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -52,7 +53,8 @@ from runcmd import RUN_COMMAND_SCHEMA, run_command
 from runcode import RUN_CODE_SCHEMA, run_code
 from runskill import CREATE_SKILL_SCHEMA, RUN_SKILL_SCHEMA, create_skill, run_skill
 from tool_schema_language import model_schema_for, model_schemas_for
-from tools import TOOL_SCHEMAS, list_saved_todos, run_tool
+from tools import TOOL_SCHEMAS as _TOOLS_SCHEMAS
+from tools import list_saved_todos, run_tool
 from webcheck import RUN_WEB_SCHEMA, run_web
 from webfetch import WEB_FETCH_SCHEMA, web_fetch
 from websearch import WEB_SEARCH_SCHEMA, web_search
@@ -75,7 +77,19 @@ class CallKind(Enum):
     META = 4             # update_plan — 루프에서 직접 처리(여기선 실행 안 함)
 
 
-Handler = Callable[..., Awaitable[str] | Awaitable[tuple]] | None
+# tools.TOOL_SCHEMAS 는 거대한 리터럴이라 mypy 가 값 타입을 "function" 문자열과 중첩 dict 의
+# 합으로 추론한다(Collection[str]). 그러면 sch["function"]["name"] 같은 정상적인 두 단계
+# 접근이 전부 막힌다. 계약은 OpenAI 함수 스키마 dict 이므로 이 모듈의 진입점에서 한 번만
+# 적어 둔다 — 같은 리스트 객체를 그대로 다시 묶는 것이라 런타임은 변하지 않는다.
+# (뿌리는 tools.py 의 TOOL_SCHEMAS 선언이지만 그 파일은 이 작업의 담당 범위 밖이다.)
+TOOL_SCHEMAS: list[dict[str, Any]] = _TOOLS_SCHEMAS
+
+
+# 핸들러의 반환 계약은 하나가 아니다. 기본은 str 이고 returns_screenshot=True 인 툴만
+# (report, shot) 튜플을 준다 — 이 구분은 타입이 아니라 ToolSpec 의 플래그가 진다.
+# 그래서 별칭은 Awaitable[Any] 로 두고, 실제 계약은 execute() 가 분기마다 isinstance
+# assert 로 런타임에 확인한다(아래 ASYNC_ROOT 분기 참고).
+Handler = Callable[..., Awaitable[Any]] | None
 
 
 @dataclass(frozen=True)
@@ -326,7 +340,7 @@ def model_tool_schemas(names: tuple[str, ...] | list[str] | frozenset[str]) -> l
     return [model_schema_for(REGISTRY[name].schema) for name in names if name in REGISTRY]
 
 # 호환용 이름이다. 자동 모드는 모든 노출 도구를 승인 없이 실행하므로 강제 예외는 없다.
-FORCE_APPROVAL_IN_AUTO = frozenset()
+FORCE_APPROVAL_IN_AUTO: frozenset[str] = frozenset()
 
 
 def is_meta(name: str) -> bool:
@@ -458,15 +472,47 @@ def get_builtin_tool_catalog() -> list[dict[str, Any]]:
     return catalog
 
 
-async def execute(spec: ToolSpec, root: Path, host: str, args: dict) -> tuple[str, str | None]:
-    """툴을 성질(kind)에 맞게 실행하고 (결과문자열, 스크린샷|None)을 돌려준다."""
+async def execute(
+    spec: ToolSpec, root: Path | None, host: str, args: dict
+) -> tuple[str, str | None]:
+    """툴을 성질(kind)에 맞게 실행하고 (결과문자열, 스크린샷|None)을 돌려준다.
+
+    root 가 None 인 런이 실제로 존재한다 — 작업 폴더를 고르지 않고 WORKSPACE_FREE_TOOLS
+    (web_search·discord_*·run_skill 등)만 쓰는 경우다. 지금까지 무해했던 이유는 그
+    목록의 도구가 전부 ASYNC_PLAIN 이라 root 를 아예 쓰지 않기 때문인데, 그 불변식은
+    어디에도 강제돼 있지 않았다. WORKSPACE_FREE_TOOLS 에 파일 계열 도구를 한 줄
+    추가하는 순간 root=None 이 tools._resolve 까지 흘러 `None / rel` 에서 TypeError 가
+    난다. 여기서 끊어 도구 이름이 담긴 ToolError 로 바꾼다.
+    """
+    if root is None and spec.kind in (CallKind.FILE, CallKind.ASYNC_ROOT, CallKind.ASYNC_ROOT_HOST):
+        from tools import ToolError
+        raise ToolError(f"'{spec.name}'은(는) 작업 폴더가 있어야 실행할 수 있습니다.")
     if spec.kind is CallKind.FILE:
-        return run_tool(root, spec.name, args), None
+        # 파일 도구는 순수 동기 I/O다. 이벤트 루프에서 직접 돌리면 실행 시간 내내
+        # 루프가 멈춰 SSE 스트림·다른 요청·취소 신호가 전부 대기한다.
+        # 실측(파일 3000개/151MB): grep 452ms, glob 516ms, list_tree 304ms 정지.
+        # 실제 작업 폴더는 이보다 크므로 사용자에게는 앱이 멈춘 것으로 보인다.
+        #
+        # 취소 의미: to_thread는 취소되지 않으므로, 취소 시 코루틴은 즉시 풀리지만
+        # 파일 작업 자체는 끝까지 진행된다. 이건 하네스가 이미 전제한 상황이다 —
+        # agent_runner가 변경 도구의 dirty 표시를 '실행 전에' 찍는 이유가 정확히
+        # "취소·예외 종료에서도 워크스페이스와 RAG 색인을 맞추기" 위해서다.
+        #
+        # root 는 위 가드(FILE·ASYNC_ROOT·ASYNC_ROOT_HOST 는 root=None 이면 ToolError)를
+        # 지나온 값이라 이 분기에서는 반드시 Path 다. 튜플 멤버십 가드는 분석기가
+        # 따라가지 못하므로 그 불변식을 여기에 적어 둔다.
+        assert root is not None
+        return await asyncio.to_thread(run_tool, root, spec.name, args), None
     if spec.kind is CallKind.ASYNC_ROOT:
         res = await spec.handler(root, **args)  # type: ignore[misc]
         if spec.returns_screenshot:
+            # 'returns_screenshot=True ⟺ 핸들러가 (report, shot) 튜플을 준다' 는 계약이
+            # 주석으로만 있었다. 어긋나면 조용히 문자열이 글자 단위로 쪼개져
+            # report='O', shot='K' 같은 값이 사용자에게 그대로 보고된다.
+            assert isinstance(res, tuple), f"{spec.name}: returns_screenshot 툴은 튜플을 돌려줘야 한다"
             report, shot = res
             return report, shot
+        assert isinstance(res, str), f"{spec.name}: 이 툴은 문자열을 돌려줘야 한다"
         return res, None
     if spec.kind is CallKind.ASYNC_ROOT_HOST:
         return await spec.handler(root, host, **args), None  # type: ignore[misc]

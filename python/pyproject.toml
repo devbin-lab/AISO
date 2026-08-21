@@ -1,0 +1,45 @@
+# 이 파일은 도구 설정 전용이다 — 빌드 시스템도 패키지 메타데이터도 선언하지 않는다.
+# mypy.ini 가 아니라 TOML 을 쓰는 이유: ini 는 시스템 코드페이지로 읽히므로
+# 한국어 주석이 한국어 Windows(cp949)에서 UnicodeDecodeError 를 낸다. TOML 은 UTF-8 규격이다.
+
+[tool.mypy]
+# ── 왜 이 수준인가 ──────────────────────────────────────────────────────
+# 도입 시점(2026-08-21)에 mypy 를 처음 붙였을 때 이 설정으로 130건이 나왔다.
+# 8개 에이전트가 전수 분류하고 각 '실제 결함' 주장을 적대 검증한 결과
+# **실제 런타임 결함은 0건**이었다 — 전부 분석기가 가드를 따라가지 못하는 경우이거나,
+# 코드가 이미 지키고 있지만 어디에도 적혀 있지 않던 계약이었다.
+# 그 130건을 전부 해소해 0으로 만들었다. 이제부터 새로 뜨는 오류는 신호다.
+#
+# 더 조이지 않은 이유: --strict 는 542건을 낸다. 그중 159건이 type-arg(맨 dict/list
+# 제네릭), 121건이 no-untyped-def 다. 둘 다 전면 개편에 가깝고, 위 분류가 보여 주듯
+# 실제 결함을 잡아 주지 않는다. **0을 유지하는 낮은 기준선이 노이즈에 파묻힌 높은
+# 기준선보다 낫다.** 조이려면 아래처럼 모듈 단위로 래칫을 올려라.
+#
+# 실행: npm run typecheck:python   (또는 cd python && python -m mypy .)
+python_version = "3.12"
+
+# 어노테이션 없는 함수의 본문도 검사한다. 없으면 92% 어노테이션된 이 저장소에도
+# 검사되지 않는 사각지대가 남는다.
+check_untyped_defs = true
+
+# 불필요해진 ignore 를 알려 준다. ignore 가 조용히 쌓이는 것을 막는 유일한 자동 장치다.
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+# `def f(x: int = None)` 을 몰래 Optional 로 넓히지 않는다.
+no_implicit_optional = true
+
+# `"a" == 1` 처럼 항상 거짓인 비교를 잡는다.
+strict_equality = true
+
+# 서드파티 스텁이 없는 패키지(discord.py, playwright 등)를 Any 로 둔다. 스텁을 붙이면
+# attr-defined 가 대량 발생하는데, 실측 결과 대부분이 스텁 부정확이었다.
+ignore_missing_imports = true
+
+# 테스트는 대상에서 뺀다. 픽스처·몽키패치·의도적으로 잘못된 입력이 많아 노이즈 대 신호
+# 비가 나쁘고, 테스트의 계약은 이미 assert 가 표현한다.
+exclude = ['^\.venv/', '^tests/', '^__pycache__/']
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true

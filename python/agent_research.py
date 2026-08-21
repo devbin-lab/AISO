@@ -15,24 +15,59 @@ from typing import Any, AsyncGenerator, Awaitable, Callable, Mapping
 
 from agent_prompting import final_response_language_prompt
 from response_language import normalize_response_language
+from webfetch import fetch_result_is_evidence
+from websearch import search_result_is_evidence
 from toolspec import model_tool_schemas
 
 
-MAX_RESEARCH_STEPS = 16
+MAX_RESEARCH_STEPS = 16  # 모델 턴(각 턴은 여러 검색·읽기를 한 번에 낼 수 있음) 상한
 RESEARCH_TOOL_NAMES = ("web_search", "web_fetch")
-AUTO_FETCH_TOP = 3
-AUTO_FETCH_BUDGET = 6
+# 검색 직후 하네스가 상위 결과 '원문'을 자동으로 읽어들인다. 작은 모델이 1개만 읽고 마는
+# 문제를 없애고, 여러 출처를 실제로 정독해 근거를 넓히기 위함(사용자 요청: 원문 전체 정독·보고).
+AUTO_FETCH_TOP = 3       # 검색 1회당 **본문을 확보하려는** 출처 수 (시도 수가 아니다)
+AUTO_FETCH_BUDGET = 6    # 한 런에서 확보할 본문 총 상한(지연·토큰 폭주 방지)
+# 1차 출처가 안티봇으로 막히는 일은 흔하다(openai.com 실측 확인). 그때 그냥 포기하면
+# 모델에게 남는 건 검색 스니펫뿐이고, 그게 정확히 오답을 만든 경로였다. 그래서 본문을
+# 얻지 못한 시도는 예산에서 세지 않고 다음 URL로 넘어간다 — 이게 '2차 출처 탐색'이다.
+# 다만 전부 막힌 질의에서 무한정 두드리지 않도록 **시도 횟수**는 따로 막는다.
+AUTO_FETCH_ATTEMPTS = 8  # 검색 1회당 원문 열기 시도 상한
+# 후보 URL은 검색 결과 전체에서 뽑는다. 상위 3개만 보면 1·2·3위가 모두 같은 도메인의
+# 공식 페이지일 때(= 같은 안티봇) 대체 출처에 닿지 못한다.
+AUTO_FETCH_CANDIDATES = 10
+# 자동 정독분은 페이지당 이만큼으로 발췌한다. 원문 전체(최대 3만자)×여러 개는 num_ctx(기본 16k토큰)에
+# 안 들어가 compact_convo가 통째로 잘라버려 오히려 모델이 못 읽는다. 발췌하면 3개가 실제로 들어가
+# 모델이 여러 출처를 종합할 수 있다(스니펫보다 20배 이상 많은 본문).
 AUTO_FETCH_CHARS = 7000
 
-_RESEARCH_TODAY = datetime.now().astimezone().date().isoformat()
+_WEEKDAYS_EN = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def current_time_line() -> str:
+    """지금 이 순간의 날짜·요일·시각·시간대.
+
+    예전에는 모듈 임포트 시점에 날짜 하나를 굳혀 두고 그대로 썼다. 앱을 며칠 켜 두면
+    "Today is" 가 틀린 날짜를 가리켰고, 모델은 '최신'을 그 낡은 기준으로 해석했다.
+    요청마다 다시 계산한다.
+
+    요일과 시각까지 주는 이유: '오늘/이번 주/방금' 같은 표현과, 발행 시각이 몇 시간
+    단위로 갈리는 뉴스성 질문을 바르게 해석하려면 날짜만으로는 부족하다.
+    시간대를 함께 적어야 UTC 기준 문서와 비교할 수 있다.
+    """
+    now = datetime.now().astimezone()
+    offset = now.strftime("%z")
+    tz = f"UTC{offset[:3]}:{offset[3:]}" if offset else "local time"
+    name = now.tzname() or ""
+    label = f"{name} / {tz}" if name and name != tz else tz
+    return f"{now:%Y-%m-%d} ({_WEEKDAYS_EN[now.weekday()]}) {now:%H:%M} {label}"
 
 
 def research_system_prompt(response_language: str | None = "ko") -> str:
     """Build the English research policy with a request-specific answer language."""
     return f"""You are Aiso's research assistant. You may research the internet to answer the user's question.
-- Today is {_RESEARCH_TODAY}. Interpret "latest", "recent", "today", and "current" against this date. Include the current year in relevant queries, compare publication or update dates, and report the newest evidence first. Never label an older overview as latest when a newer official source exists.
+- Right now it is {current_time_line()}. Interpret "latest", "recent", "today", "now", and "current" against this exact moment. Include the current year in relevant queries, compare publication or update dates, and report the newest evidence first. Never label an older overview as latest when a newer official source exists.
 - For current company, institution, product, policy, price, or usage-limit information, search official newsrooms, help centers, and status pages first and open at least one official primary source. Use journalism and blogs only as supporting evidence.
 - For OpenAI questions, prioritize current primary material from openai.com, help.openai.com, and status.openai.com. Do not rely on republished news roundups or sources with unclear authorship or dates.
+- Primary sources are often behind anti-bot pages that cannot be opened. When a source could not be read, the harness says so and opens other sources instead — treat those as your evidence. Answer from the best sources you actually read, name them, and state plainly that the primary source could not be opened. Do not fall back to snippets or memory, and do not refuse to answer merely because the official page was unreachable.
 - Before answering any real-world factual question about a named institution, place, person, product, event, location, founding, number, date, or current state, verify it with web_search even when your memory seems certain. Local-model memory can be stale or wrong about proper nouns and details.
 - Greetings, casual chat, calculations, translation, and writing without external facts do not require search. Search first for other factual questions.
 - Research broadly: use different keywords and angles rather than trusting one top result.
@@ -46,8 +81,14 @@ def research_system_prompt(response_language: str | None = "ko") -> str:
     )
 
 
-# Compatibility export for integrations and tests that inspect the default prompt.
-RESEARCH_SYSTEM_PROMPT = research_system_prompt("ko")
+
+def _host_of(url: str) -> str:
+    """알림에 쓸 짧은 출처 이름 — 사용자가 '무엇이 막혔는지' 알 수 있어야 한다."""
+    from urllib.parse import urlparse
+    try:
+        return (urlparse(url).hostname or url).removeprefix("www.")
+    except Exception:  # noqa: BLE001
+        return url
 
 
 def top_urls_from_search(text: str, n: int) -> list[str]:
@@ -60,6 +101,23 @@ def top_urls_from_search(text: str, n: int) -> list[str]:
             if len(out) >= n:
                 break
     return out
+
+
+def _tool_result_ok(name: str, result: str) -> bool:
+    """근거를 못 낸 조사 도구는 성공으로 보고하지 않는다.
+
+    예전에는 예외가 없으면 무조건 ok=True 였다. 그래서 검색이 차단되거나 마크업이
+    바뀌어 링크를 하나도 못 뽑아도 조사 루프는 '검색 성공'으로 이어갔고, 모델은
+    웹을 못 읽은 채 기억으로 답을 썼다 — 예외로 죽는 것보다 나쁜 조용한 오답이다.
+
+    web_fetch 도 같은 병을 앓았다. 차단·추출 실패를 예외가 아니라 문자열로 돌려주므로
+    "돌아왔으니 성공"이 되어, 대기 페이지(예: 'Just a moment…')를 읽고도 ✅ 로 표시됐다.
+    """
+    if name == "web_search":
+        return search_result_is_evidence(result)
+    if name == "web_fetch":
+        return fetch_result_is_evidence(result)
+    return True
 
 
 async def run_research_chat(
@@ -75,6 +133,7 @@ async def run_research_chat(
     strict_tool_protocol: bool,
     registry: Mapping[str, Any],
     compact_conversation: Callable[[list[dict], int, int], list[dict]],
+    build_conversation: Callable[[list[dict], int, int], list[dict]],
     prepare_model: Callable[[str, str], Awaitable[Any]],
     generate_turn: Callable[..., AsyncGenerator[dict, None]],
     parse_args: Callable[[Any], dict],
@@ -90,13 +149,14 @@ async def run_research_chat(
     tools = model_tool_schemas(RESEARCH_TOOL_NAMES)
     model_runtime = await (runtime.prepare_model(model) if runtime is not None else prepare_model(host, model))
     offload_noticed = False
-    convo: list[dict] = list(messages)
+    convo: list[dict] = list(messages)  # reserve_tokens 확정 후 아래에서 감싼다
     total_tokens = 0
     last_call_sig: str | None = None
     repeat_count = 0
     tools_disabled = False
     searched_any = False
     fetched_any = False
+    got_evidence = False
     fetch_nudged = False
     auto_fetched = 0
     seen_urls: set[str] = set()
@@ -105,6 +165,10 @@ async def run_research_chat(
     system_prompt = research_system_prompt(response_language)
     system_msg = {"role": "system", "content": system_prompt}
     reserve_tokens = (len(system_prompt) + len(json.dumps(tools, ensure_ascii=False))) // 3
+    # 도구 결과는 기록 시점에 한 번만 잘린다. 에이전트 루프와 같은 관문을 쓴다 —
+    # 여기만 평범한 list로 두면 web_fetch 원문(최대 3만자)이 무제한으로 컨텍스트에
+    # 들어간다. compact_conversation은 더 이상 내용을 자르지 않기 때문이다.
+    convo = build_conversation(convo, context_length, reserve_tokens)
 
     for step in range(MAX_RESEARCH_STEPS):
         working = compact_conversation(convo, context_length, reserve_tokens)
@@ -116,9 +180,9 @@ async def run_research_chat(
             max_output_tokens=max_gen_tokens,
             provider_options={"keep_alive": keep_alive, "num_ctx": context_length},
         )
-        final = None
-        gen_error = None
-        gen_error_kind = None
+        final: dict[str, Any] | None = None
+        gen_error: str | None = None
+        gen_error_kind: Any = None
         generation_stream = (
             generate_turn(host, base, reasoning_effort, model_runtime, offload_noticed)
             if runtime is None and not strict_tool_protocol
@@ -145,6 +209,13 @@ async def run_research_chat(
                 continue
             yield {"type": "error", "error": gen_error}
             return
+
+        # generate_turn(=_generate_turn) 의 종료 마커는 final 과 error 가 정확히 상보적이다
+        # (agent_execution.py:393·399·416 은 final=None+error, 419 는 final=dict+error=None).
+        # 위 gen_error 관문을 지났다는 건 419 경로였다는 뜻이므로, 아래에서 final 을
+        # dict 로 다루는 계약을 여기서 한 번 못 박는다. 에이전트 루프도 같은 방식이다
+        # (agent_runner.py:1119).
+        assert final is not None
 
         turn_tokens = final.get("output_tokens") or 0
         if turn_tokens:
@@ -233,18 +304,22 @@ async def run_research_chat(
                 continue
             if name == "web_search":
                 searched_any = True
-            else:
-                fetched_any = True
 
             spec = registry[name]
             previous_provider_result = completed_provider_calls.get(provider_tool_call_id) if strict_tool_protocol and isinstance(provider_tool_call_id, str) else None
             if previous_provider_result is not None:
                 result = previous_provider_result[1]
-                yield {"type": "tool_result", "id": call_id, "name": name, "ok": True, "output": result}
+                yield {
+                    "type": "tool_result", "id": call_id, "name": name,
+                    "ok": _tool_result_ok(name, result), "output": result,
+                }
             else:
                 try:
                     result, _shot = await execute_tool(spec, Path("."), host, args)
-                    yield {"type": "tool_result", "id": call_id, "name": name, "ok": True, "output": result}
+                    yield {
+                        "type": "tool_result", "id": call_id, "name": name,
+                        "ok": _tool_result_ok(name, result), "output": result,
+                    }
                 except tool_error as error:
                     result = f"[오류] {error}"
                     yield {"type": "tool_result", "id": call_id, "name": name, "ok": False, "output": result}
@@ -253,29 +328,61 @@ async def run_research_chat(
                     yield {"type": "tool_result", "id": call_id, "name": name, "ok": False, "output": result}
                 if strict_tool_protocol and isinstance(provider_tool_call_id, str):
                     completed_provider_calls[provider_tool_call_id] = (provider_signature, result)
+            # 근거(URL)를 못 얻은 검색은 '검색했다'로 치지 않는다. 그러면 아래 fetch
+            # 넛지가 "URL을 열어 확인하라"고 밀어붙이는데 열 URL이 없어 모델이 지어낸다.
+            if name == "web_search" and not search_result_is_evidence(result):
+                searched_any = False
+            # web_fetch 는 차단·추출 실패도 예외가 아니라 **문자열**로 돌려준다. 돌아왔다는
+            # 이유로 '읽었다'로 세면 아래 교차확인 넛지가 건너뛰어지고, 모델은 스니펫으로
+            # 답하면서 '출처를 읽었다'고 말한다. 실제로 그런 오답이 있었다.
+            if name == "web_fetch" and fetch_result_is_evidence(result):
+                fetched_any = True
+                got_evidence = True
             convo.append({"role": "tool", **({"tool_call_id": provider_tool_call_id} if strict_tool_protocol else {}), "content": result})
 
             if not strict_tool_protocol and name == "web_search" and auto_fetched < AUTO_FETCH_BUDGET:
-                for auto_index, url in enumerate(top_urls_from_search(result, AUTO_FETCH_TOP)):
-                    if auto_fetched >= AUTO_FETCH_BUDGET or url in seen_urls:
+                wanted = AUTO_FETCH_TOP          # 이번 검색에서 **확보하려는** 본문 수
+                attempts = 0
+                got_here = 0
+                blocked_here: list[str] = []
+                for auto_index, url in enumerate(top_urls_from_search(result, AUTO_FETCH_CANDIDATES)):
+                    if got_here >= wanted or auto_fetched >= AUTO_FETCH_BUDGET:
+                        break
+                    if attempts >= AUTO_FETCH_ATTEMPTS or url in seen_urls:
                         continue
                     seen_urls.add(url)
+                    attempts += 1
                     auto_call_id = f"{call_id}-af{auto_index}"
                     yield {"type": "tool_call", "id": auto_call_id, "name": "web_fetch", "args": {"url": url}}
                     try:
                         fetched_result, _shot = await execute_tool(registry["web_fetch"], Path("."), host, {"url": url})
                         if len(fetched_result) > AUTO_FETCH_CHARS:
                             fetched_result = fetched_result[:AUTO_FETCH_CHARS] + "\n…(원문 일부만 표시)"
-                        yield {"type": "tool_result", "id": auto_call_id, "name": "web_fetch", "ok": True, "output": fetched_result}
+                        fetched_ok = fetch_result_is_evidence(fetched_result)
                     except Exception as error:  # noqa: BLE001
                         fetched_result = f"[오류] 원문 읽기 실패 ({type(error).__name__}): {error}"
-                        yield {"type": "tool_result", "id": auto_call_id, "name": "web_fetch", "ok": False, "output": fetched_result}
+                        fetched_ok = False
+                    yield {"type": "tool_result", "id": auto_call_id, "name": "web_fetch", "ok": fetched_ok, "output": fetched_result}
                     convo.append({"role": "tool", "content": fetched_result})
-                    fetched_any = True
-                    auto_fetched += 1
                     did_autofetch = True
+                    if fetched_ok:
+                        fetched_any = True
+                        got_evidence = True
+                        got_here += 1
+                        auto_fetched += 1        # 예산은 **확보한 본문**만 센다
+                    else:
+                        # 막힌 출처는 예산을 쓰지 않는다. 다음 후보로 넘어간다 — 이게 2차 출처 탐색이다.
+                        blocked_here.append(_host_of(url))
+                if blocked_here and got_here:
+                    yield {"type": "notice",
+                           "text": f"{blocked_here[0]} 원문을 열지 못해 다른 출처로 확인했습니다."}
+                elif blocked_here and not got_here:
+                    yield {"type": "notice",
+                           "text": f"{', '.join(dict.fromkeys(blocked_here))} 원문을 열지 못했습니다. 다른 검색어로 다시 찾습니다…"}
 
-        if did_autofetch and not answer_nudged:
+        # 한 페이지도 실제 본문을 얻지 못했다면 "위에서 읽은 출처로 답하라"는 지시는
+        # 없는 것을 가리킨다. 그때는 넛지하지 않고 루프를 돌려 다른 URL을 열게 둔다.
+        if did_autofetch and got_evidence and not answer_nudged:
             answer_nudged = True
             convo.append({
                 "role": "user",
@@ -294,7 +401,6 @@ __all__ = [
     "AUTO_FETCH_CHARS",
     "AUTO_FETCH_TOP",
     "MAX_RESEARCH_STEPS",
-    "RESEARCH_SYSTEM_PROMPT",
     "RESEARCH_TOOL_NAMES",
     "research_system_prompt",
     "run_research_chat",

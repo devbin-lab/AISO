@@ -21,6 +21,9 @@ def _event_dict(event) -> dict:
         out["tool_calls"] = list(event.tool_calls)
     if event.output_tokens is not None:
         out["output_tokens"] = event.output_tokens
+    # prompt_eval_count → input_tokens. 골든 픽스처가 이 매핑을 고정한다.
+    if event.input_tokens is not None:
+        out["input_tokens"] = event.input_tokens
     if event.total_duration is not None:
         out["total_duration"] = event.total_duration
     if event.done_reason is not None:

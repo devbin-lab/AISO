@@ -168,17 +168,59 @@ def test_no_workspace_rejects_mixed_exposed_and_hidden_tool_batch(env, monkeypat
     assert types(evs)[-1] == "done"
 
 
-def test_no_workspace_unknown_tool_is_rejected_before_execution(env, monkeypatch, tmp_path):
-    """모델이 노출되지 않은 이름을 지어내도 개별 실행 이벤트 없이 묶음 전체를 닫는다."""
+def test_no_workspace_unknown_tool_gets_one_recovery_turn(env, monkeypatch, tmp_path):
+    """지어낸 도구 이름은 실행하지 않되, 런을 끝내지 않고 한 번 교정 기회를 준다.
+
+    계약 변경(의도): 예전에는 존재하지 않는 도구 이름 하나로 런이 즉시 종료됐다.
+    도구명 환각은 작은 로컬 모델의 최빈 실패인데 거기에 최고형이 걸려 있었던 셈이다.
+    이제 '아직 배치가 하나도 실행되지 않았다'는 기존 안전 조건 위에서, 실제 도구
+    목록을 알려 주는 교정 턴을 한 번 준다. route_recovery와 같은 패턴이다.
+
+    바뀌지 않은 것: 실행 이벤트는 여전히 하나도 나가지 않는다.
+    """
     monkeypatch.setenv("AISO_SKILLS_DIR", str(tmp_path))  # 스킬 없음
     fc = FakeChat([
         {"calls": [("nonexistent_tool", {})]},
         {"content": "완료"},
     ])
     evs = env.drive(fc, approve=True, workspace="", approval_mode="auto")
+
+    assert not any(e.get("type") in {"tool_call", "tool_result"} for e in evs)
+    assert not any(e.get("type") == "error" for e in evs), "교정 가능한 실수로 런이 죽었다"
+    notice = next(e["text"] for e in evs if e.get("type") == "notice")
+    assert "존재하지 않는 도구" in notice
+    assert types(evs)[-1] == "done"
+
+
+def test_repeated_unknown_tool_names_still_end_the_run(env, monkeypatch, tmp_path):
+    """교정은 한 번뿐이다 — 계속 지어내면 턴을 무한히 소비하지 않고 끝낸다."""
+    monkeypatch.setenv("AISO_SKILLS_DIR", str(tmp_path))
+    fc = FakeChat([{"calls": [("nonexistent_tool", {})]}])  # 마지막 스펙이 반복된다
+    evs = env.drive(fc, approve=True, workspace="", approval_mode="auto")
+
     assert not any(e.get("type") in {"tool_call", "tool_result"} for e in evs)
     error = next(e["error"] for e in evs if e.get("type") == "error")
     assert "현재 실행 범위 밖" in error and "nonexistent_tool" in error
+    assert types(evs)[-1] == "done"
+
+
+def test_real_but_out_of_scope_tool_is_not_recovered(env, monkeypatch, tmp_path):
+    """실존하지만 현재 범위 밖인 도구는 교정 대상이 아니다.
+
+    그건 모델의 실수가 아니라 정책 차단이고(예: 기존 웹 산출물 검증 중 수정 도구),
+    차단 자체가 목적이다. 환각 교정이 이 보호를 우회하면 안 된다.
+    """
+    monkeypatch.setenv("AISO_SKILLS_DIR", str(tmp_path))
+    # write_file은 실존하는 도구지만 무폴더 실행에서는 노출되지 않는다.
+    fc = FakeChat([
+        {"calls": [("write_file", {"path": "a.md", "content": "x"})]},
+        {"content": "완료"},
+    ])
+    evs = env.drive(fc, approve=True, workspace="", approval_mode="auto")
+
+    assert not any(e.get("type") in {"tool_call", "tool_result"} for e in evs)
+    assert any(e.get("type") == "error" for e in evs), "정책 차단이 교정으로 새어나갔다"
+    assert types(evs)[-1] == "done"
 
 
 def test_created_skill_callable_by_name_without_workspace(env, monkeypatch, tmp_path):
@@ -312,12 +354,43 @@ def test_approval_reject(env):
     assert (env.ws / "f.txt").exists()  # 거부 → 파일 유지
 
 
-def test_approval_timeout_rejects(env):
+def test_approval_timeout_does_not_execute_and_is_not_recorded_as_a_rejection(env):
+    """무응답은 실행하지 않되(변경 없음), '사용자가 거부함'으로 기록하지 않는다(변경됨).
+
+    계약 변경(의도): 예전에는 타임아웃도 `rejected: True`였다. 실행 판단으로는 옳지만
+    (승인 없이 실행하지 않는다) 그 뒤가 틀렸다 — 사용자는 거부한 적이 없고 자리를
+    비웠을 뿐인데, 모델에게 "사용자가 승인하지 않았습니다"라고 전달하고 원장에
+    영구 기록했다. 12B 모델은 거부(그 방향을 접는다)와 무응답(다시 물어볼 수 있다)에
+    다르게 반응해야 한다.
+
+    바뀌지 않은 것: 도구는 실행되지 않는다.
+    """
     env.mp.setattr(agent, "APPROVAL_TIMEOUT", 0.05)
     (env.ws / "f.txt").write_text("x", encoding="utf-8")
     evs = env.run(FakeChat([{"calls": [("delete_file", {"path": "f.txt"})]}, {"content": "?"}]))
+
     tr = next(e for e in evs if e["type"] == "tool_result")
-    assert tr["ok"] is False and tr.get("rejected") is True
+    assert tr["ok"] is False
+    assert tr.get("expired") is True
+    assert tr.get("rejected") is False, "무응답이 사용자 거부로 기록됐다"
+    assert (env.ws / "f.txt").exists(), "승인 없이 실행됐다 — 안전 계약이 깨졌다"
+    assert "응답 없음" in tr["output"]
+    assert any("응답이 없어" in e.get("text", "") for e in evs if e.get("type") == "notice")
+
+
+def test_explicit_denial_is_still_recorded_as_a_rejection(env):
+    """실제 거부는 그대로 거부다 — 무응답과 섞이면 안 된다."""
+    (env.ws / "f.txt").write_text("x", encoding="utf-8")
+    evs = env.drive(
+        FakeChat([{"calls": [("delete_file", {"path": "f.txt"})]}, {"content": "?"}]),
+        approve=False,
+    )
+
+    tr = next(e for e in evs if e["type"] == "tool_result")
+    assert tr["ok"] is False
+    assert tr.get("rejected") is True
+    assert tr.get("expired") is False
+    assert (env.ws / "f.txt").exists()
 
 
 def test_auto_executes_delete_without_approval_card(env):
@@ -3470,7 +3543,15 @@ def test_repeating_identical_two_call_mutation_batch_stops_early(env):
 
     assert fake.calls == agent.IDENTICAL_TOOL_BATCH_LIMIT + 1
     assert len([event for event in events if event["type"] == "tool_call"]) == 4
-    assert any("작업 묶음이 반복" in event.get("text", "") for event in events)
+    # 판정은 문구가 아니라 이벤트로 한다 — 안내문은 다듬을 수 있어야 한다.
+    assert any(
+        event.get("type") == "run_limit" and event.get("reason") == "tool_budget"
+        for event in events
+    )
+    assert any(
+        event.get("type") == "notice" and "작업 묶음" in event.get("text", "")
+        for event in events
+    ), "사람에게도 무엇이 반복됐는지 알려야 한다"
 
 
 def test_noop_write_does_not_unlock_existing_html_validation(env):

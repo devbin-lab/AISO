@@ -1,0 +1,64 @@
+name: CI
+
+# Aiso는 Windows 전용 제품이고, node:sqlite·경로 처리·Python 사이드카 기동이 모두
+# Windows 동작에 묶여 있다. 그래서 ubuntu가 아니라 windows-latest에서 검증한다.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck-and-node-tests:
+    name: TypeScript · Node · Renderer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck (main + renderer)
+        run: npm run typecheck
+
+      # npm run test 는 comfy-model-analysis · gate2~gate6 · mydb · renderer 를 모두 태운다.
+      - name: Node and renderer tests
+        run: npm test
+
+  python-tests:
+    name: Python sidecar
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      # 런타임 의존성은 정확 고정(requirements.txt) + 전이 제약(requirements.lock)을 함께 쓴다.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r python/requirements.txt -c python/requirements.lock
+          pip install -r python/requirements-dev.txt
+
+      # scripts의 test:python 은 로컬 개발용 venv 경로가 박혀 있어 CI에서 못 쓴다.
+      - name: Pytest
+        run: python -m pytest python/tests -q
+
+      # 타입 검사는 0건에서 시작한다(도입 시 130건을 전부 해소했다). 그래서
+      # 여기서 새로 뜨는 오류는 노이즈가 아니라 신호다 — 게이트로 세운 이유다.
+      # 설정과 그 수준을 고른 근거는 python/pyproject.toml 에 있다.
+      - name: Mypy
+        working-directory: python
+        run: python -m mypy .

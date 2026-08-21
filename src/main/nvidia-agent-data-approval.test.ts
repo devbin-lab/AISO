@@ -4,11 +4,10 @@ import { DEFAULT_SETTINGS } from '../shared/settings.ts'
 import type { ComfyModelProfile } from '../shared/comfy-model.ts'
 import {
   NvidiaAgentDataApprovalStore,
+  NVIDIA_AGENT_TODO_TOOLS,
   buildAutomaticNvidiaAgentDataScope,
   buildNvidiaAgentManifestAuthority,
-  fenceNvidiaAgentSettingsMutation,
-  validateManifestDecisionInput,
-  validateManifestDescribeInput
+  fenceNvidiaAgentSettingsMutation
 } from './nvidia-agent-data-approval.ts'
 
 const session = 'session-gate6-1234567890'
@@ -57,11 +56,8 @@ function settings() {
 }
 
 test('manifest is Main-derived and hides Comfy registry, paths, and workflow', () => {
-  const request = validateManifestDescribeInput({
-    sessionId: session,
-    scope: { workspace: false, rag: false, image: true }
-  })
-  const authority = buildNvidiaAgentManifestAuthority(settings(), session, request.scope, [profile])
+  const request = { workspace: false, rag: false, image: true }
+  const authority = buildNvidiaAgentManifestAuthority(settings(), session, request, [profile])
   const publicText = JSON.stringify(authority.manifest)
   assert.equal(authority.manifest.sends.conversation, true)
   assert.equal(authority.manifest.sends.workspace, false)
@@ -135,6 +131,23 @@ test('automatic scope is derived only from the saved NVIDIA tool policy', () => 
     calendarOnlyPolicy,
     [readyProfile('enabled-ready', true)]
   ), { workspace: false, rag: false, image: false, todos: true, myDb: false })
+})
+
+test('every calendar tool on its own opens the todos scope', () => {
+  // 예전에는 list_calendar_events / create_calendar_event 두 개만 손으로 검사해서,
+  // manage_calendar_event만 켠 정책이 todos=false를 받고 캘린더 도구가 전부 빠졌다.
+  const base = settings()
+  for (const toolId of NVIDIA_AGENT_TODO_TOOLS) {
+    const policy: ReturnType<typeof settings> = {
+      ...base,
+      agentToolPolicy: { ollama: [], nvidia: [toolId] }
+    }
+    assert.deepEqual(
+      buildAutomaticNvidiaAgentDataScope(policy, [readyProfile('enabled-ready', true)]),
+      { workspace: false, rag: false, image: false, todos: true, myDb: false },
+      `${toolId} 하나만 켰을 때 todos 스코프가 열리지 않았다`
+    )
+  }
 })
 
 test('allowed tools and fingerprint bind the exact saved NVIDIA policy', () => {
@@ -231,30 +244,29 @@ test('image scope rejects unready manual selection and auto mode without an elig
   ), /준비 상태가 아닙니다/)
 })
 
-test('approval challenge is one-use and bound to one session and exact scope', () => {
+test('a grant is bound to one session and to the exact scope it was issued for', () => {
   const store = new NvidiaAgentDataApprovalStore()
   const minimal = buildNvidiaAgentManifestAuthority(
     settings(), session, { workspace: false, rag: false, image: false }, []
   )
-  const manifest = store.describe(minimal)
+  // 승인 전에는 아무 범위도 없다.
   assert.throws(() => store.approvedRequest(session), /승인되지/)
-  assert.deepEqual(store.decide({ sessionId: session, manifestId: manifest.manifestId, approved: true }), {
-    approved: true
-  })
+
+  store.authorizePolicy(minimal)
   assert.equal(store.requireExact(session, minimal).workspace, '')
-  assert.throws(
-    () => store.decide({ sessionId: session, manifestId: manifest.manifestId, approved: true }),
-    /만료되었거나/
-  )
-  assert.throws(
-    () => store.requireExact('session-other-1234567890', minimal),
-    /다시 승인이 필요/
-  )
+
+  // 다른 세션은 이 권한을 쓸 수 없다.
+  assert.throws(() => store.requireExact('session-other-1234567890', minimal), /다시 승인이 필요/)
+
+  // 범위를 넓히면 같은 세션이라도 다시 승인해야 한다.
   const expanded = buildNvidiaAgentManifestAuthority(
     settings(), session, { workspace: true, rag: false, image: false }, []
   )
   assert.throws(() => store.requireExact(session, expanded), /다시 승인이 필요/)
-  assert.throws(() => store.requireExact(session, minimal))
+
+  // 한 번 소비하면 사라진다 — 실행 경계가 쓰는 계약이다.
+  store.consumeExact(session, minimal)
+  assert.throws(() => store.requireExact(session, minimal), /다시 승인이 필요/)
 })
 
 test('rejection, provider/model change, and process-local reset fail closed', () => {
@@ -262,14 +274,10 @@ test('rejection, provider/model change, and process-local reset fail closed', ()
   const authority = buildNvidiaAgentManifestAuthority(
     settings(), session, { workspace: false, rag: false, image: false }, []
   )
-  const rejected = store.describe(authority)
-  assert.deepEqual(store.decide({
-    sessionId: session, manifestId: rejected.manifestId, approved: false
-  }), { approved: false })
+  // 승인하지 않으면 아무 범위도 열리지 않는다.
   assert.throws(() => store.approvedRequest(session), /승인되지/)
 
-  const approved = store.describe(authority)
-  store.decide({ sessionId: session, manifestId: approved.manifestId, approved: true })
+  store.authorizePolicy(authority)
   const changed = buildNvidiaAgentManifestAuthority(
     { ...settings(), nvidiaModel: 'model/b' },
     session,
@@ -281,54 +289,38 @@ test('rejection, provider/model change, and process-local reset fail closed', ()
   assert.throws(() => store.approvedRequest(session), /승인되지/)
 })
 
-test('invalid scope and forged decision fields are rejected', () => {
-  assert.throws(
-    () => validateManifestDescribeInput({ sessionId: session, scope: { workspace: false, rag: true, image: false } }),
-    /함께 선택/
+test('RAG can never be sent without the workspace it came from', () => {
+  // 예전에는 렌더러가 보낸 scope 를 검사해 이 조합을 거부했다. 이제 scope 는 Main 이
+  // 설정에서 파생하므로 검사할 렌더러 입력이 없고, 대신 계산식이 구조적으로 보장한다:
+  // rag 가 참이려면 workspace 문자열이 비어 있지 않아야 하고, 그러면 workspace 도 참이 된다.
+  // 그 보장이 깨지면 작업 폴더 승인 없이 RAG 발췌가 나가므로 여기서 고정한다.
+  const withRag = buildAutomaticNvidiaAgentDataScope(
+    { ...settings(), agentToolPolicy: { ...DEFAULT_SETTINGS.agentToolPolicy, nvidia: ['search_docs'] } },
+    []
   )
-  assert.throws(
-    () => validateManifestDecisionInput({ sessionId: session, manifestId: 'short', approved: true }),
-    /형식/
+  assert.equal(withRag.rag, true)
+  assert.equal(withRag.workspace, true, 'RAG 전송이 작업 폴더 전송 없이 열렸다')
+
+  // 작업 폴더가 없으면 둘 다 닫힌다.
+  const noWorkspace = buildAutomaticNvidiaAgentDataScope(
+    { ...settings(), workspace: '', agentToolPolicy: { ...DEFAULT_SETTINGS.agentToolPolicy, nvidia: ['search_docs'] } },
+    []
   )
+  assert.equal(noWorkspace.rag, false)
+  assert.equal(noWorkspace.workspace, false)
 })
 
-test('pending and approved records remain bounded at 256 entries', () => {
+test('approved records remain bounded at 256 entries', () => {
   const request = { workspace: false, rag: false, image: false }
-
-  const pendingStore = new NvidiaAgentDataApprovalStore()
-  const pendingManifests = Array.from({ length: 257 }, (_, index) => {
-    const sessionId = `session-pending-${String(index).padStart(4, '0')}`
-    return {
-      sessionId,
-      manifest: pendingStore.describe(buildNvidiaAgentManifestAuthority(settings(), sessionId, request, []))
-    }
-  })
-  assert.throws(
-    () => pendingStore.decide({
-      sessionId: pendingManifests[0].sessionId,
-      manifestId: pendingManifests[0].manifest.manifestId,
-      approved: true
-    }),
-    /만료되었거나/
-  )
-  const newestPending = pendingManifests.at(-1)!
-  assert.deepEqual(pendingStore.decide({
-    sessionId: newestPending.sessionId,
-    manifestId: newestPending.manifest.manifestId,
-    approved: true
-  }), { approved: true })
-
-  const approvedStore = new NvidiaAgentDataApprovalStore()
-  const approvedSessions = Array.from({ length: 257 }, (_, index) => {
+  const store = new NvidiaAgentDataApprovalStore()
+  const sessions = Array.from({ length: 257 }, (_, index) => {
     const sessionId = `session-approved-${String(index).padStart(4, '0')}`
-    const manifest = approvedStore.describe(
-      buildNvidiaAgentManifestAuthority(settings(), sessionId, request, [])
-    )
-    approvedStore.decide({ sessionId, manifestId: manifest.manifestId, approved: true })
+    store.authorizePolicy(buildNvidiaAgentManifestAuthority(settings(), sessionId, request, []))
     return sessionId
   })
-  assert.throws(() => approvedStore.approvedRequest(approvedSessions[0]), /승인되지 않았습니다/)
-  assert.deepEqual(approvedStore.approvedRequest(approvedSessions.at(-1)!), request)
+  // 가장 오래된 것이 밀려나고 최신 것은 남는다 — 메모리 상한이 실제로 걸린다.
+  assert.throws(() => store.approvedRequest(sessions[0]), /승인되지 않았습니다/)
+  assert.deepEqual(store.approvedRequest(sessions.at(-1)!), request)
 })
 
 test('settings mutation revokes Agent grants before unrelated follow-up work', async () => {

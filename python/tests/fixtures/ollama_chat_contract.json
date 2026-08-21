@@ -2,12 +2,45 @@
   "legacy_payload": {
     "model": "gpt-oss:20b",
     "messages": [
-      {"role": "system", "content": "system"},
-      {"role": "user", "content": "hello"},
-      {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "web_search", "arguments": {"query": "Aiso"}}}]},
-      {"role": "tool", "content": "result", "tool_call_id": "openai-only-id"}
+      {
+        "role": "system",
+        "content": "system"
+      },
+      {
+        "role": "user",
+        "content": "hello"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "function": {
+              "name": "web_search",
+              "arguments": {
+                "query": "Aiso"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "result",
+        "tool_call_id": "openai-only-id"
+      }
     ],
-    "tools": [{"type": "function", "function": {"name": "web_search", "parameters": {"type": "object"}}}],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "web_search",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
     "stream": true,
     "keep_alive": "30m",
     "think": "medium",
@@ -21,10 +54,32 @@
   "serialized_payload": {
     "model": "gpt-oss:20b",
     "messages": [
-      {"role": "system", "content": "system"},
-      {"role": "user", "content": "hello"},
-      {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "web_search", "arguments": {"query": "Aiso"}}}]},
-      {"role": "tool", "content": "result"}
+      {
+        "role": "system",
+        "content": "system"
+      },
+      {
+        "role": "user",
+        "content": "hello"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "function": {
+              "name": "web_search",
+              "arguments": {
+                "query": "Aiso"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "result"
+      }
     ],
     "stream": true,
     "keep_alive": "30m",
@@ -35,19 +90,56 @@
       "num_predict": 2048,
       "num_gpu": 20
     },
-    "tools": [{"type": "function", "function": {"name": "web_search", "parameters": {"type": "object"}}}]
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "web_search",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ]
   },
   "ndjson": [
     "{\"message\": {\"thinking\": \"reasoning\"}}",
     "{\"message\": {\"content\": \"hello \"}}",
     "{\"message\": {\"tool_calls\": [{\"function\": {\"name\": \"web_search\", \"arguments\": {\"query\": \"Aiso\"}}}]}}",
-    "{\"message\": {\"content\": \"world\"}, \"done\": true, \"done_reason\": \"stop\", \"eval_count\": 12, \"total_duration\": 34}"
+    "{\"message\": {\"content\": \"world\"}, \"done\": true, \"done_reason\": \"stop\", \"eval_count\": 12, \"total_duration\": 34, \"prompt_eval_count\": 57}"
   ],
   "events": [
-    {"kind": "thinking", "text": "reasoning"},
-    {"kind": "content", "text": "hello "},
-    {"kind": "tool_call_delta", "tool_calls": [{"function": {"name": "web_search", "arguments": {"query": "Aiso"}}}]},
-    {"kind": "content", "text": "world"},
-    {"kind": "done", "output_tokens": 12, "total_duration": 34, "done_reason": "stop"}
+    {
+      "kind": "thinking",
+      "text": "reasoning"
+    },
+    {
+      "kind": "content",
+      "text": "hello "
+    },
+    {
+      "kind": "tool_call_delta",
+      "tool_calls": [
+        {
+          "function": {
+            "name": "web_search",
+            "arguments": {
+              "query": "Aiso"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "kind": "content",
+      "text": "world"
+    },
+    {
+      "kind": "done",
+      "output_tokens": 12,
+      "total_duration": 34,
+      "done_reason": "stop",
+      "input_tokens": 57
+    }
   ]
 }

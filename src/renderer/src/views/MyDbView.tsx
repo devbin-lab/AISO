@@ -14,6 +14,7 @@ import type {
   MyDbTrashSnapshot
 } from '../../../shared/mydb'
 import { CloseIcon, DownloadIcon, EditIcon, FileIcon, FolderIcon, GraphIcon, LinkIcon, SearchIcon, TrashIcon, UnlinkIcon } from '../components/icons'
+import { confirmDialog } from '../components/ConfirmDialog'
 import { getMyDbBridge } from '../lib/mydb'
 import { applyRepulsion, BARNES_HUT_THETA, buildQuadTree } from './mydb-graph/quadtree'
 import { buildGraphRoutes } from './mydb-graph/routing'
@@ -164,6 +165,7 @@ function historyActionLabel(action: MyDbHistoryAction): string {
     renamed: '이름 변경',
     moved_to_trash: '휴지통 이동',
     restored: '복원',
+    purged: '완전 삭제',
     linked: '연결',
     unlinked: '연결 해제',
     content_changed: '내용 변경',
@@ -189,6 +191,8 @@ function historyDescription(entry: MyDbHistoryEntry): string {
       return `${subject}을(를) 휴지통으로 옮겼습니다.`
     case 'restored':
       return `${subject}을(를) 복원했습니다.`
+    case 'purged':
+      return `${subject}을(를) 완전히 삭제했습니다. 되돌릴 수 없습니다.`
     case 'linked':
       return `${subject}과(와) “${entry.relatedTitle ?? '항목'}”을(를) 연결했습니다.`
     case 'unlinked':
@@ -1992,6 +1996,35 @@ function MyDbView({ active }: Props): React.JSX.Element {
     })()
   }
 
+  /**
+   * 완전 삭제는 My DB에서 유일하게 되돌릴 수 없는 동작이다. 그래서
+   *  1) 휴지통 안에서만 가능하고(삭제 → 휴지통 → 완전 삭제, 두 단계),
+   *  2) 항목 이름을 확인 문구에 넣어 무엇을 지우는지 못 보고 누르는 일을 막고,
+   *  3) 파일이면 보관된 버전 기록까지 함께 사라진다는 사실을 미리 말한다.
+   */
+  const purgeFromTrash = async (node: MyDbNode): Promise<void> => {
+    const purge = getMyDbBridge().purgeNode
+    if (!purge) {
+      setError('완전 삭제를 준비하는 중입니다. Aiso를 다시 시작해 주세요.')
+      return
+    }
+    const ok = await confirmDialog({
+      title: '완전 삭제',
+      message: node.kind === 'file'
+        ? `“${node.title}”을(를) 완전히 삭제합니다.
+보관된 파일과 모든 버전 기록이 사라지며 되돌릴 수 없습니다.`
+        : `“${node.title}” 코어를 완전히 삭제합니다.
+연결이 함께 사라지며 되돌릴 수 없습니다.`,
+      confirmLabel: '완전 삭제',
+      danger: true
+    })
+    if (!ok) return
+    await runAction(async () => {
+      await purge(node.id)
+      setTrash(await getMyDbBridge().trash?.() ?? { nodes: [] })
+    }, '항목을 완전히 삭제했습니다.')
+  }
+
   const connect = (targetId: string): void => {
     if (!linkSourceId || targetId === linkSourceId) return
     const source = nodesById.get(linkSourceId)
@@ -2641,10 +2674,17 @@ function MyDbView({ active }: Props): React.JSX.Element {
               {(trash?.nodes ?? []).map((node) => (
                 <div key={node.id}>
                   <span><i className={node.kind === 'core' ? 'mydb-legend__dot mydb-legend__dot--core' : 'mydb-legend__dot mydb-legend__dot--file'} />{node.title}</span>
-                  <button type="button" onClick={() => void runAction(async () => {
-                    await getMyDbBridge().restoreNode(node.id)
-                    setTrash(await getMyDbBridge().trash?.() ?? { nodes: [] })
-                  }, '항목을 복원했습니다.')}>복원</button>
+                  <span className="mydb-trash-actions">
+                    <button type="button" onClick={() => void runAction(async () => {
+                      await getMyDbBridge().restoreNode(node.id)
+                      setTrash(await getMyDbBridge().trash?.() ?? { nodes: [] })
+                    }, '항목을 복원했습니다.')}>복원</button>
+                    <button
+                      type="button"
+                      className="mydb-trash-purge"
+                      onClick={() => void purgeFromTrash(node)}
+                    >완전 삭제</button>
+                  </span>
                 </div>
               ))}
               {(trash?.nodes.length ?? 0) === 0 && <p>휴지통이 비어 있습니다.</p>}

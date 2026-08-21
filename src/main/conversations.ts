@@ -3,6 +3,7 @@ import { join } from 'path'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'fs'
 import { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'crypto'
+import { referencedAttachmentIds } from './attachment-gc'
 import type {
   AgentProject,
   Conversation,
@@ -476,6 +477,26 @@ export function deleteConversation(id: string): void {
     console.error('[conversations] 삭제 실패:', err)
   }
 }
+
+/**
+ * 대화가 실제로 참조 중인 첨부 id 전체.
+ *
+ * 첨부 저장소 정리(첨부 GC)가 "무엇을 남겨야 하는지" 판단할 때 쓴다. 저장 구조를
+ * 따라 파싱하지 않고 data JSON 전체에서 uuid 패턴을 훑는다 — 한쪽 구조가 바뀌어도
+ * 참조를 놓쳐 사용자 파일을 지우는 일이 없도록. 과보존은 안전하지만 과삭제는 복구 불가다.
+ */
+export function listReferencedAttachmentIds(): Set<string> {
+  try {
+    const rows = db().prepare('SELECT data FROM conversations').all() as Array<{ data: string }>
+    return referencedAttachmentIds(rows.map((row) => String(row.data ?? '')))
+  } catch (err) {
+    console.error('[conversations] 첨부 참조 수집 실패:', err)
+    // 실패하면 "참조가 하나도 없다"가 아니라 예외를 올린다 — 빈 집합을 돌려주면
+    // 호출부가 저장소를 통째로 지운다.
+    throw err
+  }
+}
+
 
 /** 모든 대화를 지운다(공장초기화). */
 export function clearAllConversations(): void {

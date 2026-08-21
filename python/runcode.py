@@ -19,6 +19,7 @@ import threading
 import uuid
 from pathlib import Path
 
+import winjob
 from tools import ToolError, _resolve
 from process_env import sanitized_child_environment
 
@@ -80,6 +81,9 @@ class CapturedProcess:
     timed_out: bool
     stdout_truncated: bool
     stderr_truncated: bool
+    # 봉쇄를 요청했는데 걸지 못했으면 False. 호출자는 이 사실을 결과에 드러내야 한다 —
+    # 조용히 약해지는 보안 장치가 가장 나쁘다.
+    contained: bool = True
 
 
 def _drain_pipe(pipe, sink: _BoundedBytes) -> None:
@@ -125,8 +129,19 @@ def run_process_capped(
     timeout: int,
     max_output_bytes: int = MAX_PROCESS_OUTPUT_BYTES,
     creationflags: int = 0,
+    job_limits: "winjob.JobLimits | None" = None,
 ) -> CapturedProcess:
-    """Run a child process without letting unbounded output consume backend RAM."""
+    """Run a child process without letting unbounded output consume backend RAM.
+
+    ``job_limits`` 를 주면 Windows Job Object 로 봉쇄한다. 자식은 **정지 상태로**
+    만들어 job 에 넣은 뒤 재개한다 — 먼저 돌게 두면 할당 전에 자식을 낳을 수 있고,
+    그 자식은 제한 밖에 있게 된다. 이 순서가 봉쇄의 전부다.
+    """
+    job = winjob.create_job(job_limits) if job_limits is not None else None
+    contained = job_limits is None or job is not None
+    spawn_flags = creationflags | _CREATE_NO_WINDOW | _CREATE_NEW_GROUP
+    if job is not None:
+        spawn_flags |= winjob.CREATE_SUSPENDED
     proc = subprocess.Popen(
         command,
         cwd=cwd,
@@ -134,8 +149,16 @@ def run_process_capped(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        creationflags=creationflags | _CREATE_NO_WINDOW | _CREATE_NEW_GROUP,
+        creationflags=spawn_flags,
     )
+    if job is not None:
+        try:
+            if not winjob.assign_process(job, int(proc._handle)):  # type: ignore[attr-defined]
+                contained = False
+        finally:
+            # 할당에 실패해도 반드시 재개해야 한다. 안 그러면 정지된 채로 남아
+            # 타임아웃까지 매달린다.
+            winjob.resume_process(proc.pid)
     assert proc.stdout is not None and proc.stderr is not None
     stdout_sink = _BoundedBytes(max_output_bytes)
     stderr_sink = _BoundedBytes(max_output_bytes)
@@ -148,17 +171,22 @@ def run_process_capped(
 
     timed_out = False
     try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _kill_process_tree(proc)
         try:
-            proc.wait(timeout=5)
+            proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            pass
+            timed_out = True
+            _kill_process_tree(proc)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        finally:
+            for reader in readers:
+                reader.join(timeout=5)
     finally:
-        for reader in readers:
-            reader.join(timeout=5)
+        # KILL_ON_JOB_CLOSE 덕에 핸들을 닫는 것만으로 살아남은 손자까지 함께 죽는다.
+        # taskkill /T 는 부모가 이미 죽은 손자를 놓치지만 이것은 놓치지 않는다.
+        winjob.close_job(job)
 
     stdout, stdout_truncated = stdout_sink.result()
     stderr, stderr_truncated = stderr_sink.result()
@@ -169,6 +197,7 @@ def run_process_capped(
         timed_out=timed_out,
         stdout_truncated=stdout_truncated,
         stderr_truncated=stderr_truncated,
+        contained=contained,
     )
 
 RUN_CODE_SCHEMA = {
@@ -198,6 +227,23 @@ def _find_python() -> str:
                 if exe.exists():
                     return str(exe)
     return sys.executable  # 폴백: 사이드카 인터프리터
+
+
+def _python_process_budget(exe: str) -> int:
+    """이 인터프리터로 .py 를 돌릴 때 필요한 최소 프로세스 수.
+
+    venv 의 python.exe 는 실제 인터프리터를 다시 띄우는 **리다이렉터**라 한 개를 더 쓴다
+    (실측: 시스템 python 은 한도 1로 성공, venv python 은 한도 1에서 rc=101
+    "Unable to create process"). _find_python() 이 시스템 인터프리터를 못 찾아
+    사이드카 자신으로 폴백한 경우에만 해당한다.
+
+    그 경우 봉쇄가 한 칸 느슨해진다 — 검증 코드가 자식 하나를 만들 수 있다.
+    한도를 1로 조이면 검증 자체가 아예 안 되므로 이쪽을 택했고, 이 사실을 여기 적어 둔다.
+    """
+    base = getattr(sys, "_base_executable", None)
+    same = os.path.normcase(exe) == os.path.normcase(sys.executable)
+    redirector = bool(base) and os.path.normcase(str(base)) != os.path.normcase(sys.executable)
+    return 2 if (same and redirector) else winjob.UNTRUSTED_PROCESS_LIMIT
 
 
 def _find_dotnet() -> str | None:
@@ -269,28 +315,41 @@ def _run_sync(target: Path, rel: str) -> str:
         DOTNET_CLI_TELEMETRY_OPTOUT="1",
     )
 
-    def runp(cmd: list[str], timeout: int, env_override: dict | None = None) -> CapturedProcess:
+    def runp(
+        cmd: list[str],
+        timeout: int,
+        env_override: dict | None = None,
+        *,
+        limits: winjob.JobLimits,
+    ) -> CapturedProcess:
         return run_process_capped(
             cmd,
             cwd=cwd,
             env=env_override or env,
             timeout=timeout,
+            job_limits=limits,
         )
 
     def report(label: str, captured: CapturedProcess) -> str:
         if captured.timed_out:
             return f"⏱ {rel} {label}이(가) 시간을 초과했습니다 (무한 루프·입력 대기 등을 확인하세요)."
-        return _fmt(
+        text = _fmt(
             rel,
             label,
             captured.returncode,
             captured.stdout.decode("utf-8", errors="replace"),
             captured.stderr.decode("utf-8", errors="replace"),
         )
+        return text if captured.contained else text + winjob.CONTAINMENT_UNAVAILABLE_NOTE
 
     try:
         if ext == ".py":
-            r = runp([_find_python(), str(target)], RUN_TIMEOUT)
+            interpreter = _find_python()
+            r = runp(
+                [interpreter, str(target)],
+                RUN_TIMEOUT,
+                limits=winjob.JobLimits(active_processes=_python_process_budget(interpreter)),
+            )
             return report("Python", r)
 
         if ext in (".cpp", ".cc", ".cxx", ".c"):
@@ -308,7 +367,10 @@ def _run_sync(target: Path, rel: str) -> str:
             exe = str(Path(tempfile.gettempdir()) / f"aiso_run_{os.getpid()}_{uuid.uuid4().hex}.exe")
             try:
                 std = [] if is_c else ["-std=c++17"]
-                comp = runp([cxx, str(target), *std, "-O0", "-o", exe], BUILD_TIMEOUT, cenv)
+                # 컴파일러는 신뢰 대상이다(우리가 번들한 g++). cc1plus·as·ld 를 낳으므로
+                # 여유를 준다 — 실측 최소 3, 여기서는 4.
+                comp = runp([cxx, str(target), *std, "-O0", "-o", exe], BUILD_TIMEOUT, cenv,
+                            limits=winjob.COMPILER)
                 if comp.timed_out:
                     return report("컴파일", comp)
                 if comp.returncode != 0:
@@ -316,7 +378,8 @@ def _run_sync(target: Path, rel: str) -> str:
                 # 컴파일·링크 성공. 실행을 시도하되, Windows Smart App Control(SAC)이
                 # 갓 빌드된 무서명 exe 실행을 막으면(WinError 4551) 빌드 검증까지를 결과로 인정한다.
                 try:
-                    r = runp([exe], RUN_TIMEOUT, cenv)
+                    # 여기서부터가 신뢰할 수 없는 코드다 — 한도 1로 조여 자식 생성을 막는다.
+                    r = runp([exe], RUN_TIMEOUT, cenv, limits=winjob.UNTRUSTED)
                     return report("C/C++ 실행", r)
                 except OSError as e:
                     if getattr(e, "winerror", None) == 4551:
@@ -336,8 +399,26 @@ def _run_sync(target: Path, rel: str) -> str:
             dn = _find_dotnet()
             if not dn:
                 return "[검증 불가] .NET SDK가 설치되어 있지 않습니다."
-            r = runp([dn, "run", str(target)], BUILD_TIMEOUT)
-            return report("C#", r)
+            # `dotnet run` 은 빌드와 실행을 한 프로세스 트리에서 한다. 그러면 사용자 코드가
+            # 빌드 시스템에 필요한 프로세스 여유 안에서 돌게 되어 자식 생성을 막을 수 없다.
+            # 그래서 둘로 쪼갠다 — 빌드는 여유를 주고, **실행은 한도 1로 조인다**.
+            # (실측: dotnet build 는 최소 3, 산출된 exe 실행은 1로 충분하다.)
+            outdir = Path(tempfile.gettempdir()) / f"aiso_cs_{os.getpid()}_{uuid.uuid4().hex}"
+            try:
+                build = runp([dn, "build", str(target), "-o", str(outdir)], BUILD_TIMEOUT,
+                             limits=winjob.BUILD_SYSTEM)
+                if build.timed_out or build.returncode != 0:
+                    return report("C# 빌드", build)
+                built = next(iter(sorted(outdir.glob("*.exe"))), None)
+                if built is None:
+                    # 산출물을 못 찾으면 예전 경로로 되돌린다 — 검증을 못 하는 것보다는 낫다.
+                    # 이 경로에서는 실행이 빌드 트리 안에 있어 봉쇄가 느슨하다.
+                    r = runp([dn, "run", str(target)], BUILD_TIMEOUT, limits=winjob.BUILD_SYSTEM)
+                    return report("C#", r)
+                r = runp([str(built)], RUN_TIMEOUT, limits=winjob.UNTRUSTED)
+                return report("C# 실행", r)
+            finally:
+                shutil.rmtree(outdir, ignore_errors=True)
 
         return f"[검증 불가] 실행 검증을 지원하지 않는 확장자입니다: {ext} (지원: .py, .c, .cpp, .cs)"
     except subprocess.TimeoutExpired:

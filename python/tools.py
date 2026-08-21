@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import time
+from collections.abc import Callable
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -25,6 +26,7 @@ MAX_GREP_FILES = 5000             # 스캔 파일 수 상한
 MAX_GREP_FILE_BYTES = 5 * 1024 * 1024  # 이보다 큰 파일은 스캔 제외
 MAX_MATCH_LINE_LEN = 300          # 매치 라인 표시 길이
 MAX_GLOB_RESULTS = 300            # glob 결과 파일 수 상한
+MAX_DELETE_DIR_SCAN = 20_000      # delete_dir 안내 문구용 파일 개수 세기 상한
 MAX_CODE_FILE_BYTES = 2 * 1024 * 1024
 MAX_HTML_SCAN_ENTRIES = 50_000
 MAX_HTML_SCAN_SECONDS = 2.0
@@ -908,9 +910,19 @@ def delete_dir(root: Path, path: str) -> str:
         raise ToolError(f"파일입니다. delete_file을 사용하세요: {path}")
     if not target.is_dir():
         raise ToolError(f"폴더가 없습니다: {path}")
-    n_files = sum(1 for p in target.rglob("*") if p.is_file())
+    # 개수는 안내 문구에만 쓰인다. 그것 때문에 거대한 폴더에서 트리 전체를 순회하는
+    # 것은 값이 맞지 않는다 — 상한까지만 세고 넘으면 '이상'으로 표시한다.
+    n_files = 0
+    capped = False
+    for entry in target.rglob("*"):
+        if entry.is_file():
+            n_files += 1
+            if n_files >= MAX_DELETE_DIR_SCAN:
+                capped = True
+                break
     how = _trash_or_remove(target, is_dir=True)
-    return f"{_rel(root, target)}/ 폴더를 {how} (하위 파일 {n_files}개 포함)."
+    counted = f"{n_files}개 이상" if capped else f"{n_files}개"
+    return f"{_rel(root, target)}/ 폴더를 {how} (하위 파일 {counted} 포함)."
 
 
 def move(root: Path, src: str, dst: str) -> str:
@@ -943,7 +955,9 @@ def move(root: Path, src: str, dst: str) -> str:
     return f"{src_label} → {_rel(root, d)} 로 이동함."
 
 
-_DISPATCH = {
+# 툴 구현은 시그니처가 제각각이고 run_tool이 **args로 펼쳐 넘긴다. 공통 계약은
+# "root를 첫 인자로 받고 사람이 읽을 문자열을 돌려준다"는 것뿐이다.
+_DISPATCH: dict[str, Callable[..., str]] = {
     "list_dir": list_dir,
     "list_tree": list_tree,
     "grep": grep,
@@ -964,7 +978,15 @@ _DISPATCH = {
 }
 
 
-def run_tool(root: Path, name: str, args: dict) -> str:
+def run_tool(root: Path | None, name: str, args: dict) -> str:
+    """파일 도구 디스패치.
+
+    root 가 Optional 인 이유: 작업 폴더를 고르지 않은 런에서 하네스가 미등록 이름을
+    이 함수로 흘려보낸다(agent_runner 의 폴백). 그 경로는 아래 이름 조회에서 먼저
+    끊기므로 root 를 만지지 않는다. 등록된 이름인데 root 가 없는 조합은 지금은
+    도달하지 않지만, 도달하면 _resolve 의 `None / rel` TypeError 대신 도구 이름이
+    담긴 ToolError 로 끊어 무엇이 잘못됐는지 보이게 한다.
+    """
     # The public Agent schema uses calendar terminology.  Keep the former
     # identifier here only for old persisted traces and integrations.
     name = {
@@ -973,6 +995,8 @@ def run_tool(root: Path, name: str, args: dict) -> str:
     fn = _DISPATCH.get(name)
     if fn is None:
         raise ToolError(f"알 수 없는 툴: {name}")
+    if root is None:
+        raise ToolError(f"'{name}'은(는) 작업 폴더가 있어야 실행할 수 있습니다.")
     try:
         return fn(root, **args)
     except ToolError:

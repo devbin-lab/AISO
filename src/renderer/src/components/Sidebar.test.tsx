@@ -134,4 +134,46 @@ describe('Sidebar projects', () => {
     await waitFor(() => expect(createConversation).toHaveBeenCalledWith('project-1'))
     expect(onOpenConversation).toHaveBeenCalledWith('agent', child.id)
   })
+
+  it('모드 선택 오른쪽의 홈 버튼이 홈 대시보드를 연다', async () => {
+    installApi()
+    const user = userEvent.setup()
+    const onNavigate = vi.fn()
+    const { container } = render(
+      <Sidebar
+        view="agent"
+        activeConversation={null}
+        onNavigate={onNavigate}
+        onNewConversation={vi.fn()}
+        onOpenConversation={vi.fn()}
+      />
+    )
+
+    const home = await screen.findByRole('button', { name: '홈 대시보드' })
+    // 모드 드롭다운과 같은 줄, 그 오른쪽에 있어야 한다.
+    const modeRow = container.querySelector('.sidebar__mode')
+    expect(modeRow?.contains(home)).toBe(true)
+    expect(modeRow?.querySelector('.dd')?.compareDocumentPosition(home))
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+
+    expect(home.getAttribute('aria-pressed')).toBe('false')
+    await user.click(home)
+    expect(onNavigate).toHaveBeenCalledWith('home')
+  })
+
+  it('홈에 있을 때 홈 버튼이 활성으로 표시된다', async () => {
+    installApi()
+    render(
+      <Sidebar
+        view="home"
+        activeConversation={null}
+        onNavigate={vi.fn()}
+        onNewConversation={vi.fn()}
+        onOpenConversation={vi.fn()}
+      />
+    )
+    const home = await screen.findByRole('button', { name: '홈 대시보드' })
+    expect(home.getAttribute('aria-pressed')).toBe('true')
+    expect(home.className).toContain('sidebar__home--active')
+  })
 })

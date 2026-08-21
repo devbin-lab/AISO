@@ -25,7 +25,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any
+from typing import Any, cast
 from urllib.parse import unquote, urlsplit
 from urllib.request import url2pathname
 
@@ -373,8 +373,13 @@ def _execute_steps(
                     raise _StepFailure("상대 좌표 클릭에는 x_ratio와 y_ratio가 모두 필요합니다.")
                 if has_x_ratio:
                     try:
-                        x_ratio = float(step.get("x_ratio"))
-                        y_ratio = float(step.get("y_ratio"))
+                        # step은 사용자/모델이 준 임의 JSON이라 값이 None이나 문자열일 수 있다.
+                        # 그때 float()가 내는 TypeError/ValueError를 아래 except가 사용자 메시지로
+                        # 바꾸는 것이 이 자리의 계약이므로, 값은 좁히지 않고 Any로 받는다.
+                        raw_x: Any = step.get("x_ratio")
+                        raw_y: Any = step.get("y_ratio")
+                        x_ratio = float(raw_x)
+                        y_ratio = float(raw_y)
                     except (TypeError, ValueError) as exc:
                         raise _StepFailure("x_ratio와 y_ratio는 0~1 사이 숫자여야 합니다.") from exc
                     if not (0.0 <= x_ratio <= 1.0 and 0.0 <= y_ratio <= 1.0):
@@ -443,7 +448,11 @@ def _execute_steps(
                 locator, target = _unique_locator(page, step)
                 actual = locator.inner_text().strip()
                 if "equals" in step:
-                    expected = str(step.get("equals") if step.get("equals") is not None else "").strip()
+                    # 아래 state 단언에서는 같은 이름에 원본 JSON 값(문자열이 아닐 수 있음)이
+                    # 다시 담긴다. 첫 대입으로 str에 고정되지 않도록 Any로 선언해 둔다.
+                    expected: Any = str(
+                        step.get("equals") if step.get("equals") is not None else ""
+                    ).strip()
                     if actual != expected:
                         raise _StepFailure(
                             f"텍스트가 다릅니다: {target}, expected={expected!r}, actual={actual!r}"
@@ -647,7 +656,9 @@ def _run_web_sync(
             browser = p.chromium.launch(
                 channel="msedge",
                 headless=True,
-                env=sanitized_child_environment(),
+                # playwright의 env는 dict[str, str | float | bool]인데 dict는 불변(invariant)이라
+                # dict[str, str]이 그대로 들어가지 않는다. 값은 전부 str이므로 표기만 넓힌다.
+                env=cast("dict[str, str | float | bool]", sanitized_child_environment()),
                 args=["--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
             )
             context = None
@@ -790,7 +801,10 @@ def _timeout_report(path: str) -> tuple[str, None]:
 def _terminate_process_tree(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         return
-    if os.name == "nt":
+    # os.name 대신 sys.platform으로 분기해야 타입 검사기가 플랫폼 분기를 인식해
+    # 아래 else의 POSIX 전용 API(os.killpg/signal.SIGKILL)를 Windows에서 오탐하지 않는다.
+    # CPython에서 sys.platform == "win32" ⟺ os.name == "nt" 이므로 판정은 동일하다.
+    if sys.platform == "win32":
         try:
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
@@ -966,7 +980,8 @@ async def run_web(
     if target.suffix.lower() not in (".html", ".htm"):
         raise ToolError("HTML 파일만 실행·검사할 수 있습니다.")
     cancel_event = threading.Event()
-    process_args = (root, path, actions, steps, cancel_event)
+    # 조건에 따라 원소 수가 달라지는 가변 인자 묶음이라 고정 길이 튜플로 굳으면 안 된다.
+    process_args: tuple[Any, ...] = (root, path, actions, steps, cancel_event)
     if _strict_local_assets:
         process_args = (*process_args, True)
     task = asyncio.create_task(asyncio.to_thread(_run_web_process, *process_args))

@@ -71,7 +71,10 @@ from llm import (
 try:
     import discordbot
 except Exception:  # noqa: BLE001
-    discordbot = None
+    # 선택적 임포트의 표준형. ModuleType | None 으로 정직하게 넓히면 모든 사용처
+    # (314·1467·1474·1481)의 속성 접근이 Any 가 되어 discordbot API 검사 자체가
+    # 사라진다 — 이미 세 곳 모두 `is None` 가드를 통과한 뒤이므로 여기만 덮는다.
+    discordbot = None  # type: ignore[assignment]
 
 DEFAULT_OLLAMA = os.environ.get("AISO_OLLAMA_HOST", "http://localhost:11434")
 MAX_DISCORD_PARSE_RETRIES = 2  # 디스코드 툴 루프의 툴콜 파싱오류 재생성 상한(agent 경로와 동일)
@@ -698,6 +701,11 @@ class ChatMessage(BaseModel):
     # Opaque IDs only.  The Electron main process stages user selections in an
     # app-managed store; the renderer never sends an arbitrary local path.
     attachments: list[str] = Field(default_factory=list, max_length=16)
+    # 런 경계를 넘겨 '계속해줘'가 이어갈 수 있게 하는 도구 실행 기록.
+    # assistant의 tool_calls와 그 결과인 tool 메시지는 반드시 짝을 이뤄야 한다 —
+    # 짝이 맞지 않으면 OpenAI 호환 공급자가 요청 전체를 거부한다.
+    tool_calls: list[dict[str, Any]] | None = Field(default=None, max_length=16)
+    tool_call_id: str | None = Field(default=None, max_length=512)
 
 
 class ChatRequest(BaseModel):
@@ -874,6 +882,60 @@ async def _prepare_model(host: str, model: str) -> LlmModelRuntime:
     return await create_runtime("ollama", host).prepare_model(model)
 
 
+def _paired_tool_history(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+    """대화를 모델용 dict로 바꾸면서 도구 호출/결과의 짝을 강제한다.
+
+    OpenAI 호환 공급자는 tool_calls를 낸 assistant 메시지마다 각 호출 ID에 대응하는
+    tool 메시지를 요구하고, 짝이 맞지 않으면 요청 전체를 400으로 거부한다. Ollama는
+    관대하지만 짝이 깨진 이력은 모델을 혼란시킨다.
+
+    화면이 보내는 이력을 그대로 믿지 않는다 — 중단된 실행에서는 결과가 없는 호출이
+    남을 수 있다. 결과가 없는 호출은 assistant에서 떼어내고, 대응하는 호출이 없는
+    tool 메시지는 버린다. 남는 것은 항상 완전한 짝뿐이다.
+    """
+    prepared: list[dict[str, Any]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.role != "assistant" or not message.tool_calls:
+            if message.role == "tool":
+                index += 1  # 짝이 되는 호출 없이 떠 있는 결과 — 버린다
+                continue
+            prepared.append({"role": message.role, "content": message.content})
+            index += 1
+            continue
+
+        # 이 assistant 뒤에 연속으로 붙은 tool 결과를 모은다.
+        results: dict[str, str] = {}
+        scan = index + 1
+        while scan < len(messages) and messages[scan].role == "tool":
+            result_id = messages[scan].tool_call_id
+            if result_id:
+                results[result_id] = messages[scan].content
+            scan += 1
+
+        matched = [
+            call for call in message.tool_calls
+            if isinstance(call, dict) and str(call.get("id") or "") in results
+        ]
+        if matched:
+            prepared.append({
+                "role": "assistant",
+                "content": message.content,
+                "tool_calls": matched,
+            })
+            for call in matched:
+                call_id = str(call.get("id") or "")
+                prepared.append({
+                    "role": "tool", "tool_call_id": call_id, "content": results[call_id],
+                })
+        elif message.content:
+            # 결과가 하나도 없으면 호출 목록을 떼고 문장만 남긴다.
+            prepared.append({"role": "assistant", "content": message.content})
+        index = scan
+    return prepared
+
+
 def _messages_with_latest_attachments(
     messages: list[ChatMessage], *, allow_images: bool
 ) -> list[dict[str, Any]]:
@@ -883,7 +945,7 @@ def _messages_with_latest_attachments(
     inflate small local-model contexts.  The current user turn is the explicit
     attachment scope; conversation history still retains the ordinary text.
     """
-    prepared = [{"role": message.role, "content": message.content} for message in messages]
+    prepared = _paired_tool_history(messages)
     if not messages:
         return prepared
     last_user = next((message for message in reversed(messages) if message.role == "user"), None)
@@ -1553,6 +1615,21 @@ async def agent(req: AgentRequest):
             local_enabled_tools = list(normalize_enabled_tool_names(req.enabled_tools))
         except ToolError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        # 로컬(Ollama)도 '정확히 한 번' 실행 보장을 받는다. 예전에는 원장이 NVIDIA
+        # 블록 안에서만 만들어져서, 사용자 대부분이 쓰는 기본 경로에는 아예 없었다 —
+        # 파괴적 도구가 취소·재시도·크래시에서 중복 실행돼도 막을 것이 없었다.
+        #
+        # 키 3요소는 이미 전부 있다: 화면이 로컬 실행에도 session_id·assistant_turn_id를
+        # UUID로 보내고, _normalize_tool_calls가 툴콜 ID를 합성한다.
+        #
+        # NVIDIA와 달리 fail-closed로 만들지 않는다. NVIDIA는 선택 기능이라 원장이
+        # 없으면 503이 맞지만, 로컬은 제품의 기본 경로다. 원장 파일 하나 때문에 앱
+        # 전체가 멈추는 편이 더 나쁘다 — 보장을 얻지 못할 뿐 실행은 계속한다.
+        if AGENT_LEDGER_PATH and not _agent_ledger_startup_error and req.session_id and req.assistant_turn_id:
+            try:
+                ledger = AgentExecutionLedger(AGENT_LEDGER_PATH)
+            except (LedgerError, OSError):
+                ledger = None
     host = (
         _require_local_ollama_host(str(nvidia_execution_scope.get("ollamaHost") or DEFAULT_OLLAMA))
         if nvidia_execution_scope is not None and nvidia_execution_scope.get("ragEnabled")
@@ -1865,8 +1942,18 @@ async def ollama_pull(req: OllamaPullRequest):
                         if status == "success":
                             yield json.dumps({"type": "done", "model": model}, ensure_ascii=False) + "\n"
                             return
-            # success 없이 스트림이 끝난 경우도 완료로 간주
-            yield json.dumps({"type": "done", "model": model}, ensure_ascii=False) + "\n"
+            # success 표식 없이 스트림이 끝났다 = 내려받기가 중간에 끊겼다는 뜻이다.
+            # 예전에는 이것도 done으로 보고했는데, 그러면 사용자는 모델이 설치된 줄
+            # 알고 넘어가고 정작 채팅에서 "모델 없음"으로 실패한다. 실패로 보고해야
+            # 재시도할 수 있다. (Ollama는 오류가 나도 HTTP 200을 주므로 상태 코드로는
+            # 구분되지 않는다 — 스트림의 success 표식이 유일한 완료 근거다.)
+            yield json.dumps(
+                {
+                    "type": "error",
+                    "error": "모델 내려받기가 완료 표식 없이 중단되었습니다. 다시 시도해 주세요.",
+                },
+                ensure_ascii=False,
+            ) + "\n"
         except Exception as e:  # noqa: BLE001 — 연결 끊김 등은 오류로 중계
             yield json.dumps({"type": "error", "error": f"연결 실패: {e}"}, ensure_ascii=False) + "\n"
 

@@ -4,6 +4,8 @@ import { DEFAULT_SETTINGS } from '../../shared/settings'
 import type { BackendInfo, HealthInfo } from '../../shared/backend'
 import type { ConversationKind } from '../../shared/conversation'
 import Titlebar from './components/Titlebar'
+// 홈은 기본 진입 화면이라 lazy로 두면 매 기동마다 로딩 문구가 스친다. 무거운 의존이 없어 정적 import.
+import HomeView from './views/HomeView'
 import Sidebar, { type ConversationRequest, type ViewKey } from './components/Sidebar'
 import TooltipHost from './components/Tooltip'
 import { ConfirmHost } from './components/ConfirmDialog'
@@ -126,7 +128,7 @@ function App(): React.JSX.Element {
   }
 
   // 뷰는 숨김 처리로 유지 → 채팅 대화가 뷰 전환에 사라지지 않는다
-  const wrap = (k: ViewKey): string => `viewwrap${k === 'todo' ? ' viewwrap--todo' : ''}${k === 'graph' ? ' viewwrap--graph' : ''}${view === k ? '' : ' viewwrap--hidden'}`
+  const wrap = (k: ViewKey): string => `viewwrap${k === 'todo' ? ' viewwrap--todo' : ''}${k === 'graph' ? ' viewwrap--graph' : ''}${k === 'home' ? ' viewwrap--home' : ''}${view === k ? '' : ' viewwrap--hidden'}`
   const navigate = (next: ViewKey): void => {
     setVisitedViews((current) => current.has(next) ? current : new Set(current).add(next))
     setView(next)
@@ -156,7 +158,7 @@ function App(): React.JSX.Element {
           collapsed={sidebarCollapsed}
         />
         <main className="content">
-          {visitedViews.has('home') && <div className={wrap('home')} aria-label="홈" />}
+          {visitedViews.has('home') && <div className={wrap('home')} aria-label="홈"><HomeView active={view === 'home'} backend={backend} health={health} settings={settings} onNavigate={navigate} /></div>}
           {visitedViews.has('chat') && <div className={wrap('chat')}><Suspense fallback={<ViewFallback />}><ChatView settings={settings} backend={backend} health={health} onSaveSettings={saveSettings} conversationRequest={conversationRequest} onConversationActive={(id) => setConversationRequest({ kind: 'chat', id, nonce: Date.now() })} /></Suspense></div>}
           {visitedViews.has('agent') && <div className={wrap('agent')}><Suspense fallback={<ViewFallback />}><AgentView active={view === 'agent'} settings={settings} backend={backend} health={health} onPickWorkspace={pickWorkspace} onSaveSettings={saveSettings} conversationRequest={conversationRequest} onConversationActive={(id) => setConversationRequest({ kind: 'agent', id, nonce: Date.now() })} /></Suspense></div>}
           {visitedViews.has('todo') && <div className={wrap('todo')}><Suspense fallback={<ViewFallback />}><TodoView active={view === 'todo'} backend={backend} /></Suspense></div>}

@@ -120,7 +120,13 @@ export type AgentEvent =
       type: 'tool_result'
       ok: boolean
       output: string
+      /** 사용자가 명시적으로 거부했다. */
       rejected?: boolean
+      /**
+       * 승인 요청에 응답이 오지 않았다. `rejected`와 반드시 구분한다 — 사용자는
+       * 거부한 적이 없고, 자리를 비웠거나 창을 닫았을 뿐이다.
+       */
+      expired?: boolean
       reused?: boolean
     } & AgentToolIdentity)
   | { type: 'screenshot'; id: string; assistantTurnId: string; data: string }
@@ -138,6 +144,18 @@ export type AgentEvent =
       /** Progress feedback for the current stream only; clear it at the next tool/terminal event. */
       transient?: boolean
     }
+  /**
+   * 안전 한도로 런이 멈출 때, 하네스가 **실제로 관측한** 도구 실행 기록.
+   * 모델의 서술이 아니다 — 둘을 섞으면 "했다고 말했지만 안 한 것"이 다음 런으로
+   * 넘어간다. 다음 실행의 대화 히스토리에 이어붙여 '계속해줘'가 근거를 갖게 한다.
+   */
+  | { type: 'run_summary'; text: string }
+  /**
+   * 런이 **안전 한도**에 걸려 멈췄다는 기계용 신호. 사용자에게 보이는 안내는
+   * 별도 notice 로 이미 나간다 — 그 한국어 문구를 파싱하게 두면 문구를 고칠
+   * 때마다 자동 이어가기가 조용히 깨진다.
+   */
+  | { type: 'run_limit'; reason: 'max_steps' | 'repetition' | 'repeat' | 'stall' | 'tool_budget' | 'truncated' }
   | { type: 'usage'; total: number }
   | { type: 'done' }
   | { type: 'error'; error: string }

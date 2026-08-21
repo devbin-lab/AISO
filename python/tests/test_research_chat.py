@@ -9,10 +9,14 @@ from __future__ import annotations
 import asyncio
 
 import agent
+import agent_research
 import websearch
 from llm import LlmModelRuntime, LlmRequest
 from llm.providers import ollama as ollama_provider
 from toolspec import REGISTRY
+
+
+NL = chr(10)
 
 
 async def _collect(gen) -> list[dict]:
@@ -63,7 +67,12 @@ def test_research_forces_fetch_after_search_only(monkeypatch):
 
     async def on_execute(spec, root, host, args):
         executed.append(spec.name)
-        return (f"[{spec.name} 결과] …", None)
+        # 실제 web_search 는 열어볼 수 있는 URL을 반환한다. URL이 없는 결과는
+        # 이제 "근거 없음"으로 판정되어 fetch 넛지를 발동시키지 않으므로,
+        # 넛지 동작을 검증하려면 픽스처도 현실적이어야 한다.
+        if spec.name == "web_search":
+            return ("검색 결과 1건\n1. 예시 — https://example.com/a", None)
+        return (_page(args.get("url") or "https://e.com"), None)
 
     calls = _script(
         monkeypatch,
@@ -85,13 +94,24 @@ def test_research_forces_fetch_after_search_only(monkeypatch):
     assert calls["i"] == 4  # 네 턴 모두 생성됨(넛지로 이어감)
 
 
+def _page(url: str) -> str:
+    """현실적인 web_fetch 성공 결과. 본문이 없으면 이제 근거로 세지 않는다 —
+    차단 페이지를 '읽었다'로 치던 오답을 막는 게이트가 생겼기 때문이다."""
+    return f"[{url}] . 제목" + chr(10) * 2 + "본문 문장입니다. " * 40
+
+
 def test_research_no_nudge_when_already_fetched(monkeypatch):
     """이미 web_fetch로 원문을 읽었으면 넛지하지 않고 바로 마무리한다(중복 강제 방지)."""
     executed: list[str] = []
 
     async def on_execute(spec, root, host, args):
         executed.append(spec.name)
-        return (f"[{spec.name} 결과] …", None)
+        # 실제 web_search 는 열어볼 수 있는 URL을 반환한다. URL이 없는 결과는
+        # 이제 "근거 없음"으로 판정되어 fetch 넛지를 발동시키지 않으므로,
+        # 넛지 동작을 검증하려면 픽스처도 현실적이어야 한다.
+        if spec.name == "web_search":
+            return ("검색 결과 1건\n1. 예시 — https://example.com/a", None)
+        return (_page(args.get("url") or "https://e.com"), None)
 
     calls = _script(
         monkeypatch,
@@ -126,7 +146,7 @@ def test_research_auto_fetches_top_search_urls(monkeypatch):
                 "3. C\n   https://c.example/3\n   snippet c",
                 None,
             )
-        return (f"[본문] {args.get('url')}", None)
+        return (_page(args.get("url") or "https://e.com"), None)
 
     calls = _script(
         monkeypatch,
@@ -328,3 +348,246 @@ def test_web_search_recency_query_is_anchored_to_current_year():
     assert websearch.enrich_recency_query("OpenAI latest news", year=2026) == "OpenAI latest news 2026"
     assert websearch.enrich_recency_query("OpenAI 최신 뉴스 2025", year=2026).endswith("2026")
     assert websearch.enrich_recency_query("파이썬 리스트 정렬", year=2026) == "파이썬 리스트 정렬"
+
+
+def test_research_tool_results_are_capped_at_record_time(monkeypatch):
+    """리서치 루프의 도구 결과도 기록 시점에 잘린다.
+
+    회귀 방지: 절단을 `compact_convo`에서 기록 시점으로 옮길 때, 에이전트 루프만
+    새 관문(ModelConversation)을 쓰고 리서치 루프는 평범한 list로 남을 뻔했다.
+    그러면 web_fetch 원문(최대 3만자)이 무제한으로 모델 컨텍스트에 들어간다 —
+    compact_convo는 더 이상 내용을 자르지 않기 때문이다.
+    """
+    huge = "본문 " * 20_000
+
+    async def on_execute(spec, root, host, args):
+        return (huge, None)
+
+    seen_payloads: list = []
+    original_request = agent.LlmRequest
+
+    _script(
+        monkeypatch,
+        [
+            _final([{"function": {"name": "web_fetch", "arguments": {"url": "https://e.com"}}}]),
+            _final([], content="정리 완료"),
+        ],
+        on_execute,
+    )
+
+    def capturing_request(**kwargs):
+        seen_payloads.append(kwargs.get("messages") or [])
+        return original_request(**kwargs)
+
+    monkeypatch.setattr(agent, "LlmRequest", capturing_request)
+    asyncio.run(
+        _collect(agent.run_research_chat(host="h", model="m", messages=[{"role": "user", "content": "질문"}]))
+    )
+
+    tool_messages = [
+        message
+        for messages in seen_payloads
+        for message in messages
+        if message.get("role") == "tool"
+    ]
+    assert tool_messages, "도구 결과가 프롬프트에 실리지 않았다"
+    longest = max(len(str(message.get("content") or "")) for message in tool_messages)
+    assert longest < len(huge), f"원문이 통째로 실렸다: {longest}자"
+    assert any(
+        agent.TOOL_RESULT_TRUNCATION_LABEL in str(message.get("content") or "")
+        for message in tool_messages
+    )
+
+
+def test_blocked_page_is_not_counted_as_having_read_the_source(monkeypatch):
+    """차단 페이지를 읽고도 '원문 확인'으로 치지 않는다.
+
+    실제로 겪은 오답이다. 'GPT의 최신 모델' 질문에 검색은 성공했지만 1위 결과가
+    안티봇 대기 페이지('잠시만 기다리십시오…')여서 본문이 비었다. 그런데 web_fetch 는
+    실패를 예외가 아니라 **문자열**로 돌려주므로 루프가 '읽었다'로 세었고,
+    "위에서 읽은 출처로 답하라"고 밀어 모델이 **스니펫만 보고** 답을 확정했다.
+
+    지금은 근거가 아니라고 판정해 교차확인 넛지가 살아 있어야 한다.
+    """
+    blocked = (
+        "[https://openai.com/x/] 본문 텍스트를 추출하지 못했습니다 "
+        "(JS 전용/차단 페이지일 수 있음). title='잠시만 기다리십시오…'"
+    )
+
+    async def on_execute(spec, root, host, args):
+        if spec.name == "web_search":
+            return ("검색 결과 1건" + NL + "1. Introducing X" + NL + "   https://openai.com/x/" + NL
+                    + "   스니펫이 정답처럼 보인다", None)
+        return (blocked, None)
+
+    calls = _script(
+        monkeypatch,
+        [
+            _final([{"function": {"name": "web_search", "arguments": {"query": "latest model"}}}]),
+            _final([], content="검색 결과에 따르면 최신 모델은 X입니다."),
+            _final([], content="원문을 확인하지 못했습니다."),
+        ],
+        on_execute,
+    )
+    evs = asyncio.run(
+        _collect(agent.run_research_chat(host="h", model="m", messages=[{"role": "user", "content": "q"}]))
+    )
+    # 차단된 fetch 는 성공으로 보고되지 않는다 — UI 의 도구 카드도 정직해야 한다.
+    fetch_results = [e for e in evs if e.get("type") == "tool_result" and e.get("name") == "web_fetch"]
+    assert fetch_results, "자동 원문 읽기가 아예 시도되지 않았다"
+    assert all(e["ok"] is False for e in fetch_results), "차단 페이지가 성공으로 보고됐다"
+    # 근거를 못 얻었으므로 스니펫 답을 확정으로 두지 않고 교차확인을 다시 요구한다.
+    assert any(e.get("type") == "reset_content" for e in evs), "스니펫만 보고 답을 확정했다"
+
+
+def test_a_real_page_body_does_count_as_having_read_the_source(monkeypatch):
+    """반대로 진짜 본문을 읽었으면 중복 넛지 없이 마무리한다(위 게이트가 과하지 않다)."""
+    async def on_execute(spec, root, host, args):
+        if spec.name == "web_search":
+            return ("검색 결과 1건" + NL + "1. A" + NL + "   https://a.example/1" + NL + "   snippet", None)
+        return (_page("https://a.example/1"), None)
+
+    calls = _script(
+        monkeypatch,
+        [
+            _final([{"function": {"name": "web_search", "arguments": {"query": "q"}}}]),
+            _final([], content="원문 근거를 종합한 답"),
+        ],
+        on_execute,
+    )
+    evs = asyncio.run(
+        _collect(agent.run_research_chat(host="h", model="m", messages=[{"role": "user", "content": "q"}]))
+    )
+    fetch_results = [e for e in evs if e.get("type") == "tool_result" and e.get("name") == "web_fetch"]
+    assert fetch_results and all(e["ok"] is True for e in fetch_results)
+    assert not any(e.get("type") == "reset_content" for e in evs)
+
+
+# ── 1차 출처가 막히면 2차 출처로 ────────────────────────────────────────
+
+def _results(*urls: str) -> str:
+    lines = ["검색 결과 %d건" % len(urls)]
+    for i, u in enumerate(urls, 1):
+        lines += [f"{i}. 제목 {i}", f"   {u}", "   스니펫"]
+    return NL.join(lines)
+
+
+BLOCKED_PAGE = (
+    "[https://blocked.example/x] 본문 텍스트를 추출하지 못했습니다 "
+    "(JS 전용/차단 페이지일 수 있음). title='잠시만 기다리십시오…'"
+)
+
+
+def test_a_blocked_primary_source_falls_through_to_the_next_source(monkeypatch):
+    """1위가 안티봇이면 포기하지 않고 다음 출처를 연다.
+
+    실제로 겪은 경로다 — openai.com 이 막혔는데 거기서 멈추는 바람에 모델에게 남은
+    재료가 검색 스니펫뿐이었다. 막힌 시도는 예산을 쓰지 않아야 다음 후보에 닿는다.
+    """
+    opened: list[str] = []
+
+    async def on_execute(spec, root, host, args):
+        if spec.name == "web_search":
+            # 좋은 출처를 예전 창(상위 3개) **밖**에 둔다. 그래야 이 테스트가
+            # "다음 후보까지 내려간다"는 동작을 실제로 판별한다.
+            return (_results("https://blocked.example/1", "https://blocked.example/2",
+                             "https://blocked.example/3", "https://blocked.example/4",
+                             "https://good.example/5", "https://good.example/6"), None)
+        url = args["url"]
+        opened.append(url)
+        if "blocked.example" in url:
+            return (BLOCKED_PAGE, None)
+        return (_page(url), None)
+
+    _script(
+        monkeypatch,
+        [
+            _final([{"function": {"name": "web_search", "arguments": {"query": "q"}}}]),
+            _final([], content="2차 출처로 확인한 답"),
+        ],
+        on_execute,
+    )
+    evs = asyncio.run(
+        _collect(agent.run_research_chat(host="h", model="m", messages=[{"role": "user", "content": "q"}]))
+    )
+    # 막힌 둘을 지나 성공한 둘까지 실제로 열었다.
+    assert opened[:2] == ["https://blocked.example/1", "https://blocked.example/2"]
+    assert "https://good.example/5" in opened, "상위 3개에서 멈춰 2차 출처에 닿지 못했다"
+    ok = [e for e in evs if e.get("type") == "tool_result" and e.get("name") == "web_fetch" and e["ok"]]
+    assert ok, "2차 출처에서도 본문을 못 얻었다"
+    # 무엇이 막혔는지 사용자에게 알린다.
+    assert any("blocked.example" in e.get("text", "") for e in evs if e.get("type") == "notice")
+
+
+def test_a_fully_blocked_query_stops_instead_of_hammering(monkeypatch):
+    """전부 막힌 질의에서 무한정 두드리지 않는다(시도 상한)."""
+    opened: list[str] = []
+
+    async def on_execute(spec, root, host, args):
+        if spec.name == "web_search":
+            return (_results(*[f"https://blocked.example/{i}" for i in range(1, 13)]), None)
+        opened.append(args["url"])
+        return (BLOCKED_PAGE, None)
+
+    _script(
+        monkeypatch,
+        [
+            _final([{"function": {"name": "web_search", "arguments": {"query": "q"}}}]),
+            _final([], content="원문을 열지 못했습니다."),
+            _final([], content="끝"),
+        ],
+        on_execute,
+    )
+    evs = asyncio.run(
+        _collect(agent.run_research_chat(host="h", model="m", messages=[{"role": "user", "content": "q"}]))
+    )
+    assert len(opened) <= agent_research.AUTO_FETCH_ATTEMPTS, f"시도 상한을 넘겼다: {len(opened)}"
+    # 근거를 못 얻었으니 스니펫 답을 확정으로 두지 않는다.
+    assert any(e.get("type") == "reset_content" for e in evs)
+
+
+def test_blocked_attempts_do_not_consume_the_evidence_budget(monkeypatch):
+    """막힌 시도는 예산을 쓰지 않는다 — 그래야 실제 본문 개수를 채운다."""
+    async def on_execute(spec, root, host, args):
+        if spec.name == "web_search":
+            return (_results("https://blocked.example/1", "https://good.example/2",
+                             "https://good.example/3", "https://good.example/4"), None)
+        url = args["url"]
+        return (BLOCKED_PAGE, None) if "blocked" in url else (_page(url), None)
+
+    _script(
+        monkeypatch,
+        [
+            _final([{"function": {"name": "web_search", "arguments": {"query": "q"}}}]),
+            _final([], content="답"),
+        ],
+        on_execute,
+    )
+    evs = asyncio.run(
+        _collect(agent.run_research_chat(host="h", model="m", messages=[{"role": "user", "content": "q"}]))
+    )
+    ok = [e for e in evs if e.get("type") == "tool_result" and e.get("name") == "web_fetch" and e["ok"]]
+    assert len(ok) == agent_research.AUTO_FETCH_TOP, f"확보한 본문이 {len(ok)}건뿐이다"
+
+
+# ── 현재 시각 ───────────────────────────────────────────────────────────
+
+def test_research_prompt_carries_the_current_moment_not_an_import_time_snapshot():
+    """'최신'의 기준 시점은 요청마다 다시 계산해야 한다.
+
+    예전에는 모듈 임포트 시점의 날짜를 굳혀 썼다. 앱을 며칠 켜 두면 "Today is" 가
+    틀린 날짜를 가리켰고, 모델은 '최신'을 그 낡은 기준으로 해석했다.
+    """
+    import datetime as dt
+
+    line = agent_research.current_time_line()
+    now = dt.datetime.now().astimezone()
+    assert now.strftime("%Y-%m-%d") in line
+    assert now.strftime("%H:%M") in line          # 날짜만이 아니라 시각까지
+    assert "UTC" in line                           # 시간대 없이는 UTC 문서와 비교할 수 없다
+    prompt = agent_research.research_system_prompt("ko")
+    assert line in prompt
+
+    # 시계를 옮기면 프롬프트도 따라와야 한다 — 굳은 상수면 안 따라온다.
+    frozen = agent_research.research_system_prompt("ko")
+    assert now.strftime("%Y-%m-%d") in frozen

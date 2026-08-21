@@ -4,6 +4,7 @@ import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import { DEFAULT_SETTINGS } from '../../../shared/settings'
 import { NVIDIA_BUILD_BASE_URL } from '../../../shared/nvidia'
 import AgentView from './AgentView'
+import { MAX_AUTO_CONTINUES } from '../lib/agent'
 
 
 const backend: BackendInfo = { state: 'ready', port: 8123 }
@@ -671,5 +672,293 @@ describe('AgentView NVIDIA capability gate', () => {
     expect(screen.getByText('Current image result')).toBeTruthy()
     expect(screen.queryByText('Stale image result')).toBeNull()
     expect(document.querySelectorAll('.generated-image')).toHaveLength(2)
+  })
+  it('carries the harness run summary into the next run so "계속해줘" is not a blank restart', async () => {
+    // 하네스는 안전 한도로 멈출 때 "여기까지 한 내용은 유지됩니다"라고 안내한다.
+    // 예전에는 마지막 assistant 텍스트 하나만 이어붙여서 그 안내가 사실이 아니었다.
+    const status = vi.fn().mockResolvedValue(null)
+    installApiStub(status)
+
+    const encoder = new TextEncoder()
+    const agentRequests: Array<Record<string, unknown>> = []
+    const SUMMARY = `[이번 실행에서 실제로 수행한 도구]
+- write_file a.md — 성공`
+
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/agent')) {
+        agentRequests.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+        const first = agentRequests.length === 1
+        return {
+          ok: true,
+          status: 200,
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              const events = first
+                ? [
+                    { type: 'notice', text: '안전선에서 멈췄습니다.' },
+                    { type: 'run_summary', text: SUMMARY },
+                    { type: 'done' }
+                  ]
+                : [{ type: 'content', text: '이어서 진행했습니다.' }, { type: 'done' }]
+              controller.enqueue(encoder.encode(events.map((e) => JSON.stringify(e)).join(`\n`) + `\n`))
+              controller.close()
+            }
+          })
+        }
+      }
+      return { ok: true, status: 200, json: vi.fn().mockResolvedValue({ indexed: false, count: 0, files: 0 }) }
+    }))
+
+    render(<AgentView {...commonProps} settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'ollama' }} />)
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '긴 작업 해줘' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+    await waitFor(() => expect(agentRequests).toHaveLength(1))
+    await screen.findByText('안전선에서 멈췄습니다.')
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '계속해줘' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+    await waitFor(() => expect(agentRequests).toHaveLength(2))
+
+    const second = JSON.stringify(agentRequests[1]?.messages ?? [])
+    expect(second).toContain('write_file a.md')
+  })
+  it('carries recent tool results into the next run, correctly paired', async () => {
+    // 결과 본문은 이미 타임라인에 있다. 예전에는 모델에게 보내지 않아
+    // '계속해줘'가 무엇을 읽었는지 모른 채 다시 시작했다.
+    const status = vi.fn().mockResolvedValue(null)
+    installApiStub(status, {
+      id: 'agent-with-tool-history',
+      kind: 'agent',
+      title: 'tool history',
+      createdAt: 1,
+      updatedAt: 1,
+      pinned: false,
+      data: {
+        items: [
+          {
+            kind: 'tool',
+            callId: 'exec-1',
+            approvalId: 'appr-1',
+            providerToolCallId: 'ollama-turn-a-0',
+            assistantTurnId: 'turn-a',
+            name: 'read_file',
+            args: { path: 'spec.md' },
+            status: 'done',
+            output: 'SPEC_CANARY 문서 본문'
+          },
+          {
+            kind: 'tool',
+            callId: 'exec-2',
+            approvalId: 'appr-2',
+            providerToolCallId: 'ollama-turn-a-1',
+            assistantTurnId: 'turn-a',
+            name: 'list_dir',
+            args: { path: '.' },
+            status: 'awaiting'
+          }
+        ],
+        history: [{ role: 'assistant', content: '안전선에서 멈췄습니다.' }],
+        plan: [],
+        workspace: ''
+      }
+    })
+
+    const encoder = new TextEncoder()
+    const agentRequests: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/agent')) {
+        agentRequests.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+        return {
+          ok: true,
+          status: 200,
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(encoder.encode(
+                [{ type: 'content', text: '이어서 진행합니다.' }, { type: 'done' }]
+                  .map((e) => JSON.stringify(e)).join(`
+`) + `
+`
+              ))
+              controller.close()
+            }
+          })
+        }
+      }
+      return { ok: true, status: 200, json: vi.fn().mockResolvedValue({ indexed: false, count: 0, files: 0 }) }
+    }))
+
+    render(
+      <AgentView
+        {...commonProps}
+        conversationRequest={{ kind: 'agent', id: 'agent-with-tool-history', nonce: 1 }}
+        settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'ollama' }}
+      />
+    )
+
+    // 저장된 history는 렌더되지 않는다 — 타임라인(items)의 도구 카드로 로드를 기다린다.
+    await screen.findByText('spec.md')
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '계속해줘' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+    await waitFor(() => expect(agentRequests).toHaveLength(1))
+
+    const messages = (agentRequests[0]?.messages ?? []) as Array<Record<string, unknown>>
+    const serialized = JSON.stringify(messages)
+    expect(serialized).toContain('SPEC_CANARY')
+
+    // 결과가 없는 호출(승인 대기)은 실리지 않는다 — 짝이 깨지면 공급자가 거부한다.
+    expect(serialized).not.toContain('ollama-turn-a-1')
+
+    const assistantWithCalls = messages.find((m) => Array.isArray(m.tool_calls))
+    expect(assistantWithCalls).toBeTruthy()
+    const calls = assistantWithCalls!.tool_calls as Array<Record<string, unknown>>
+    expect(calls).toHaveLength(1)
+    const toolMessages = messages.filter((m) => m.role === 'tool')
+    expect(toolMessages).toHaveLength(1)
+    expect(toolMessages[0].tool_call_id).toBe(calls[0].id)
+
+    // 새 사용자 발화는 도구 기록 뒤에 온다.
+    expect(messages[messages.length - 1].role).toBe('user')
+  })
+  it('keeps the preview iframe sandboxed against popups and top-level navigation', () => {
+    // /f/ 응답의 PREVIEW_CSP는 window.open을 막지 못한다 — CSP에 그 지시어가 없다
+    // (navigate-to는 스펙 폐기). 그 마지막 유출 채널을 닫는 것이 이 sandbox 속성이고,
+    // 값이 조용히 넓어지면 방어가 사라지므로 여기서 고정한다.
+    installApiStub(vi.fn().mockResolvedValue(null))
+    const { container } = render(
+      <AgentView {...commonProps} settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'ollama' }} />
+    )
+    const iframes = Array.from(container.querySelectorAll('iframe'))
+    for (const frame of iframes) {
+      const sandbox = frame.getAttribute('sandbox') ?? ''
+      expect(sandbox).not.toContain('allow-popups')
+      expect(sandbox).not.toContain('allow-top-navigation')
+      expect(sandbox).not.toContain('allow-modals')
+    }
+  })
+
+  // ── 작업 자동 이어가기 ──────────────────────────────────────────────
+
+  const chr10 = String.fromCharCode(10)
+
+  function limitStream(encoder: TextEncoder) {
+    return (): Response => {
+      const events = [
+        { type: 'tool_call', id: 't1', name: 'write_file', args: { path: 'a.md' }, assistantTurnId: 'a1' },
+        { type: 'tool_result', id: 't1', ok: true, output: '됨', name: 'write_file', assistantTurnId: 'a1' },
+        { type: 'notice', text: '안전선에서 멈췄습니다.' },
+        { type: 'run_summary', text: '[이번 실행에서 실제로 수행한 도구] - write_file a.md — 성공' },
+        { type: 'run_limit', reason: 'max_steps' },
+        { type: 'done' }
+      ]
+      return {
+        ok: true,
+        status: 200,
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(events.map((e) => JSON.stringify(e)).join(chr10) + chr10))
+            controller.close()
+          }
+        })
+      } as unknown as Response
+    }
+  }
+
+  it('설정이 꺼져 있으면 한도에서 멈추고 스스로 이어가지 않는다', async () => {
+    const status = vi.fn().mockResolvedValue(null)
+    installApiStub(status)
+    const agentRequests: unknown[] = []
+    const encoder = new TextEncoder()
+    const stream = limitStream(encoder)
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).includes('/agent')) {
+        agentRequests.push(JSON.parse(String(init?.body ?? '{}')))
+        return stream()
+      }
+      return { ok: true, status: 200, json: vi.fn().mockResolvedValue({ indexed: false, count: 0, files: 0 }) }
+    }))
+    render(<AgentView {...commonProps}
+      settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'ollama', autoContinueOnLimit: false }} />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '긴 작업' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+    await waitFor(() => expect(agentRequests).toHaveLength(1))
+    // 백엔드 안내(무슨 일이 있었나)를 덮지 않고, 그 뒤에 이어가는 방법을 덧붙인다.
+    const note = await screen.findByText(/안전선에서 멈췄습니다\./)
+    expect(note.textContent).toContain('계속해줘')
+    expect(note.textContent).toContain('작업 자동 이어가기')
+    // 잠깐 기다려도 두 번째 요청이 생기지 않는다.
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(agentRequests).toHaveLength(1)
+  })
+
+  it("막혀서 멈춘 사유에는 '계속해줘'를 권하지 않는다", async () => {
+    // repeat/stall 은 같은 시도가 통하지 않는 상태다. 그대로 이어가라고 하면
+    // 대개 같은 자리에서 다시 멈춘다 — 설정을 알려 주되 재시도를 권하지는 않는다.
+    const status = vi.fn().mockResolvedValue(null)
+    installApiStub(status)
+    const encoder = new TextEncoder()
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).includes('/agent')) {
+        const events = [
+          { type: 'notice', text: '같은 동작(read_file)을 반복해 멈췄습니다.' },
+          { type: 'run_limit', reason: 'repeat' },
+          { type: 'done' }
+        ]
+        return {
+          ok: true,
+          status: 200,
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(encoder.encode(events.map((e) => JSON.stringify(e)).join(chr10) + chr10))
+              controller.close()
+            }
+          })
+        } as unknown as Response
+      }
+      return { ok: true, status: 200, json: vi.fn().mockResolvedValue({ indexed: false, count: 0, files: 0 }) }
+    }))
+    render(<AgentView {...commonProps}
+      settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'ollama', autoContinueOnLimit: false }} />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '막히는 작업' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+
+    const note = await screen.findByText(/같은 동작\(read_file\)/)
+    expect(note.textContent).toContain('작업 자동 이어가기')
+    expect(note.textContent).not.toContain('계속해줘')
+  })
+
+  it('설정이 켜져 있으면 한도에서 스스로 이어가되 상한을 넘지 않는다', async () => {
+    // 상한이 없으면 "한도 → 이어감 → 또 한도"가 무한히 돈다. 토큰이 사용자 모르게 계속 나간다.
+    const status = vi.fn().mockResolvedValue(null)
+    installApiStub(status)
+    const agentRequests: { messages?: unknown[] }[] = []
+    const encoder = new TextEncoder()
+    const stream = limitStream(encoder)
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).includes('/agent')) {
+        agentRequests.push(JSON.parse(String(init?.body ?? '{}')))
+        return stream()          // 매번 한도로 끝난다 = 최악의 경우
+      }
+      return { ok: true, status: 200, json: vi.fn().mockResolvedValue({ indexed: false, count: 0, files: 0 }) }
+    }))
+    render(<AgentView {...commonProps}
+      settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'ollama', autoContinueOnLimit: true }} />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '긴 작업' } })
+    fireEvent.click(screen.getByRole('button', { name: '실행' }))
+
+    // 최초 1회 + 자동 이어가기 MAX_AUTO_CONTINUES 회에서 **정확히 멈춘다**.
+    await waitFor(
+      () => expect(agentRequests).toHaveLength(1 + MAX_AUTO_CONTINUES),
+      { timeout: 4000 }
+    )
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    expect(agentRequests).toHaveLength(1 + MAX_AUTO_CONTINUES)
+
+    // 이어가는 요청은 백지가 아니다 — 이전 런이 실제로 한 일이 함께 넘어간다.
+    const second = JSON.stringify(agentRequests[1]?.messages ?? [])
+    expect(second).toContain('write_file a.md')
+    expect(second).toContain('이어서 계속 진행해라')
   })
 })

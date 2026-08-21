@@ -8,6 +8,7 @@ import {
   EditIcon,
   FolderIcon,
   GraphIcon,
+  HomeIcon,
   PinIcon,
   SlidersIcon,
   TodoIcon,
@@ -289,6 +290,16 @@ function Sidebar({
               onChange={(value) => changeMode(value as ConversationKind)}
               title="작업 모드"
             />
+            <button
+              type="button"
+              className={`sidebar__home ${view === 'home' ? 'sidebar__home--active' : ''}`}
+              onClick={() => onNavigate('home')}
+              title="홈 대시보드"
+              aria-label="홈 대시보드"
+              aria-pressed={view === 'home'}
+            >
+              <HomeIcon size={16} />
+            </button>
           </div>
           <button type="button" className="sidebar__new" onClick={beginNew}>
             <ModeIcon size={16} />

@@ -74,18 +74,28 @@ from tools import (
 # 진짜 무한 루프는 아래 STALL_REPEAT(동일 동작 반복) 감지로 막는다.
 MAX_STEPS = 300
 STALL_REPEAT = 6  # 완전히 동일한 (툴,인자) 호출이 연속 이 횟수를 넘으면 정체로 보고 중단
+# 연속 동일만 보면 A→B→A→B… 교대 루프를 영원히 못 잡는다(서명이 매번 달라져 카운터가
+# 리셋된다). 작은 로컬 모델의 가장 흔한 퇴행이 이 모양이라, 최근 호출 창의 '동작 다양성'도
+# 함께 본다. 실측: 교대 루프가 총량 상한에 걸릴 때까지 85회, 3중 회전은 95회 돌았다.
+STALL_WINDOW = 9  # 최근 실질(비-meta) 도구 호출 이만큼을 본다
+STALL_WINDOW_MIN_DISTINCT = 4  # 그 창의 서로 다른 동작이 이보다 적으면 정체로 본다
+#   2중 교대 → 2가지, 3중 회전 → 3가지 (둘 다 걸린다)
+#   수정-확인 반복 → 내용이 매번 달라 6가지 이상 (안 걸린다)
 SUBSTANTIVE_TOOL_CALL_LIMIT = 128  # 서로 다른 호출로 위장한 폭주까지 막는 런 전체 상한
 IDENTICAL_TOOL_BATCH_LIMIT = 2  # 같은 실질 도구 묶음은 두 번까지만 허용
 MUTATION_TARGET_ATTEMPT_LIMIT = 16  # 한 경로를 반복 수정하는 교대 루프 상한
 MAX_NUDGES = 3    # 툴 없이 멈추려 할 때 '이어서 진행하라'고 찌를 최대 연속 횟수
 SPIN_LIMIT = 4    # 실질 진전(update_plan 외 툴 실행) 없는 턴이 연속 이 횟수면 정체로 보고 중단
-MAX_PARSE_RETRIES = 2  # gpt-oss 툴콜 파싱 500 오류 시 재생성 최대 횟수 (재생성으로 대개 회복)
 APPROVAL_TIMEOUT = 600  # 파괴적 툴 승인 대기 상한(초)
 # 한 턴 생성 토큰 상한(num_predict). num_ctx(컨텍스트 창)와 분리한다 — 안 그러면 컨텍스트를
 # 크게 잡을수록 한 턴이 폭주(반복 퇴행)로 수만 토큰을 쏟아내 무한루프처럼 보인다(16k→64k 사례).
 MAX_GEN_TOKENS = 8192
-REP_MIN_LEN = 4000     # 이 길이 넘을 때부터 반복 퇴행 감지 시작(자)
-REP_CHECK_EVERY = 2000  # 이후 이 간격마다 재검사(자)
+
+# 생성 루프 상수는 agent_execution이 소유한다. 여기서 값을 다시 적으면 실제 동작과
+# 조용히 갈라지므로(고쳐도 아무 변화가 없다) 재수출만 한다 — _looks_degenerate와 같은 패턴.
+MAX_PARSE_RETRIES = execution.MAX_PARSE_RETRIES  # 툴콜 파싱 실패 시 재생성 최대 횟수
+REP_MIN_LEN = execution.REP_MIN_LEN              # 이 길이 넘을 때부터 반복 퇴행 감지 시작(자)
+REP_CHECK_EVERY = execution.REP_CHECK_EVERY      # 이후 이 간격마다 재검사(자)
 
 
 _looks_degenerate = execution._looks_degenerate
@@ -133,11 +143,87 @@ def render_plan(plan: list[dict]) -> str:
     """현재 계획을 시스템 메시지에 끼워넣을 텍스트로 렌더링한다 (항상 컨텍스트에 유지)."""
     if not plan:
         return ""
-    mark = {"completed": "[x]", "in_progress": "[~]", "pending": "[ ]"}
+    # plan 은 모델이 준 값이 그대로 실린 dict 라 status 키가 없을 수도 있다
+    # (그때 s.get("status") 는 None). 미지의 키·None 은 기본값 "[ ]"로 떨어지는 것이
+    # 의도한 동작이므로, 조회 키 타입에 None 을 포함시켜 그 계약을 적는다.
+    mark: dict[str | None, str] = {"completed": "[x]", "in_progress": "[~]", "pending": "[ ]"}
     lines = "\n".join(f"{mark.get(s.get('status'), '[ ]')} {s.get('content', '')}" for s in plan)
     return (
         "\n\n[현재 작업 계획]\n" + lines +
         "\n각 단계를 시작할 때 in_progress, 끝내면 completed로 update_plan을 호출해 갱신하라."
+    )
+
+
+TOOL_RESULT_TRUNCATION_LABEL = "[tool result truncated for model context]"
+OLDER_TURNS_OMITTED_MARKER = "[older turns omitted for model context]"
+# 예산 초과 시에도 반드시 남기는 최근 메시지 수. 마지막 요청과 그에 딸린 도구 결과가
+# 통째로 사라지면 모델이 자기가 방금 무엇을 했는지 모른다.
+MIN_RETAINED_MESSAGES = 8
+# 예산 초과로 버릴 때는 이 비율까지 내려가게 한 번에 버린다. 딱 예산에 맞춰 버리면
+# 다음 턴에 또 버려야 하고, 그러면 프리픽스가 매 턴 흔들려 안정화가 무의미해진다.
+_DROP_HYSTERESIS = 0.7
+
+
+def tool_result_cap(context_length: int, reserve_tokens: int = 0) -> int:
+    """도구 결과 1건의 상한 — 런 시작에 한 번 계산해 고정한다.
+
+    **대화 길이에 의존하면 안 된다.** 예전에는 캡이 `tool_count`와 '최근 6개' 윈도에
+    따라 매 턴 다시 계산됐고, 그 결과 같은 도구 결과 하나가 한 런 안에서
+    2296 → 901 → 644 → 501 → 409 → 346 → 300 → 265 → 237자로 아홉 번 다시 잘렸다.
+    프롬프트 앞부분이 매 턴 바뀌므로 KV 캐시는 사실상 시스템 메시지 뒤로 한 번도
+    재사용되지 못했다.
+
+    값은 예전 정상 상태(도구 결과가 6개 이상 쌓였을 때의 `budget // 6`)와 같게 잡는다.
+    초반 결과에 더 넉넉히 주던 동작만 사라지므로 예산 측면에서는 보수적이다.
+    """
+    avail_tokens = max(900, context_length - reserve_tokens - MAX_GEN_TOKENS)
+    budget = avail_tokens * 3
+    return max(800, min(6_000, budget // 6))
+
+
+def truncate_tool_message(message: dict, cap: int) -> dict:
+    """도구 결과를 기록 시점에 한 번 자른다. 이미 짧으면 원본 객체를 그대로 돌려준다."""
+    if message.get("role") != "tool":
+        return message
+    content = str(message.get("content") or "")
+    if len(content) <= cap:
+        return message
+    return {**message, "content": content[:cap] + "\n" + TOOL_RESULT_TRUNCATION_LABEL}
+
+
+class ModelConversation(list):
+    """append-only 대화. 도구 결과는 들어오는 순간 잘리고 그 뒤로 절대 변하지 않는다.
+
+    자르는 지점을 여기 한 곳으로 모은 이유는, `role="tool"` 을 append 하는 곳이
+    agent_runner에 11군데나 흩어져 있기 때문이다. 각 호출지에서 자르게 하면
+    새 경로가 하나 늘 때마다 조용히 빠진다 — `_maybe_reindex`가 정확히 그렇게
+    53개 종료 경로 중 15곳에만 붙어 있었다. 보장은 주석이 아니라 타입이 만든다.
+    """
+
+    def __init__(self, iterable=(), *, tool_result_cap: int) -> None:
+        self._tool_result_cap = int(tool_result_cap)
+        # 예산 초과로 이미 버린 구간의 끝. 단조 증가만 한다 — 되돌리면 프리픽스가
+        # 다시 흔들린다. compact_convo가 읽고 갱신한다.
+        self.dropped_before = 0
+        super().__init__(truncate_tool_message(m, self._tool_result_cap) for m in iterable)
+
+    def append(self, message: dict) -> None:
+        super().append(truncate_tool_message(message, self._tool_result_cap))
+
+
+def _build_model_conversation(
+    messages: list[dict], context_length: int, reserve_tokens: int
+) -> list[dict]:
+    """주입용 팩토리 — 리서치 루프도 같은 기록-시점 절단 관문을 쓰게 한다."""
+    return ModelConversation(
+        messages, tool_result_cap=tool_result_cap(context_length, reserve_tokens)
+    )
+
+
+def _message_size(message: dict) -> int:
+    return (
+        len(str(message.get("content") or ""))
+        + len(json.dumps(message.get("tool_calls") or "", ensure_ascii=False))
     )
 
 
@@ -148,78 +234,59 @@ def compact_convo(
     *,
     output_reserve_tokens: int = 1024,
 ) -> list[dict]:
-    """Keep model context bounded without changing full UI tool-result cards.
+    """모델 컨텍스트를 예산 안에 유지한다 — **선택만 하고 내용은 다시 자르지 않는다.**
 
-    Tool output is retained in the renderer/event log in full.  The model only
-    receives a labelled excerpt, including for the newest result: otherwise a
-    single PDF/PPTX read can consume an entire 16K-context follow-up turn.
-    Character counts intentionally over-reserve for Korean mixed text.
+    도구 결과는 `ModelConversation`이 기록 시점에 런 고정 캡으로 이미 잘라 두었다.
+    여기서 또 자르면 대화가 길어질 때마다 같은 메시지가 다른 바이트가 되어
+    KV 프리픽스가 매 턴 깨진다(위 `tool_result_cap` 주석 참조).
+
+    예산을 넘으면 **오래된 메시지를 통째로 버린다.** 남은 메시지의 바이트는 그대로이므로,
+    버리는 턴에만 프리픽스가 한 번 흔들리고 그다음부터는 다시 안정된다. 매 턴 조금씩
+    다시 자르는 것보다 훨씬 낫다.
+
+    렌더러/이벤트 로그는 언제나 도구 결과 전문을 유지한다 — 이건 모델 컨텍스트 전용이다.
     """
     output_reserve_tokens = max(256, int(output_reserve_tokens or 1024))
     # num_ctx − fixed system/tool/RAG overhead − requested output allowance.
     avail_tokens = max(900, context_length - reserve_tokens - output_reserve_tokens)
     budget = avail_tokens * 3
-    tool_count = sum(message.get("role") == "tool" for message in convo)
-    recent_tool_slots = max(1, min(6, tool_count))
-    # Divide the available window across every recent result instead of giving
-    # each of six results a separate 4K allowance.
-    recent_tool_cap = max(800, min(6_000, budget // max(2, recent_tool_slots)))
-    old_tool_cap = max(320, min(1_200, budget // max(8, tool_count * 2)))
-    out: list[dict] = []
-    for i, m in enumerate(convo):
-        c = str(m.get("content") or "")
-        if m.get("role") == "tool":
-            # Recent results deserve more evidence, but never an unlimited
-            # context allocation.  Preserve the opening, which includes the
-            # tool's path/status/citation conventions, and mark truncation.
-            cap = recent_tool_cap if i >= len(convo) - 6 else old_tool_cap
-            if len(c) > cap:
-                label = "[tool result truncated for model context]"
-                out.append({**m, "content": c[:cap] + "\n" + label})
-                continue
-        out.append(m)
 
-    # If non-tool conversation itself still exceeds budget, compact older text
-    # conservatively while preserving the newest request, tool identities, and
-    # the most recent assistant conclusion.
-    total = sum(
-        len(str(m.get("content") or ""))
-        + len(json.dumps(m.get("tool_calls") or "", ensure_ascii=False))
-        for m in out
-    )
-    if total <= budget:
-        return out
-    keep_from = max(0, len(out) - 8)
-    compacted: list[dict] = []
-    for i, m in enumerate(out):
-        c = str(m.get("content") or "")
-        if i < keep_from and m.get("role") != "tool" and len(c) > 800:
-            compacted.append({**m, "content": c[:700] + "\n[older message truncated for model context]"})
-        else:
-            compacted.append(m)
-    remaining_total = sum(
-        len(str(message.get("content") or ""))
-        + len(json.dumps(message.get("tool_calls") or "", ensure_ascii=False))
-        for message in compacted
-    )
-    if remaining_total <= budget:
-        return compacted
+    messages = list(convo)
+    # 이미 버린 구간은 되돌리지 않는다. 되돌리면 프리픽스가 다시 흔들린다.
+    watermark = min(int(getattr(convo, "dropped_before", 0) or 0), len(messages))
+    kept = messages[watermark:]
 
-    # Final guard for many alternating tool/result turns.  This affects only
-    # model context; the renderer retains complete event output separately.
-    per_message_cap = max(160, budget // max(1, len(compacted)))
-    hard_capped: list[dict] = []
-    for message in compacted:
-        content = str(message.get("content") or "")
-        if len(content) > per_message_cap:
-            suffix = "\n[message truncated for model context]"
-            hard_capped.append({
-                **message,
-                "content": content[: max(1, per_message_cap - len(suffix))] + suffix,
-            })
-        else:
-            hard_capped.append(message)
-    return hard_capped
+    if sum(_message_size(message) for message in kept) <= budget:
+        return _with_omission_marker(kept, watermark)
+
+    # 예산을 넘으면 오래된 것부터 버린다. 한 칸씩만 버리면 매 턴 다시 버리게 되어
+    # 프리픽스가 계속 흔들리므로, 여유분(hysteresis)까지 한 번에 버려 다음 몇 턴은
+    # 버릴 필요가 없게 만든다. 프리픽스는 버리는 턴에만 흔들리고 그 뒤로 안정된다.
+    target = max(1, int(budget * _DROP_HYSTERESIS))
+    limit = max(0, len(messages) - MIN_RETAINED_MESSAGES)
+    drop_to = watermark
+    while drop_to < limit:
+        if sum(_message_size(message) for message in messages[drop_to:]) <= target:
+            break
+        drop_to += 1
+    # 잘린 꼬리가 고아 도구 결과로 시작하면 안 된다 — 짝이 되는 assistant tool_calls가
+    # 없는 tool 메시지는 공급자가 거부한다.
+    while drop_to < len(messages) and messages[drop_to].get("role") == "tool":
+        drop_to += 1
+
+    if drop_to > watermark:
+        try:
+            convo.dropped_before = drop_to  # type: ignore[attr-defined]
+        except AttributeError:
+            pass  # 평범한 list로 호출된 경우(리서치 채팅 등) — 상태 없이 동작한다
+    return _with_omission_marker(messages[drop_to:], drop_to)
+
+
+def _with_omission_marker(messages: list[dict], dropped: int) -> list[dict]:
+    if dropped <= 0:
+        return list(messages)
+    # 마커는 바이트 고정이고 항상 0번이라 프리픽스를 흔들지 않는다.
+    return [{"role": "user", "content": OLDER_TURNS_OMITTED_MARKER}, *messages]
 
 
 # 작업 폴더 없이도 쓸 수 있는 도구 — 웹 조사·스킬·계획·Discord와 Aiso 자체가 저장한 ToDo 색인.
@@ -2391,7 +2458,11 @@ def _positive_ordinal_selection_index(text: str) -> int | None:
         }
         if value in words:
             return words[value]
-        return int(re.match(r"\d+", value).group()) - 1
+        # words 에 없다는 건 위 ordinal 패턴의 숫자 가지([1-9]\d{0,2}(st|nd|rd|th))로
+        # 잡혔다는 뜻이다 — 따라서 선두 숫자 매치는 반드시 성립한다.
+        digits = re.match(r"\d+", value)
+        assert digits is not None
+        return int(digits.group()) - 1
 
     korean = re.fullmatch(
         r"(?:(?P<word>첫|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*번째|"
@@ -2470,14 +2541,37 @@ def _fire_reindex(root: Path, host: str) -> None:
         pass
 
 
-def _maybe_reindex(root: Path, host: str, dirty: bool, rag_available: bool) -> None:
-    """종료(done) 직전마다 호출 — 파일이 바뀌었고 색인이 있으면 백그라운드 재색인을 던진다.
+def _maybe_reindex(
+    root: Path | None,
+    host: str,
+    dirty: bool,
+    rag_available: bool,
+    state: dict[str, Any] | None = None,
+) -> None:
+    """파일이 바뀌었고 색인이 있으면 백그라운드 재색인을 던진다.
 
-    모든 종료 경로가 반드시 이 한 곳을 거치게 해 '어떤 exit에서 재색인을 빠뜨려
-    색인이 조용히 낡는' 실수를 구조적으로 없앤다.
+    이 함수를 부르는 곳은 두 종류다.
+      1) 루프 안의 개별 done 지점 — 재색인을 되도록 일찍 시작해 다음 런을 빠르게 한다.
+      2) run_agent의 finally 백스톱 — 1)을 빠뜨린 경로까지 반드시 덮는다.
+
+    done yield는 50곳이 넘고 그중 일부만 1)을 호출한다. 예전 주석은 "모든 종료 경로가
+    이 한 곳을 거친다"고 했지만 사실이 아니었고, 그래서 가드 중단 같은 경로에서 색인이
+    조용히 낡았다. 이제 그 보장은 주석이 아니라 2)의 finally가 만든다.
+
+    ``state``(런 단위 cleanup_state)를 주면 한 런에서 한 번만 발화한다. 1)이 이미 던진
+    뒤 백그라운드 재색인이 먼저 끝나버리면 _fire_reindex의 _reindexing 중복 방지가
+    풀리므로, 그 창을 이 플래그로 닫는다.
     """
-    if dirty and rag_available:
-        _fire_reindex(root, host)
+    # 작업 폴더 없는 런(WORKSPACE_FREE 도구만 쓰는 경우)에서도 종료 경로는 이 함수를
+    # 거친다. rag_available 이 그때 거짓이라 지금까지 무해했지만, 그건 두 값 사이의
+    # 암묵 관계였다. root 를 직접 보고 끊어 관계를 코드로 적는다.
+    if root is None or not (dirty and rag_available):
+        return
+    if state is not None:
+        if state.get("reindex_fired"):
+            return
+        state["reindex_fired"] = True
+    _fire_reindex(root, host)
 
 
 async def _generate_turn(
@@ -2534,11 +2628,16 @@ async def _run_agent_impl(
     enabled_tools: list[str] | None = None,
     user_request_text: str | None = None,
     image_context_verified: bool = False,
-    response_language: str | None = None,
+    # 위임 대상(agent_runner._run_agent_impl)은 str 만 받는다. None 을 허용하면
+    # normalize_response_language(None)=="en" 이 되어 한국어 폴백이 조용히 사라진다.
+    response_language: str = "ko",
     _cleanup_state: dict[str, Any] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Compatibility facade for the extracted agent orchestration loop."""
-    runner.bind_dependencies(globals())
+    # 예전에는 여기서 runner.bind_dependencies(globals())로 이 모듈의 전역 107개를
+    # 런 시작마다 러너의 globals()에 복사했다. 이제 러너가 `import agent as deps`로
+    # 직접 읽으므로 주입이 필요 없다 — 정적 분석이 가능해지고, 호출 시점 속성 조회라
+    # monkeypatch 시임은 그대로 동작한다.
     implementation_stream = runner._run_agent_impl(
         host=host,
         workspace=workspace,
@@ -2665,15 +2764,19 @@ async def run_agent(
     finally:
         if not completed_normally:
             await implementation_stream.aclose()
-        if not completed_normally:
-            cleanup_root = cleanup_state.get("root")
-            if isinstance(cleanup_root, Path):
-                _maybe_reindex(
-                    cleanup_root,
-                    host,
-                    cleanup_state.get("dirty") is True,
-                    cleanup_state.get("rag_available") is True,
-                )
+        # 정상 종료에도 반드시 통과하는 유일한 지점. 예전에는 이 백스톱이
+        # `not completed_normally` 안에 갇혀 있어서, done을 내고 정상 종료한 경로 중
+        # 루프 안에서 _maybe_reindex를 부르지 않은 것들은 재색인 없이 끝났다.
+        # _maybe_reindex가 cleanup_state로 1회 발화를 보장하므로 중복 색인은 없다.
+        cleanup_root = cleanup_state.get("root")
+        if isinstance(cleanup_root, Path):
+            _maybe_reindex(
+                cleanup_root,
+                host,
+                cleanup_state.get("dirty") is True,
+                cleanup_state.get("rag_available") is True,
+                cleanup_state,
+            )
 
 
 # ── 리서치 채팅 (web_search + web_fetch만) ──────────────────────────────────
@@ -2681,19 +2784,10 @@ async def run_agent(
 # 모르는 걸 여러 출처로 폭넓게 조사한 뒤 종합해 답하게 한다. 에이전트 하네스의 스트리밍/
 # 오프로드/파싱재생성(_generate_turn)과 툴 디스패치(REGISTRY)를 그대로 재사용한다.
 
-MAX_RESEARCH_STEPS = 16  # 모델 턴(각 턴은 여러 검색·읽기를 한 번에 낼 수 있음) 상한
-RESEARCH_TOOL_NAMES = ("web_search", "web_fetch")
-# 검색 직후 하네스가 상위 결과 '원문'을 자동으로 읽어들인다. 작은 모델이 1개만 읽고 마는
-# 문제를 없애고, 여러 출처를 실제로 정독해 근거를 넓히기 위함(사용자 요청: 원문 전체 정독·보고).
-AUTO_FETCH_TOP = 3       # 검색 1회당 자동으로 원문을 읽을 상위 결과 수
-AUTO_FETCH_BUDGET = 6    # 한 런에서 자동 원문 읽기 총 상한(지연·토큰 폭주 방지)
-# 자동 정독분은 페이지당 이만큼으로 발췌한다. 원문 전체(최대 3만자)×여러 개는 num_ctx(기본 16k토큰)에
-# 안 들어가 compact_convo가 통째로 잘라버려 오히려 모델이 못 읽는다. 발췌하면 3개가 실제로 들어가
-# 모델이 여러 출처를 종합할 수 있다(스니펫보다 20배 이상 많은 본문).
-AUTO_FETCH_CHARS = 7000
-
-
-RESEARCH_SYSTEM_PROMPT = research.RESEARCH_SYSTEM_PROMPT
+# 리서치 상수는 agent_research 가 소유한다. 예전에는 여기에도 같은 값이 리터럴로
+# 적혀 있었는데, 리서치 루프는 agent_research 쪽만 읽으므로 여기를 고쳐도 아무 일이
+# 일어나지 않았다 — 조용히 무시되는 손잡이였다. 재수출로 바꿔 진실을 하나로 둔다.
+RESEARCH_TOOL_NAMES = research.RESEARCH_TOOL_NAMES
 
 
 async def run_research_chat(
@@ -2722,6 +2816,7 @@ async def run_research_chat(
         strict_tool_protocol=strict_tool_protocol,
         registry=REGISTRY,
         compact_conversation=compact_convo,
+        build_conversation=_build_model_conversation,
         prepare_model=_prepare_model,
         generate_turn=_generate_turn,
         parse_args=_parse_args,

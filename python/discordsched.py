@@ -15,6 +15,7 @@ import re
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any  # 타입 표기 전용(런타임 의존 없음)
 
 SCHEDULES_FILE = "schedules.json"
 MAX_JOBS = 20          # 등록 가능한 예약 수 상한(폭주 방지)
@@ -183,7 +184,10 @@ def pop_due(*, now: "datetime | None" = None) -> list[dict]:
         interval_hours: int | None = None
         if j.get("repeat") == "interval" or j.get("kind") == "channel_report":
             try:
-                interval_hours = int(j.get("interval_hours"))
+                # 필드가 없으면(None) int()가 TypeError를 내고 바로 아래 except가 잡아 잡을 버린다 —
+                # 그 경로가 설계이므로 값을 Any로 받아 둔다(저장 파일에서 온 값이라 타입 보장이 없다).
+                raw_hours: Any = j.get("interval_hours")
+                interval_hours = int(raw_hours)
             except (TypeError, ValueError):
                 changed = True
                 continue
@@ -259,6 +263,9 @@ def build_job(
     first, err = parse_when(when, repeat, now=now)
     if err:
         return None, err
+    # parse_when(108행)의 여섯 return이 모두 (시각,None)·(None,오류)로 상보적이라
+    # 오류 가드를 지난 지점에서 first는 반드시 있다.
+    assert first is not None
     return {
         "kind": kind,
         "channel_id": str(channel_id),
@@ -282,6 +289,7 @@ def add_job(**kwargs) -> tuple["dict | None", "str | None"]:
     draft, err = build_job(**kwargs)
     if err:
         return None, err
+    assert draft is not None  # build_job(244행)의 거부 return은 모두 (None, 오류)다
     return commit_job(draft, now=kwargs.get("now")), None
 
 
@@ -375,10 +383,21 @@ async def _latest_message_id(channel) -> str:
     return "0"
 
 
-async def channel_report_add(
+async def prepare_channel_report(
     channels=None, report_channel=None, interval_hours=1, instruction="", **_kw
-) -> str:
-    """Register an interval report and baseline each source at its current newest message."""
+) -> tuple["dict | None", "dict | None", "str | None"]:
+    """검증·채널 해석·베이스라인 수집까지 마친 draft를 만든다. 등록은 하지 않는다.
+
+    승인이 필요한 경로(디스코드 봇)가 **승인 전에** 모든 거부 사유를 확인할 수 있도록
+    커밋과 분리한다. 예전에는 승인 버튼을 누른 뒤에야 채널 해석·권한·개수·주기 검증이
+    돌아서 "승인했는데 거부"가 났고, 미리보기도 해석 전 값이라 실제 등록과 어긋났다
+    (보고 채널을 생략하면 미리보기엔 "#(없음)"이 뜨는데 실제로는 첫 수집 채널로 등록됐다).
+
+    `_schedule_add_with_approval`이 쓰는 build_job/commit_job 분리와 같은 형태다.
+    베이스라인 읽기는 부작용 없는 read이므로 승인 전 실행이 안전하다.
+
+    반환: (draft, meta, error). meta는 미리보기에 쓸 해석된 이름들.
+    """
     import discordops  # noqa: PLC0415
 
     args = canonical_channel_report_args({
@@ -389,28 +408,35 @@ async def channel_report_add(
         **_kw,
     })
     if not args["channels"]:
-        return "[거부] 수집할 채널을 하나 이상 지정하세요."
+        return None, None, "[거부] 수집할 채널을 하나 이상 지정하세요."
     destination = args["report_channel"] or args["channels"][0]
     report_got, report_error = discordops.resolve_text_channel(destination)
     if report_error:
-        return f"[거부] 보고 채널: {report_error}"
+        return None, None, f"[거부] 보고 채널: {report_error}"
+    # discordops의 (값, 오류) 헬퍼들은 상보적이다 — resolve_text_channel(discordops.py 652행),
+    # live_guild(discordops.py 487행) 모두 오류가 없으면 값이 반드시 있다.
+    assert report_got is not None
     live, live_error = discordops.live_guild()
     if live_error:
-        return live_error
+        return None, None, live_error
+    assert live is not None
     guild, _command_channel_id = live
     sources: list[dict] = []
     for requested in args["channels"]:
         got, error = discordops.resolve_text_channel(requested)
         if error:
-            return f"[거부] 수집 채널 '{requested}': {error}"
+            return None, None, f"[거부] 수집 채널 '{requested}': {error}"
+        assert got is not None
         channel_id, channel_name = got
         channel = guild.get_channel(int(channel_id)) if channel_id.isdigit() else None
         if channel is None:
-            return f"[거부] 수집 채널 '#{channel_name}'을 찾을 수 없습니다."
+            return None, None, f"[거부] 수집 채널 '#{channel_name}'을 찾을 수 없습니다."
         try:
             baseline = await _latest_message_id(channel)
-        except Exception as error:  # noqa: BLE001
-            return f"[거부] #{channel_name}의 메시지 기록을 읽을 수 없습니다: {error}"
+        except Exception as exc:  # noqa: BLE001
+            # 예외 변수를 error로 두면 except 블록 끝의 암묵적 del이 아래에서 다시 쓰는
+            # error(빌드 결과 오류)와 같은 이름을 지워 흐름 추적이 끊긴다 — 이름만 분리했다.
+            return None, None, f"[거부] #{channel_name}의 메시지 기록을 읽을 수 없습니다: {exc}"
         sources.append({"id": channel_id, "name": channel_name, "last_message_id": baseline})
     report_id, report_name = report_got
     draft, error = build_channel_report_job(
@@ -421,15 +447,57 @@ async def channel_report_add(
         instruction=args["instruction"],
     )
     if error:
-        return f"[거부] {error}"
-    job = commit_job(draft)
-    source_names = ", ".join(f"#{source['name']}" for source in sources)
+        return None, None, f"[거부] {error}"
+    assert draft is not None  # build_channel_report_job(322행)의 거부 return은 모두 (None, 오류)다
+    meta = {
+        "source_names": [source["name"] for source in sources],
+        "report_name": report_name,
+        "interval_hours": draft["interval_hours"],
+        "instruction": args["instruction"],
+    }
+    return draft, meta, None
+
+
+def render_channel_report_registered(job: dict, meta: dict) -> str:
+    source_names = ", ".join(f"#{name}" for name in meta["source_names"])
     return (
         f"채널 대화 보고 예약을 등록했습니다.\n"
-        f"수집: {source_names}\n보고: #{report_name}\n"
+        f"수집: {source_names}\n보고: #{meta['report_name']}\n"
         f"주기: {job['interval_hours']}시간마다\n"
         "등록 시점 이후의 새 메시지만 보고하며, 성공적으로 보고한 메시지는 다시 수집하지 않습니다."
     )
+
+
+def render_channel_report_preview(meta: dict) -> str:
+    """승인 미리보기 — 해석된 실제 채널명과 정규화된 주기를 보여 준다."""
+    sources = ", ".join(f"#{name}" for name in meta["source_names"]) or "(없음)"
+    preview = (
+        "채널 대화 보고 예약 요청\n"
+        f"수집: {sources}\n보고: #{meta['report_name']}\n"
+        f"주기: {meta['interval_hours']}시간마다\n"
+        "등록 이후 새 메시지만 수집하며 성공적으로 보고한 메시지는 다시 포함하지 않습니다."
+    )
+    if meta["instruction"]:
+        preview += f"\n추가 지시: {meta['instruction']}"
+    return preview
+
+
+async def channel_report_add(
+    channels=None, report_channel=None, interval_hours=1, instruction="", **_kw
+) -> str:
+    """Register an interval report and baseline each source at its current newest message.
+
+    에이전트 탭 툴 진입점 — 반환 문자열과 시그니처를 그대로 유지한다.
+    """
+    draft, meta, error = await prepare_channel_report(
+        channels=channels, report_channel=report_channel,
+        interval_hours=interval_hours, instruction=instruction, **_kw,
+    )
+    if error:
+        return error
+    # prepare_channel_report(386행)는 거부 시 (None, None, 오류)만 낸다 — 오류가 없으면 둘 다 있다.
+    assert draft is not None and meta is not None
+    return render_channel_report_registered(commit_job(draft), meta)
 
 
 # ── 표시 ────────────────────────────────────────────────────────────────
@@ -567,6 +635,7 @@ async def schedule_add(channel=None, text=None, when=None, repeat=None, kind=Non
     got, err = discordops.resolve_text_channel(a["channel"])
     if err:
         return f"[거부] {err}"
+    assert got is not None  # resolve_text_channel·add_job 모두 (값,None)·(None,오류) 상보적
     ch_id, ch_name = got
     job, jerr = add_job(
         channel_id=ch_id, channel_name=ch_name, kind=a["kind"], text=a["text"],
@@ -574,6 +643,7 @@ async def schedule_add(channel=None, text=None, when=None, repeat=None, kind=Non
     )
     if jerr:
         return f"[거부] {jerr}"
+    assert job is not None
     return "예약이 등록되었습니다.\n" + render_job(job)
 
 

@@ -19,6 +19,10 @@ from urllib.parse import unquote_plus, urlparse
 from tools import ToolError
 
 FETCH_TIMEOUT = 20000     # 페이지 로드 상한(ms)
+# 드라이버(node.exe) 기동은 메모리가 빠듯하면 간헐적으로 실패한다. 한 번의 실패로
+# 런 전체가 멈추면(근거 없이 답하지 않는 계약) 사용자에겐 '항상 고장난 것'으로 보인다.
+BROWSER_START_RETRIES = 1
+BROWSER_START_BACKOFF = 0.8   # 초
 MAX_FETCH_CHARS = 30000   # 반환 텍스트 상한(문자)
 # URL 길이 상한 — 정상 웹 주소는 이보다 짧다(관용 한계 ~2048자). 이를 넘는 요청은
 # 대화/문맥을 쿼리스트링에 실어 외부로 보내는 유출(프롬프트 인젝션) 시도일 수 있어 차단한다.
@@ -104,8 +108,16 @@ _TEXT_JS = """() => {
 }"""
 
 
-def _ip_blocked(ip_str: str) -> bool:
-    """사설·loopback·link-local·예약·멀티캐스트·unspecified IP면 True(차단 대상)."""
+def _ip_blocked(ip_str: str | int) -> bool:
+    """사설·loopback·link-local·예약·멀티캐스트·unspecified IP면 True(차단 대상).
+
+    인자 타입이 str | int인 이유: 호출부는 socket.getaddrinfo(...)[4][0]을 넘기는데,
+    typeshed의 sockaddr 타입에는 getaddrinfo가 절대 돌려주지 않는 AF_PACKET용
+    tuple[int, bytes]까지 들어 있어 첫 원소가 str | int로 보인다. proto=IPPROTO_TCP
+    호출은 AF_INET/AF_INET6만 돌려주므로 실제로는 항상 str이고(실측 확인),
+    ipaddress.ip_address는 int도 패킹된 주소로 받아 같은 판정을 내리므로
+    차단 로직은 그대로다 — 표기만 실제 인자 타입에 맞춘 것이다.
+    """
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
@@ -183,7 +195,64 @@ def _blocked_reason(url: str) -> str | None:
     return None
 
 
-def _fetch_sync(url: str) -> str:
+# 실패 결과의 표식. web_fetch 는 어떤 실패도 예외로 던지지 않고 **문자열로** 돌려준다
+# (툴 계약이 문자열이라 그렇다). 그래서 호출자가 "돌아왔으니 읽은 것"으로 세면
+# 차단 페이지를 근거로 취급하게 된다 — 실제로 그런 오답이 있었다.
+_FETCH_FAILURE_PREFIXES = ("[차단]", "[가져오기 실패]", "[가져오기 불가]", "[오류]")
+_NO_BODY_MARKER = "본문 텍스트를 추출하지 못했습니다"
+# 실측: 정상 문서의 본문은 17,000~30,000자, 차단·부재 페이지는 0자였다. 그 사이
+# 어딘가에 "인터스티셜은 통과시키고 기사만 남기는" 바닥이 필요하다. 200자는
+# 어떤 실제 기사보다 훨씬 낮고 어떤 대기 페이지보다 훨씬 높다.
+MIN_EVIDENCE_BODY_CHARS = 200
+
+
+def fetch_result_is_evidence(result: str) -> bool:
+    """이 결과가 모델이 인용할 수 있는 **실제 본문**인가.
+
+    차단·오류·추출 실패 안내는 사람에게는 유용한 설명이지만 근거가 아니다.
+    이걸 '읽었다'로 세면 상위 루프가 교차확인 넛지를 건너뛰고, 모델은 검색
+    스니펫이나 기억으로 답하면서 '출처를 읽었다'고 말한다.
+    """
+    text = str(result or "").strip()
+    if not text or text.startswith(_FETCH_FAILURE_PREFIXES) or _NO_BODY_MARKER in text:
+        return False
+    # 성공 형식은 "[url] · title" + 빈 줄 + 본문이다.
+    _header, _, body = text.partition('\n\n')
+    return len(body.strip()) >= MIN_EVIDENCE_BODY_CHARS
+
+
+# 브라우저가 아예 못 뜬 경우의 표식. 이 접두사가 붙은 결과만 재시도한다 —
+# 페이지 오류·차단은 서버가 준 답이라 다시 물어도 같은 답이 온다.
+_BROWSER_START_FAILURE = "[가져오기 불가]"
+
+
+def _driver_failure_reason(error: BaseException) -> str:
+    """Playwright 내부 예외를 사람이 읽을 수 있는 사유로 바꾼다.
+
+    드라이버가 접속하지 못하면 Playwright 는 `'PlaywrightContextManager' object has
+    no attribute '_playwright'` 를 낸다. 그 속성은 드라이버 접속 콜백에서만 대입되기
+    때문이다(sync_api/_context_manager.py). 그대로 사용자에게 내보내면 아무 의미가 없다.
+    """
+    if isinstance(error, AttributeError) and "_playwright" in str(error):
+        return "브라우저 드라이버가 기동하지 못했습니다(메모리 부족일 수 있음)"
+    return f"{type(error).__name__}: {error}"
+
+
+def _fetch_sync(url: str, *, sleep=None) -> str:
+    """브라우저 기동 실패만 재시도한다. 그 외 결과는 그대로 돌려준다."""
+    import time as _time
+
+    nap = sleep or _time.sleep
+    result = _fetch_once(url)
+    for _ in range(BROWSER_START_RETRIES):
+        if not result.startswith(_BROWSER_START_FAILURE):
+            break
+        nap(BROWSER_START_BACKOFF)
+        result = _fetch_once(url)
+    return result
+
+
+def _fetch_once(url: str) -> str:
     # SSRF 검사(DNS 포함)는 이벤트 루프를 막지 않도록 이 스레드에서 수행
     blocked = _blocked_reason(url)
     if blocked:
@@ -236,7 +305,7 @@ def _fetch_sync(url: str) -> str:
             finally:
                 browser.close()
     except Exception as e:  # noqa: BLE001 — 브라우저 자체가 안 뜨는 경우
-        return f"[가져오기 불가] 헤드리스 브라우저 실행 실패: {type(e).__name__}: {e}."
+        return f"{_BROWSER_START_FAILURE} 헤드리스 브라우저 실행 실패: {_driver_failure_reason(e)}."
 
     # 리다이렉트가 내부 주소로 갔는지 최종 재확인
     blocked = _blocked_reason(final_url)

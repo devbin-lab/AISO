@@ -10,16 +10,6 @@ const stroke = {
   strokeLinejoin: 'round' as const
 }
 
-export function HomeIcon({ size = 17 }: IconProps): React.JSX.Element {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
-      <path d="M3 10.8 12 3.4l9 7.4" />
-      <path d="M5.5 9.7V20a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1V9.7" />
-      <path d="M9.5 21v-6.5h5V21" />
-    </svg>
-  )
-}
-
 export function ChatIcon({ size = 17 }: IconProps): React.JSX.Element {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
@@ -53,6 +43,16 @@ export function AgentIcon({ size = 17 }: IconProps): React.JSX.Element {
       <circle cx="9" cy="13" r="1.1" />
       <circle cx="15" cy="13" r="1.1" />
       <path d="M9.5 16.5h5" />
+    </svg>
+  )
+}
+
+export function HomeIcon({ size = 17 }: IconProps): React.JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
+      <path d="M3 10.8 12 3.4l9 7.4" />
+      <path d="M5.5 9.6V20h13V9.6" />
+      <path d="M9.8 20v-5.4h4.4V20" />
     </svg>
   )
 }

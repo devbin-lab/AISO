@@ -10,13 +10,24 @@ import time
 from typing import Literal
 
 
-LEDGER_SCHEMA_VERSION = 1
+# v2: status에 'expired'(승인 무응답) 추가. v1 DB는 아래 _migrate_v1_to_v2가 올린다.
+LEDGER_SCHEMA_VERSION = 2
+
+_STATUS_CHECK = (
+    "'pending','awaiting_approval','running',"
+    "'completed','failed','rejected','expired','indeterminate'"
+)
 MAX_LEDGER_RESULT_CHARS = 16 * 1024
 
-TerminalStatus = Literal["completed", "failed", "rejected"]
+# expired = 승인 요청에 응답이 오지 않아 실행하지 않음. rejected(사용자가 거부)와
+# 구분한다 — 일어나지 않은 사용자 결정을 원장에 사실로 남기면 안 된다.
+TerminalStatus = Literal["completed", "failed", "rejected", "expired"]
 LedgerStatus = Literal[
-    "pending", "awaiting_approval", "running", "completed", "failed", "rejected", "indeterminate"
+    "pending", "awaiting_approval", "running",
+    "completed", "failed", "rejected", "expired", "indeterminate",
 ]
+# 승인 대기 상태에서 곧바로 끝날 수 있는 종료 상태들 (도구는 실행되지 않았다).
+_TERMINAL_FROM_AWAITING_APPROVAL = ("rejected", "expired")
 
 
 class LedgerError(RuntimeError):
@@ -56,7 +67,10 @@ class LedgerRecord:
 
     @property
     def reusable(self) -> bool:
-        return self.status in ("completed", "failed", "rejected")
+        # expired도 종료 상태다. 같은 assistant 응답을 재시도해도 도구를 몰래 다시
+        # 실행하지 않고 저장된 '응답 없음' 결과를 그대로 돌려준다 — 파괴적 도구에서
+        # 재시도가 조용한 재실행이 되면 안 되기 때문이다(정확히 한 번 계약).
+        return self.status in ("completed", "failed", "rejected", "expired")
 
 
 def canonical_arguments_hash(canonical_arguments: str) -> str:
@@ -118,13 +132,55 @@ class AgentExecutionLedger:
             try:
                 db.close()
             finally:
-                self._db = None
+                # `_db is None` 은 '닫혔다'의 **관측 가능한 표시**다 —
+                # test_nvidia_credential_channel 이 그것으로 원장 종료를 검증한다.
+                # _db 를 Optional 로 넓히면 열린 연결을 전제하는 40여 곳 전부에
+                # 가드가 필요해지고 런타임 이득은 없다. 이 한 줄만 좁혀서 무시한다.
+                self._db = None  # type: ignore[assignment]
 
     def __enter__(self) -> "AgentExecutionLedger":
         return self
 
     def __exit__(self, *_args) -> None:
         self.close()
+
+    @staticmethod
+    def _create_ledger_sql(table: str) -> str:
+        return f"""
+            CREATE TABLE {table} (
+              session_id TEXT NOT NULL,
+              assistant_turn_id TEXT NOT NULL,
+              provider_tool_call_id TEXT NOT NULL,
+              tool_name TEXT NOT NULL,
+              arguments_hash TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(status IN ({_STATUS_CHECK})),
+              result TEXT NOT NULL DEFAULT '',
+              ok INTEGER NOT NULL DEFAULT 0 CHECK(ok IN (0,1)),
+              rejected INTEGER NOT NULL DEFAULT 0 CHECK(rejected IN (0,1)),
+              approval_id TEXT NOT NULL,
+              execution_id TEXT NOT NULL,
+              updated_at INTEGER NOT NULL,
+              PRIMARY KEY(session_id, assistant_turn_id, provider_tool_call_id)
+            ) WITHOUT ROWID
+        """
+
+    def _migrate_v1_to_v2(self) -> None:
+        """CHECK 제약에 'expired'를 더한 테이블로 옮긴다. 이미 열린 트랜잭션 안에서 돈다."""
+        self._db.execute(self._create_ledger_sql("tool_execution_ledger_v2"))
+        self._db.execute(
+            """
+            INSERT INTO tool_execution_ledger_v2
+            SELECT session_id, assistant_turn_id, provider_tool_call_id, tool_name,
+                   arguments_hash, status, result, ok, rejected,
+                   approval_id, execution_id, updated_at
+              FROM tool_execution_ledger
+            """
+        )
+        self._db.execute("DROP TABLE tool_execution_ledger")
+        self._db.execute("ALTER TABLE tool_execution_ledger_v2 RENAME TO tool_execution_ledger")
+        self._db.execute(
+            "UPDATE ledger_meta SET schema_version=?", (LEDGER_SCHEMA_VERSION,)
+        )
 
     def _initialize_schema(self) -> None:
         self._db.execute("BEGIN IMMEDIATE")
@@ -143,32 +199,21 @@ class AgentExecutionLedger:
                     "INSERT INTO ledger_meta(schema_version) VALUES (?)",
                     (LEDGER_SCHEMA_VERSION,),
                 )
-                self._db.execute(
-                    """
-                    CREATE TABLE tool_execution_ledger (
-                      session_id TEXT NOT NULL,
-                      assistant_turn_id TEXT NOT NULL,
-                      provider_tool_call_id TEXT NOT NULL,
-                      tool_name TEXT NOT NULL,
-                      arguments_hash TEXT NOT NULL,
-                      status TEXT NOT NULL CHECK(status IN (
-                        'pending','awaiting_approval','running','completed','failed','rejected','indeterminate'
-                      )),
-                      result TEXT NOT NULL DEFAULT '',
-                      ok INTEGER NOT NULL DEFAULT 0 CHECK(ok IN (0,1)),
-                      rejected INTEGER NOT NULL DEFAULT 0 CHECK(rejected IN (0,1)),
-                      approval_id TEXT NOT NULL,
-                      execution_id TEXT NOT NULL,
-                      updated_at INTEGER NOT NULL,
-                      PRIMARY KEY(session_id, assistant_turn_id, provider_tool_call_id)
-                    ) WITHOUT ROWID
-                    """
-                )
+                self._db.execute(self._create_ledger_sql("tool_execution_ledger"))
             else:
                 if tables != {"ledger_meta", "tool_execution_ledger"}:
                     raise LedgerError("Agent 실행 원장 스키마를 신뢰할 수 없습니다.")
                 rows = self._db.execute("SELECT schema_version FROM ledger_meta").fetchall()
-                if len(rows) != 1 or rows[0][0] != LEDGER_SCHEMA_VERSION:
+                if len(rows) != 1:
+                    raise LedgerError("Agent 실행 원장 스키마 버전이 호환되지 않습니다.")
+                version = rows[0][0]
+                if version == 1:
+                    # v1 → v2: CHECK 제약에 'expired'를 추가한다. SQLite는 CHECK를
+                    # 바꿀 수 없으므로 테이블을 다시 만들어 옮긴다. 기존 행은 그대로
+                    # 보존된다 — 원장을 버리면 '정확히 한 번' 보장이 함께 사라진다.
+                    self._migrate_v1_to_v2()
+                    version = LEDGER_SCHEMA_VERSION
+                if version != LEDGER_SCHEMA_VERSION:
                     raise LedgerError("Agent 실행 원장 스키마 버전이 호환되지 않습니다.")
                 columns = {
                     row[1]
@@ -339,8 +384,17 @@ class AgentExecutionLedger:
     ) -> LedgerRecord:
         if status == "rejected" and not rejected:
             raise LedgerError("거절 상태에는 rejected 표시가 필요합니다.")
+        if status == "expired" and rejected:
+            # 응답 없음은 거절이 아니다. 둘을 섞으면 원장이 다시 거짓을 말한다.
+            raise LedgerError("만료 상태에는 rejected 표시를 쓸 수 없습니다.")
         bounded = bound_ledger_result(result)
-        allowed = ("awaiting_approval",) if status == "rejected" else ("running",)
+        # allowed = 이 전이가 허용되는 '현재' 상태. rejected/expired는 도구가 실행되지
+        # 않았으므로 running을 거치지 않고 awaiting_approval에서 바로 끝난다.
+        allowed = (
+            ("awaiting_approval",)
+            if status in _TERMINAL_FROM_AWAITING_APPROVAL
+            else ("running",)
+        )
         placeholders = ",".join("?" for _ in allowed)
         self._db.execute("BEGIN IMMEDIATE")
         try:

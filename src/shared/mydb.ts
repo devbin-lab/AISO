@@ -59,6 +59,7 @@ export type MyDbHistoryAction =
   | 'renamed'
   | 'moved_to_trash'
   | 'restored'
+  | 'purged'
   | 'linked'
   | 'unlinked'
   | 'content_changed'
@@ -208,6 +209,8 @@ export interface MyDbBridge {
   renameNode: (id: string, title: string) => Promise<MyDbNode>
   deleteNode: (id: string, options?: MyDbDeleteOptions) => Promise<void>
   restoreNode: (id: string) => Promise<MyDbNode>
+  /** 휴지통의 항목을 되돌릴 수 없게 지운다. 사용자 전용 — 에이전트에는 노출되지 않는다. */
+  purgeNode?: (id: string) => Promise<void>
   link: (sourceId: string, targetId: string, relation?: MyDbRelation) => Promise<MyDbEdge>
   unlink: (edgeId: string) => Promise<void>
   pickFiles: (parentCoreId?: string | null) => Promise<MyDbImportResult>

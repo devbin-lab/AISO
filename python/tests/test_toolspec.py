@@ -49,18 +49,21 @@ _ALL_TOOLS = [
 
 
 def test_agent_tools_snapshot():
-    """AGENT_TOOLS 스키마·순서가 프리즈된 스냅샷과 완전히 동일해야 한다."""
-    expected = [
-        schema for schema in json.loads(_SNAPSHOT.read_text(encoding="utf-8"))
-        if schema["function"]["name"] != "list_change_history"
-    ]
-    mydb_schemas = [
-        REGISTRY[name].schema
-        for name in ("list_mydb_library", "list_mydb_history", "list_mydb_trash", "restore_mydb_trash_node")
-    ]
-    calendar_index = next(index for index, schema in enumerate(expected) if schema["function"]["name"] == "list_calendar_events")
-    expected = expected[:calendar_index + 1] + mydb_schemas + expected[calendar_index + 1:]
+    """AGENT_TOOLS 스키마·순서가 프리즈된 스냅샷과 완전히 동일해야 한다.
+
+    예전에는 이 테스트가 스냅샷에서 폐기 도구를 걸러내고 My DB 도구 4종을 **live
+    REGISTRY에서 끌어와** 끼워 넣은 뒤 비교했다. 그 4종은 자기 자신과 비교되므로
+    스키마가 어떻게 바뀌어도 통과했고, 프리즈가 그 범위에서 아무 일도 하지 않았다.
+    스냅샷은 이제 AGENT_TOOLS 전체를 있는 그대로 담는다 — 의도한 변경이면 스냅샷을
+    함께 갱신하고, 그 diff가 리뷰 대상이 된다.
+    """
+    expected = json.loads(_SNAPSHOT.read_text(encoding="utf-8"))
     assert agent.AGENT_TOOLS == expected
+    # list_change_history / knowledge_graph.py 는 폐기된 설계다. My DB의 백엔드가
+    # 되려다가, "에이전트로 만든 파일이 여기에 쌓이는 구조가 절대 아니다"라는 방향
+    # 확정으로 2026-07-19에 연결이 끊겼고, My DB는 src/main/mydb.ts 로 새로 구현됐다.
+    # 에이전트의 My DB 접근은 list_mydb_* 4개 도구로 이미 다시 열려 있다.
+    # 이 단언은 폐기된 도구가 다시 노출되는 것을 막는다.
     assert "list_change_history" not in {schema["function"]["name"] for schema in agent.AGENT_TOOLS}
 
 

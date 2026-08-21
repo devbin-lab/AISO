@@ -239,6 +239,7 @@ const api = {
     deleteNode: (id: string, options?: { cascade?: boolean }) =>
       ipcRenderer.invoke('mydb:delete-node', { id }, options),
     restoreNode: (id: string) => ipcRenderer.invoke('mydb:restore-node', { id }),
+    purgeNode: (id: string) => ipcRenderer.invoke('mydb:purge-node', { id }),
     link: (sourceId: string, targetId: string, relation?: MyDbRelation) =>
       ipcRenderer.invoke('mydb:link', { id: sourceId }, { id: targetId }, relation),
     unlink: (edgeId: string) => ipcRenderer.invoke('mydb:unlink-edge', edgeId),

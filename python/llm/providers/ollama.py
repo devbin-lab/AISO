@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import Any, AsyncIterator, Mapping
+from typing import Any, AsyncGenerator, Mapping
 
 import httpx
 
@@ -143,7 +143,7 @@ class OllamaAdapter:
             payload["think"] = extra["think"]
         return payload
 
-    async def chat_stream(self, request: LlmRequest) -> AsyncIterator[LlmEvent]:
+    async def chat_stream(self, request: LlmRequest) -> AsyncGenerator[LlmEvent, None]:
         payload = self.serialize_request(request)
         timeout = httpx.Timeout(None, connect=5)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -172,6 +172,10 @@ class OllamaAdapter:
                         yield LlmEvent(
                             kind="done",
                             output_tokens=data.get("eval_count"),
+                            # prompt_eval_count = 서버가 실제로 처리한 프롬프트 토큰.
+                            # 이게 없으면 compact_convo의 chars//3 예산이 num_ctx를
+                            # 실제로 넘겼는지 확인할 방법이 없다(한국어 혼합에서 특히).
+                            input_tokens=data.get("prompt_eval_count"),
                             total_duration=data.get("total_duration"),
                             done_reason=data.get("done_reason"),
                         )

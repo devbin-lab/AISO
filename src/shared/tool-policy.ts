@@ -195,10 +195,3 @@ export function agentToolSupportedByProvider(
 ): boolean {
   return provider === 'ollama' || NVIDIA_SUPPORTED_SET.has(toolId)
 }
-
-export function enabledAgentToolSet(
-  policy: AgentToolPolicy,
-  provider: keyof AgentToolPolicy
-): ReadonlySet<AgentToolId> {
-  return new Set(policy[provider])
-}
