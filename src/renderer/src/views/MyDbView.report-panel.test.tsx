@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { defaultReportDate, localDayKey, previousDayKey } from '../lib/history-calendar'
+import { localDayKey, previousDayKey, resolveReportDate } from '../lib/history-calendar'
 import type { MyDbDailyReport, MyDbHistoryEntry } from '../../../shared/mydb'
 
 /**
@@ -19,8 +19,16 @@ function report(reportDate: string, totalChanges = 0): MyDbDailyReport {
 /** 화면과 같은 선택 규칙. */
 function pick(historyDay: string | null, reports: MyDbDailyReport[], today: Date) {
   const byDate = new Map(reports.map((r) => [r.reportDate, r]))
-  const reportDate = historyDay ?? defaultReportDate(byDate.keys(), today)
-  return { reportDate, shown: byDate.get(reportDate) ?? null, isYesterday: reportDate === previousDayKey(today) }
+  const selectedDay = historyDay ?? previousDayKey(today)
+  const reportDate = resolveReportDate(selectedDay, byDate.keys())
+  return {
+    selectedDay,
+    reportDate,
+    shown: byDate.get(reportDate) ?? null,
+    // 고른 날과 읽는 날이 다르면 화면이 그 사실을 밝힌다.
+    fellBack: reportDate !== selectedDay,
+    isYesterday: reportDate === previousDayKey(today)
+  }
 }
 
 const TODAY = new Date(2026, 7, 22)
@@ -56,10 +64,26 @@ describe('보고서 패널이 보여 줄 날짜', () => {
     expect(shown?.totalChanges).toBe(0)
   })
 
-  it('보고서가 없는 날을 고르면 그 사실을 알린다', () => {
-    const { shown, isYesterday } = pick('2026-08-19', REPORTS, TODAY)
-    expect(shown).toBeNull()
-    expect(isYesterday).toBe(false) // '이 날짜의 보고서가 없습니다'
+  it('오늘을 골라도 패널이 비지 않는다 — 전날 보고서로 물러난다', () => {
+    // 스크린샷의 상황: 8/22(오늘)을 고르면 '이 날짜의 보고서가 없습니다' 만 떴다.
+    // 이력은 오늘 것이 이미 있는데 보고서만 없는 어긋남이었다.
+    const { selectedDay, reportDate, shown, fellBack } = pick('2026-08-22', REPORTS, TODAY)
+    expect(selectedDay).toBe('2026-08-22')
+    expect(reportDate).toBe('2026-08-21')
+    expect(shown?.totalChanges).toBe(5)
+    expect(fellBack).toBe(true)
+  })
+
+  it('보고서가 없는 날을 고르면 그 이전 최근 것으로 내려간다', () => {
+    const { reportDate, shown, fellBack } = pick('2026-08-19', REPORTS, TODAY)
+    expect(reportDate).toBe('2026-08-16')
+    expect(shown).not.toBeNull()
+    expect(fellBack).toBe(true)
+  })
+
+  it('그 날 보고서가 있으면 물러나지 않는다', () => {
+    const { fellBack } = pick('2026-08-16', REPORTS, TODAY)
+    expect(fellBack).toBe(false)
   })
 })
 
@@ -103,10 +127,14 @@ describe('아래 목록이 보여 줄 이력', () => {
     { id: 'c', action: 'core_created', subjectTitle: '오늘 코어', createdAt: new Date(2026, 7, 22, 9).toISOString() }
   ]
 
-  it('달력 보기는 보고서와 같은 하루만 보여 준다', () => {
-    // 화면 전체가 한 날짜를 말한다 — 달력·보고서·목록이 어긋나지 않는다.
+  it('달력 보기는 고른 하루만 보여 준다', () => {
     const shown = visible('calendar', '2026-08-21', entries)
     expect(shown.map((e) => e.id)).toEqual(['a', 'b'])
+  })
+
+  it('보고서가 전날로 물러나도 목록은 고른 날 그대로다', () => {
+    // 오늘 한 일을 감추면 안 된다 — 보고서만 하루 뒤로 물러난다.
+    expect(visible('calendar', '2026-08-22', entries).map((e) => e.id)).toEqual(['c'])
   })
 
   it('다른 날짜를 고르면 목록도 따라간다', () => {

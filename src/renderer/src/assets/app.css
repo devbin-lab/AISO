@@ -908,6 +908,13 @@
   letter-spacing: -.01em;
   font-variant-numeric: tabular-nums;
 }
+/* 고른 날 보고서가 아직 없어 이전 것으로 물러났을 때 — 무엇을 읽고 있는지
+   헷갈리지 않게 한 줄로 밝힌다. */
+.mydb-report-panel__fallback {
+  color: color-mix(in srgb, var(--text-dim) 45%, var(--text));
+  font-size: 10.5px;
+  font-style: normal;
+}
 .mydb-report-panel__count {
   margin-left: auto;
   padding: 2px 8px;

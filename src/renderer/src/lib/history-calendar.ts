@@ -108,22 +108,25 @@ export function previousDayKey(today: Date = new Date()): string {
 }
 
 /**
- * 보고서 패널이 처음 보여 줄 날짜.
+ * 고른 날짜에 대해 **실제로 읽을 수 있는** 보고서 날짜를 정한다.
  *
- * 오늘로 두면 늘 비어 있다 — 보고서는 하루가 끝난 뒤(다음 날) 쓰이기 때문이다
- * (ensurePreviousDayReport). 그래서 기본은 **전날**이다.
+ * 보고서는 하루가 끝난 뒤에 쓰인다(ensurePreviousDayReport). 그래서 오늘을
+ * 고르면 그 날 보고서는 아직 없고, 패널이 늘 비어 보였다. 이력은 오늘 것이
+ * 이미 쌓여 있는데 보고서만 없는 어긋남이다.
  *
- * 앱을 며칠 꺼 두면 전날 보고서도 없을 수 있다. 그때는 있는 것 중 가장 최근
- * 보고서를 보여 준다 — 빈 화면보다 낫고, 어느 날짜인지는 패널이 크게 적는다.
- * 보고서가 하나도 없으면 전날을 그대로 돌려준다(빈 상태 문구용).
+ * 규칙: 고른 날 보고서가 있으면 그것, 없으면 **그 이전 가장 최근** 보고서.
+ * 하나도 없으면 고른 날을 그대로 돌려준다(빈 상태 문구가 판단할 수 있게).
+ *
+ * 미래로는 절대 가지 않는다 — 8월 16일을 골랐는데 8월 21일 보고서를 보여
+ * 주면 무엇을 읽고 있는지 알 수 없다.
  */
-export function defaultReportDate(reportDates: Iterable<string>, today: Date = new Date()): string {
-  const yesterday = previousDayKey(today)
+export function resolveReportDate(selected: string, reportDates: Iterable<string>): string {
   const dates = [...reportDates]
-  if (dates.includes(yesterday)) return yesterday
-  const past = dates.filter((date) => date <= yesterday).sort()
-  return past.length > 0 ? past[past.length - 1]! : yesterday
+  if (dates.includes(selected)) return selected
+  const past = dates.filter((date) => date < selected).sort()
+  return past.length > 0 ? past[past.length - 1]! : selected
 }
+
 
 /** 넘겨 볼 수 있는 최소 창(개월). 이력이 없거나 한 달뿐이어도 달력은 움직여야 한다. */
 export const MIN_BROWSE_MONTHS = 12

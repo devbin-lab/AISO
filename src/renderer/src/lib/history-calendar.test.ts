@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildMonth, countByDay, defaultReportDate, intensityOf, localDayKey, monthRange, monthsWithHistory, previousDayKey, shiftMonth } from './history-calendar'
+import { buildMonth, countByDay, intensityOf, localDayKey, monthRange, monthsWithHistory, previousDayKey, resolveReportDate, shiftMonth } from './history-calendar'
 import type { MyDbHistoryEntry } from '../../../shared/mydb'
 
 function entry(createdAt: string, id = createdAt): MyDbHistoryEntry {
@@ -145,7 +145,7 @@ describe('보고서 패널 기본 날짜', () => {
   it('전날을 기본으로 한다', () => {
     // 오늘로 두면 늘 비어 있다 — 보고서는 하루가 끝난 뒤 쓰인다.
     expect(previousDayKey(TODAY)).toBe('2026-08-21')
-    expect(defaultReportDate(['2026-08-21', '2026-08-20'], TODAY)).toBe('2026-08-21')
+    expect(resolveReportDate(previousDayKey(TODAY), ['2026-08-21', '2026-08-20'])).toBe('2026-08-21')
   })
 
   it('달 경계를 넘는다', () => {
@@ -155,16 +155,44 @@ describe('보고서 패널 기본 날짜', () => {
 
   it('전날 보고서가 없으면 있는 것 중 가장 최근을 보여 준다', () => {
     // 앱을 며칠 꺼 두면 전날 보고서가 없다. 빈 화면보다 최근 것이 낫다.
-    expect(defaultReportDate(['2026-08-18', '2026-08-16'], TODAY)).toBe('2026-08-18')
+    expect(resolveReportDate(previousDayKey(TODAY), ['2026-08-18', '2026-08-16'])).toBe('2026-08-18')
   })
 
   it('미래 날짜 보고서는 기본으로 고르지 않는다', () => {
     // 시계를 바꿨거나 이관한 경우 미래 기록이 있을 수 있다.
-    expect(defaultReportDate(['2026-09-30', '2026-08-16'], TODAY)).toBe('2026-08-16')
+    expect(resolveReportDate(previousDayKey(TODAY), ['2026-09-30', '2026-08-16'])).toBe('2026-08-16')
   })
 
   it('보고서가 하나도 없으면 전날을 돌려준다', () => {
     // 빈 상태 문구가 '아직 작성된 보고서가 없습니다' 를 고를 수 있어야 한다.
-    expect(defaultReportDate([], TODAY)).toBe('2026-08-21')
+    expect(resolveReportDate(previousDayKey(TODAY), [])).toBe('2026-08-21')
+  })
+})
+
+describe('읽을 수 있는 보고서 날짜 고르기', () => {
+  const DATES = ['2026-08-21', '2026-08-20', '2026-08-16']
+
+  it('그 날 보고서가 있으면 그대로 읽는다', () => {
+    expect(resolveReportDate('2026-08-16', DATES)).toBe('2026-08-16')
+  })
+
+  it('오늘을 골라도 비어 있지 않다 — 전날 보고서로 물러난다', () => {
+    // 보고서는 하루가 끝난 뒤 쓰이므로 오늘 것은 아직 없다.
+    // 예전에는 여기서 패널이 통째로 비어 '이 날짜의 보고서가 없습니다' 만 떴다.
+    expect(resolveReportDate('2026-08-22', DATES)).toBe('2026-08-21')
+  })
+
+  it('며칠 비어 있어도 그 이전 최근 것으로 내려간다', () => {
+    expect(resolveReportDate('2026-08-19', DATES)).toBe('2026-08-16')
+  })
+
+  it('미래로는 절대 가지 않는다', () => {
+    // 8/16 을 골랐는데 8/21 보고서를 보여 주면 무엇을 읽는지 알 수 없다.
+    expect(resolveReportDate('2026-08-10', DATES)).toBe('2026-08-10')
+  })
+
+  it('보고서가 하나도 없으면 고른 날을 그대로 돌려준다', () => {
+    // 빈 상태 문구가 판단할 수 있어야 한다.
+    expect(resolveReportDate('2026-08-22', [])).toBe('2026-08-22')
   })
 })
