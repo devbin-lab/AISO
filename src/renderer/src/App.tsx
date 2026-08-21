@@ -26,6 +26,33 @@ function ViewFallback(): React.JSX.Element {
   return <div className="view-loading" role="status">화면을 준비하고 있습니다…</div>
 }
 
+/**
+ * 내용이 같으면 **이전 객체를 그대로** 돌려준다.
+ *
+ * health 는 5초마다 폴링하는데, 매번 새 객체를 만들면 값이 하나도 안 바뀌어도
+ * 참조가 달라진다. health 를 의존성에 둔 useCallback/useEffect 가 전부 다시 돌아
+ * 홈 대시보드가 5초마다 통째로 재로드됐다(실측: 60초에 12회, 내용 변화 0회).
+ * 진단 센터는 같은 문제를 ref 가드로 우회했지만, 여기서 참조를 안정시키면
+ * health 를 쓰는 모든 화면이 함께 이득을 본다.
+ *
+ * models 는 순서까지 의미가 있으므로 순서를 포함해 비교한다.
+ *
+ * export 하는 이유는 테스트뿐이다 — 이 판정이 무너지면 증상이 조용히 돌아오는데,
+ * App 을 통째로 렌더하는 테스트로는 폴링 참조 안정성을 확인하기 어렵다.
+ */
+export function keepIfSame(prev: HealthInfo | null, next: HealthInfo): HealthInfo {
+  if (
+    prev !== null &&
+    prev.ollama === next.ollama &&
+    prev.detail === next.detail &&
+    prev.models.length === next.models.length &&
+    prev.models.every((m, i) => m === next.models[i])
+  ) {
+    return prev
+  }
+  return next
+}
+
 function App(): React.JSX.Element {
   const [view, setView] = useState<ViewKey>('home')
   const [visitedViews, setVisitedViews] = useState<Set<ViewKey>>(() => new Set(['home']))
@@ -84,7 +111,7 @@ function App(): React.JSX.Element {
           { headers: authHeaders() }
         )
         const j = await r.json()
-        if (alive) setHealth({ ollama: j.ollama === true, models: j.models ?? [], detail: j.detail })
+        if (alive) setHealth((prev) => keepIfSame(prev, { ollama: j.ollama === true, models: j.models ?? [], detail: j.detail }))
       } catch {
         if (alive) setHealth(null)
       }

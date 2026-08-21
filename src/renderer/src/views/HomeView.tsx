@@ -88,11 +88,15 @@ function HomeView({ active, backend, health, settings, onNavigate }: Props): Rea
   const [loading, setLoading] = useState(false)
   const [todoError, setTodoError] = useState<string | null>(null)
 
-  const refresh = useCallback(async () => {
-    setLoading(true)
-    // 세 원천은 서로 독립이다. 하나가 실패해도 나머지는 보여 준다 —
-    // 대시보드가 통째로 비면 사용자는 무엇이 문제인지조차 알 수 없다.
-    const [todoResult, usageResult, reportResult, checkResult] = await Promise.allSettled([
+  /**
+   * 데이터 세 원천(할 일·사용량·보고서). 연결 점검과 분리해 둔다 —
+   * 합쳐 두면 health 폴링이 5초마다 이 셋까지 다시 부른다.
+   *
+   * 세 원천은 서로 독립이다. 하나가 실패해도 나머지는 보여 준다 —
+   * 대시보드가 통째로 비면 사용자는 무엇이 문제인지조차 알 수 없다.
+   */
+  const refreshData = useCallback(async () => {
+    const [todoResult, usageResult, reportResult] = await Promise.allSettled([
       backend.state === 'ready' && backend.port
         ? fetch(`http://127.0.0.1:${backend.port}/creator/todos`, { headers: authHeaders() })
             .then((response) => (response.ok ? response.json() : Promise.reject(new Error(String(response.status)))))
@@ -101,8 +105,7 @@ function HomeView({ active, backend, health, settings, onNavigate }: Props): Rea
       window.api?.usage?.summary() ?? Promise.reject(new Error('no-usage-bridge')),
       // getMyDbBridge()는 브리지가 없으면 **동기 throw**다. allSettled 배열 안에서 그대로
       // 부르면 세 원천이 통째로 날아간다 — 반드시 거부된 프로미스로 바꿔서 넘긴다.
-      Promise.resolve().then(() => getMyDbBridge().history()),
-      collectConnectionChecks(backend, health, settings)
+      Promise.resolve().then(() => getMyDbBridge().history())
     ])
 
     if (todoResult.status === 'fulfilled') {
@@ -116,14 +119,32 @@ function HomeView({ active, backend, health, settings, onNavigate }: Props): Rea
     if (usageResult.status === 'fulfilled') setUsage(usageResult.value)
     // dailyReports 는 report_date 내림차순이라 첫 항목이 가장 최근 보고서다.
     if (reportResult.status === 'fulfilled') setReport(reportResult.value.dailyReports[0] ?? null)
-    if (checkResult.status === 'fulfilled') setChecks(checkResult.value)
-    setLoading(false)
+  }, [backend])
+
+  /**
+   * 연결 점검. ComfyUI·디스코드·NVIDIA 로 실제 요청이 나가므로 값이 정말
+   * 바뀌었을 때만 돈다. App 이 health 참조를 안정시켜 주므로(keepIfSame),
+   * 상태가 그대로면 이 콜백도 다시 만들어지지 않는다.
+   */
+  const refreshChecks = useCallback(async () => {
+    setChecks(await collectConnectionChecks(backend, health, settings))
   }, [backend, health, settings])
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    await Promise.all([refreshData(), refreshChecks()])
+    setLoading(false)
+  }, [refreshData, refreshChecks])
 
   useEffect(() => {
     if (!active) return
-    void refresh()
-  }, [active, refresh])
+    void refreshData()
+  }, [active, refreshData])
+
+  useEffect(() => {
+    if (!active) return
+    void refreshChecks()
+  }, [active, refreshChecks])
 
   const pending = dueSoon(todos)
   const week = usage ? lastWeek(usage.daily) : []
