@@ -16,7 +16,7 @@ import type {
 import { CloseIcon, DownloadIcon, EditIcon, FileIcon, FolderIcon, GraphIcon, LinkIcon, SearchIcon, TrashIcon, UnlinkIcon } from '../components/icons'
 import { confirmDialog } from '../components/ConfirmDialog'
 import { getMyDbBridge } from '../lib/mydb'
-import { buildMonth, countByDay, intensityOf, localDayKey, monthRange, monthsWithHistory, previousDayKey, resolveReportDate, shiftMonth } from '../lib/history-calendar'
+import { buildMonth, countByDay, intensityOf, localDayKey, monthRange, monthsWithHistory, resolveReportDate, shiftMonth } from '../lib/history-calendar'
 import { applyRepulsion, BARNES_HUT_THETA, buildQuadTree } from './mydb-graph/quadtree'
 import { buildGraphRoutes } from './mydb-graph/routing'
 
@@ -1580,9 +1580,10 @@ function MyDbView({ active }: Props): React.JSX.Element {
     () => new Map(history.dailyReports.map((report) => [report.reportDate, report])),
     [history.dailyReports]
   )
-  // 달력에서 고른 날. 고르지 않았으면 전날을 본다 — 오늘 보고서는 하루가
-  // 끝나야 쓰이므로 오늘을 기본으로 두면 패널이 늘 비어 있다.
-  const selectedDay = historyDay ?? previousDayKey()
+  // 달력을 열면 오늘이 선택돼 있다 — 사람이 보고 싶은 건 '지금까지 뭘 했나'다.
+  // 오늘 보고서는 아직 없지만, 아래 resolveReportDate 가 전날 것으로 물러나
+  // 패널이 비지 않는다. 목록은 오늘 것을 그대로 보여 준다.
+  const selectedDay = historyDay ?? localDayKey(new Date())
   // 그 날 보고서가 없으면 그 이전 가장 최근 보고서를 읽는다. 이력은 오늘 것이
   // 이미 쌓여 있는데 보고서만 없는 어긋남을 이렇게 메운다.
   const reportDate = resolveReportDate(selectedDay, reportsByDate.keys())
@@ -2472,9 +2473,9 @@ function MyDbView({ active }: Props): React.JSX.Element {
                             key={day.key}
                             type="button"
                             role="gridcell"
-                            className={`mydb-cal__cell mydb-cal__cell--l${intensityOf(day.count, monthPeak)}${day.isToday ? ' is-today' : ''}${historyDay === day.key ? ' is-picked' : ''}`}
+                            className={`mydb-cal__cell mydb-cal__cell--l${intensityOf(day.count, monthPeak)}${day.isToday ? ' is-today' : ''}${selectedDay === day.key ? ' is-picked' : ''}`}
                             aria-label={`${day.key} 변경 ${day.count}건${day.key && reportsByDate.has(day.key) ? ' · 보고서 있음' : ''}`}
-                            aria-pressed={historyDay === day.key}
+                            aria-pressed={selectedDay === day.key}
                             {...(day.key && reportsByDate.has(day.key) ? { 'data-report': 'yes' } : {})}
                             /* 변경이 0건이어도 보고서가 있으면 눌러서 볼 수 있어야 한다. */
                             disabled={day.count === 0 && !(day.key && reportsByDate.has(day.key))}
