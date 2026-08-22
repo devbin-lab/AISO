@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { AppSettings } from '../../../shared/settings'
 import type { DragEvent as ReactDragEvent, FormEvent } from 'react'
 import type {
   MyDbEdge,
@@ -22,6 +23,32 @@ import { buildGraphRoutes } from './mydb-graph/routing'
 
 interface Props {
   active: boolean
+  /** 휴지통 자동 비우기 기한을 화면이 그대로 말해 주기 위해 필요하다. */
+  settings: AppSettings
+}
+
+/**
+ * 휴지통 항목의 자동 삭제까지 남은 기한 표시.
+ *
+ * 기한이 꺼져 있으면(0일) 아무것도 세지 않고 버린 날짜만 말한다 — 켜지지도
+ * 않은 기능의 카운트다운을 보여 주면 곧 지워질 것처럼 읽힌다.
+ * 이미 지난 항목은 '곧 삭제'다. 다음 검사 주기에 사라지므로 '0일 남음'처럼
+ * 정확한 척하지 않는다.
+ */
+export function trashLeftLabel(
+  node: Pick<MyDbNode, 'deletedAt'>,
+  retentionDays: number,
+  reference: Date = new Date()
+): string {
+  if (!node.deletedAt) return ''
+  const deletedAt = new Date(node.deletedAt)
+  if (Number.isNaN(deletedAt.getTime())) return ''
+  if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
+    return `${deletedAt.getMonth() + 1}/${deletedAt.getDate()} 버림`
+  }
+  const dueMs = deletedAt.getTime() + retentionDays * 24 * 60 * 60 * 1000
+  const leftDays = Math.ceil((dueMs - reference.getTime()) / (24 * 60 * 60 * 1000))
+  return leftDays <= 0 ? '곧 삭제' : `${leftDays}일 남음`
 }
 
 type MyDbViewMode = 'graph' | 'list' | 'history'
@@ -1513,7 +1540,7 @@ function MyDbGraphCanvas({
   )
 }
 
-function MyDbView({ active }: Props): React.JSX.Element {
+function MyDbView({ active, settings }: Props): React.JSX.Element {
   const listHostRef = useRef<HTMLDivElement>(null)
   const workspaceRef = useRef<HTMLElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -1772,6 +1799,19 @@ function MyDbView({ active }: Props): React.JSX.Element {
     const bridge = window.api?.myDb
     if (!bridge?.onDailyReport) return
     return bridge.onDailyReport(() => { void load() })
+  }, [load])
+
+  // 자동 비우기가 항목을 지웠으면 열어 둔 휴지통이 이미 사라진 것을 보여 주고 있다.
+  useEffect(() => {
+    const bridge = window.api?.myDb
+    if (!bridge?.onTrashPurged) return
+    return bridge.onTrashPurged((purged) => {
+      void (async () => {
+        setTrash(await getMyDbBridge().trash?.() ?? { nodes: [] })
+        await load()
+        setNotice(`보관 기한이 지난 휴지통 항목 ${purged}개를 자동으로 삭제했습니다.`)
+      })()
+    })
   }, [load])
 
   const importPaths = useCallback(async (paths: string[]): Promise<void> => {
@@ -2067,6 +2107,41 @@ function MyDbView({ active }: Props): React.JSX.Element {
       await purge(node.id)
       setTrash(await getMyDbBridge().trash?.() ?? { nodes: [] })
     }, '항목을 완전히 삭제했습니다.')
+  }
+
+  /**
+   * 휴지통 전체 비우기.
+   *
+   * 단건 완전 삭제와 같은 규칙을 따르되, 무엇이 사라지는지 **개수로** 말한다 —
+   * 이름을 하나씩 못 보고 누르는 대신 몇 개가 지워지는지는 알아야 한다.
+   * 코어와 파일을 나눠 세는 이유는 파일 쪽에만 버전 기록이 딸려 있기 때문이다.
+   */
+  const emptyTrash = async (): Promise<void> => {
+    const purgeAll = getMyDbBridge().purgeTrash
+    if (!purgeAll) {
+      setError('휴지통 비우기를 준비하는 중입니다. Aiso를 다시 시작해 주세요.')
+      return
+    }
+    const nodes = trash?.nodes ?? []
+    if (nodes.length === 0) return
+    const cores = nodes.filter((node) => node.kind === 'core').length
+    const files = nodes.length - cores
+    const parts = [cores > 0 ? `코어 ${cores}개` : '', files > 0 ? `파일 ${files}개` : ''].filter(Boolean)
+    const ok = await confirmDialog({
+      title: '휴지통 비우기',
+      message: `휴지통의 ${parts.join(' · ')}를 완전히 삭제합니다.
+${files > 0 ? '보관된 파일과 모든 버전 기록이 함께 사라지며 ' : ''}되돌릴 수 없습니다.`,
+      confirmLabel: '전부 삭제',
+      danger: true
+    })
+    if (!ok) return
+    await runAction(async () => {
+      const result = await purgeAll()
+      setTrash(await getMyDbBridge().trash?.() ?? { nodes: [] })
+      if (result.failed > 0) {
+        throw new Error(`${result.purged}개를 삭제했고 ${result.failed}개는 실패했습니다. 잠시 후 다시 시도해 주세요.`)
+      }
+    }, '휴지통을 비웠습니다.')
   }
 
   const connect = (targetId: string): void => {
@@ -2794,10 +2869,16 @@ function MyDbView({ active }: Props): React.JSX.Element {
             <button type="button" className="mydb-dialog__close" onClick={() => setShowTrash(false)} aria-label="닫기"><CloseIcon size={15} /></button>
             <span>휴지통</span>
             <h2>삭제한 항목</h2>
+            <p className="mydb-trash-policy">
+              {settings.myDbTrashRetentionDays > 0
+                ? `버린 지 ${settings.myDbTrashRetentionDays}일이 지나면 자동으로 완전 삭제됩니다. 기한은 설정 → DB에서 바꿉니다.`
+                : '자동 비우기가 꺼져 있습니다. 설정 → DB에서 보관 기한을 정할 수 있습니다.'}
+            </p>
             <div className="mydb-trash-list">
               {(trash?.nodes ?? []).map((node) => (
                 <div key={node.id}>
                   <span><i className={node.kind === 'core' ? 'mydb-legend__dot mydb-legend__dot--core' : 'mydb-legend__dot mydb-legend__dot--file'} />{node.title}</span>
+                  <span className="mydb-trash-left">{trashLeftLabel(node, settings.myDbTrashRetentionDays)}</span>
                   <span className="mydb-trash-actions">
                     <button type="button" onClick={() => void runAction(async () => {
                       await getMyDbBridge().restoreNode(node.id)
@@ -2814,6 +2895,12 @@ function MyDbView({ active }: Props): React.JSX.Element {
               {(trash?.nodes.length ?? 0) === 0 && <p>휴지통이 비어 있습니다.</p>}
             </div>
             <div className="mydb-dialog__actions">
+              <button
+                type="button"
+                className="mydb-trash-empty"
+                disabled={(trash?.nodes.length ?? 0) === 0}
+                onClick={() => void emptyTrash()}
+              >휴지통 비우기</button>
               <button type="button" onClick={() => setShowTrash(false)}>닫기</button>
             </div>
           </section>

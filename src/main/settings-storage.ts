@@ -72,6 +72,7 @@ export const APP_SETTING_KEYS = new Set<keyof AppSettings>([
   'comfyInstallPath',
   'myDbStoragePath',
   'myDbDailyReportCheckHours',
+  'myDbTrashRetentionDays',
   'comfyModelSelectionMode'
 ])
 
@@ -204,6 +205,15 @@ export function normalizeSettingsRecord(
         throw new Error('myDbDailyReportCheckHours는 1~24 사이의 정수여야 합니다.')
       }
       return hours
+    })(),
+    myDbTrashRetentionDays: (() => {
+      const days = numberValue(raw, 'myDbTrashRetentionDays', DEFAULT_SETTINGS.myDbTrashRetentionDays)
+      // 0 은 '자동 비우기 안 함'이라 허용한다. 상한을 두는 이유는 오타로 큰 수를
+      // 넣어 사실상 꺼 버리는 것과, 0 으로 끄는 것을 구분해 두기 위해서다.
+      if (!Number.isInteger(days) || days < 0 || days > 365) {
+        throw new Error('myDbTrashRetentionDays는 0~365 사이의 정수여야 합니다. (0 = 자동 비우기 안 함)')
+      }
+      return days
     })(),
     comfyModelSelectionMode: enumValue(raw, 'comfyModelSelectionMode', ['auto', 'manual'] as const, DEFAULT_SETTINGS.comfyModelSelectionMode)
   }

@@ -1483,6 +1483,34 @@
 .mydb-trash-list .mydb-trash-purge { color: var(--err); border-color: color-mix(in srgb, var(--err) 34%, transparent); }
 .mydb-trash-list .mydb-trash-purge:hover { color: var(--err); background: color-mix(in srgb, var(--err) 14%, transparent); border-color: var(--err); }
 .mydb-trash-list p { margin: 18px 0; color: var(--text-dim); font-size: 12px; text-align: center; }
+/* 항목 줄은 [제목 | 남은 기한 | 버튼] 3칸이다. 제목만 줄어들고 나머지는 온전해야
+   무엇이 언제 사라지는지가 좁은 창에서도 읽힌다. */
+.mydb-trash-list > div { grid-template-columns: minmax(0, 1fr) auto auto; }
+.mydb-trash-left {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.mydb-trash-policy {
+  margin: 0 0 10px;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+/* 되돌릴 수 없는 동작이라 닫기와 같은 무게로 두지 않는다. */
+.mydb-dialog__actions .mydb-trash-empty {
+  margin-right: auto;
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 34%, transparent);
+}
+.mydb-dialog__actions .mydb-trash-empty:hover:not(:disabled) {
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 14%, transparent);
+  border-color: var(--err);
+}
+.mydb-dialog__actions .mydb-trash-empty:disabled { opacity: .45; cursor: default; }
 @container (max-width: 680px) {
   .mydb-toolbar { min-height: 44px; padding: 0 10px; }
   .mydb-segment { gap: 0; padding: 0 8px; font-size: 0; }

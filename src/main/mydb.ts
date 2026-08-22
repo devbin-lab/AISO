@@ -33,6 +33,7 @@ import type {
   MyDbRevisionReason,
   MyDbSnapshot,
   MyDbTextDiff,
+  MyDbTrashPurgeResult,
   MyDbTrashSnapshot
 } from '../shared/mydb.ts'
 
@@ -283,7 +284,8 @@ function nodeFromRow(row: NodeRow): MyDbNode {
         }
       : {}),
     createdAt: row.created_at,
-    updatedAt: row.updated_at
+    updatedAt: row.updated_at,
+    ...(row.deleted_at ? { deletedAt: row.deleted_at } : {})
   }
 }
 
@@ -988,6 +990,46 @@ export class MyDbStore {
       await rm(revisionDirectory, { recursive: true, force: true }).catch(() => undefined)
     }
     this.restartFileWatchers()
+  }
+
+  /**
+   * 휴지통을 비운다. `before` 를 주면 그 시각 **이전에** 버려진 것만 지운다(자동 비우기).
+   *
+   * 일괄 SQL 로 지우지 않고 purgeNode 를 그대로 돌린다. 완전 삭제는 행 삭제만이
+   * 아니라 보관 파일·리비전 폴더 제거, 감시 핸들 정리, tombstone 기록, 이력 남기기가
+   * 한 묶음이다. 여기서 따로 구현하면 단건 삭제와 조용히 어긋난다.
+   *
+   * 한 건이 실패해도 나머지는 계속 지운다 — 중간에 멈추면 사용자는 무엇이 남았는지
+   * 알 수 없고, 다시 눌러도 같은 항목에서 다시 멈춘다.
+   */
+  async purgeTrash(before?: string | null): Promise<MyDbTrashPurgeResult> {
+    const rows = this.database.prepare(
+      `SELECT id, deleted_at FROM mydb_cores WHERE deleted_at IS NOT NULL
+       UNION ALL
+       SELECT id, deleted_at FROM mydb_items WHERE deleted_at IS NOT NULL
+       ORDER BY deleted_at ASC`
+    ).all() as Array<{ id: string; deleted_at: string }>
+
+    const targets = before ? rows.filter((row) => row.deleted_at < before) : rows
+    let purged = 0
+    let failed = 0
+    for (const row of targets) {
+      try {
+        await this.purgeNode(row.id)
+        purged += 1
+      } catch {
+        // 이미 사라진 행은 실패로 세지 않는다 — 아직 남아 있을 때만 진짜 실패다.
+        let stillThere = false
+        try {
+          this.requireNodeRow(row.id, true)
+          stillThere = true
+        } catch {
+          stillThere = false
+        }
+        if (stillThere) failed += 1
+      }
+    }
+    return { purged, failed }
   }
 
   private purgedIds(): Set<string> {
@@ -2410,6 +2452,30 @@ export function myDbDeleteNode(id: string, options?: MyDbDeleteOptions): void {
 /** 휴지통 항목 완전 삭제. 사용자 전용 — 에이전트 브리지(mydb_agent)에는 없다. */
 export function myDbPurgeNode(id: string): Promise<void> {
   return getMyDbStore().purgeNode(id)
+}
+
+/**
+ * 보관 기한이 지난 휴지통 항목의 기준 시각.
+ *
+ * `retentionDays` 가 0 이면 null — 자동 비우기를 하지 않는다는 뜻이고, 호출부는
+ * 이 값이 null 이면 아무것도 지우지 않아야 한다. 0 을 '즉시 삭제'로 읽으면
+ * 되돌릴 수 없는 동작이 사용자가 켜지도 않은 채로 돌아간다.
+ *
+ * 순수 계산이라 여기서 내보내 테스트로 고정한다 — 호출부가 같은 식을 따로
+ * 갖고 있으면 한쪽만 바뀌어도 조용히 어긋난다.
+ */
+export function myDbTrashCutoff(retentionDays: number, reference: Date = new Date()): string | null {
+  if (!Number.isFinite(retentionDays) || retentionDays <= 0) return null
+  const cutoff = new Date(reference.getTime() - retentionDays * 24 * 60 * 60 * 1000)
+  return cutoff.toISOString()
+}
+
+/**
+ * 휴지통 비우기. `before` 가 없으면 전부, 있으면 그 시각 이전에 버려진 것만.
+ * 사용자 전용 — 에이전트 브리지에는 없다.
+ */
+export function myDbPurgeTrash(before?: string | null): Promise<MyDbTrashPurgeResult> {
+  return getMyDbStore().purgeTrash(before)
 }
 
 export function myDbRestoreNode(id: string): MyDbNode {

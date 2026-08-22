@@ -52,6 +52,8 @@ import {
   myDbRestoreGraphCheckpoint,
   myDbRestoreRevision,
   myDbPurgeNode,
+  myDbPurgeTrash,
+  myDbTrashCutoff,
   myDbRestoreNode,
   myDbSetSourcePath,
   myDbState,
@@ -721,6 +723,25 @@ function writeMissingMyDbDailyReport(): void {
 }
 
 /**
+ * 보관 기한이 지난 휴지통 항목을 자동으로 완전 삭제한다.
+ *
+ * 되돌릴 수 없는 동작이라 기본값은 꺼짐(0일)이다. 사용자가 기한을 정했을 때만
+ * 돌고, 실제로 지운 게 있을 때만 창에 알린다 — 아무것도 안 지운 조용한 검사가
+ * 화면을 새로 고치게 만들 이유가 없다.
+ */
+async function purgeExpiredMyDbTrash(): Promise<void> {
+  try {
+    const cutoff = myDbTrashCutoff(loadSettings().myDbTrashRetentionDays)
+    if (!cutoff) return
+    const result = await myDbPurgeTrash(cutoff)
+    if (result.purged === 0) return
+    BrowserWindow.getAllWindows().forEach((w) => w.webContents.send('mydb:trash-purged', result.purged))
+  } catch (error) {
+    console.warn('[mydb] 휴지통 자동 비우기 실패:', error)
+  }
+}
+
+/**
  * 다음 자정 직후에 한 번 더 쓴다.
  *
  * 주기 검사(기본 6시간)만으로는 날이 바뀐 뒤 최대 6시간 동안 어제 보고서가
@@ -734,6 +755,7 @@ function scheduleMyDbMidnightReport(): void {
   if (myDbMidnightTimer) clearTimeout(myDbMidnightTimer)
   myDbMidnightTimer = setTimeout(() => {
     writeMissingMyDbDailyReport()
+    void purgeExpiredMyDbTrash()
     scheduleMyDbMidnightReport()
   }, nextMidnightWaitMs())
 }
@@ -744,7 +766,11 @@ function startMyDbDailyReportScheduler(settings = loadSettings()): void {
   if (myDbDailyReportTimer && myDbDailyReportCheckMs === nextCheckMs) return
   if (myDbDailyReportTimer) clearInterval(myDbDailyReportTimer)
   writeMissingMyDbDailyReport()
-  myDbDailyReportTimer = setInterval(writeMissingMyDbDailyReport, nextCheckMs)
+  void purgeExpiredMyDbTrash()
+  myDbDailyReportTimer = setInterval(() => {
+    writeMissingMyDbDailyReport()
+    void purgeExpiredMyDbTrash()
+  }, nextCheckMs)
   myDbDailyReportCheckMs = nextCheckMs
 }
 
@@ -795,6 +821,10 @@ app.whenReady().then(() => {
     }
     if ('myDbDailyReportCheckHours' in patch && next.myDbDailyReportCheckHours !== previous.myDbDailyReportCheckHours) {
       startMyDbDailyReportScheduler(next)
+    }
+    if ('myDbTrashRetentionDays' in patch && next.myDbTrashRetentionDays !== previous.myDbTrashRetentionDays) {
+      // 기한을 줄였다면 이미 지난 항목이 다음 주기까지 남아 있을 이유가 없다.
+      void purgeExpiredMyDbTrash()
     }
     if ('comfyInstallPath' in patch && next.comfyInstallPath !== previous.comfyInstallPath) {
       // 설치본이 바뀌면 이전 ComfyUI에만 있던 파일을 새 설치본에도 있다고 가정할 수 없다.
@@ -1019,6 +1049,12 @@ app.whenReady().then(() => {
   ipcMain.handle('mydb:purge-node', (e, node: unknown) => {
     requireMyDbWindow(e.sender)
     return myDbPurgeNode(myDbId(node))
+  })
+  ipcMain.handle('mydb:purge-trash', (e) => {
+    requireMyDbWindow(e.sender)
+    // 인자를 받지 않는다 — 렌더러가 기준 시각을 정하게 두면 '전체 비우기' 버튼이
+    // 임의 시점 삭제 경로가 된다. 사용자가 누르는 건 언제나 '지금 전부'다.
+    return myDbPurgeTrash()
   })
   ipcMain.handle('mydb:restore-node', (e, node: unknown) => {
     requireMyDbWindow(e.sender)

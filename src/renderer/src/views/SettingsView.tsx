@@ -1173,6 +1173,22 @@ function SettingsView({
             </div>
             <div className="row">
               <div>
+                <div className="row__label">휴지통 자동 비우기</div>
+                <div className="row__hint">
+                  휴지통에 버린 지 이 기한이 지난 항목을 완전히 삭제합니다. 완전 삭제는 되돌릴 수 없으므로 기본값은 <b>사용 안 함</b>입니다. 보관 파일과 버전 기록이 함께 사라지며, 외부 원본 파일은 건드리지 않습니다.
+                </div>
+              </div>
+              <Select
+                value={form.myDbTrashRetentionDays === 0 ? '사용 안 함' : `${form.myDbTrashRetentionDays}일 후`}
+                options={['사용 안 함', ...[7, 14, 30, 60, 90, 180, 365].map((days) => `${days}일 후`)]}
+                onChange={(value) =>
+                  set('myDbTrashRetentionDays', value === '사용 안 함' ? 0 : Number.parseInt(value, 10))
+                }
+                ariaLabel="휴지통 자동 비우기 기한"
+              />
+            </div>
+            <div className="row">
+              <div>
                 <div className="row__label">전체 DB 삭제</div>
                 <div className="row__hint">My DB 안의 코어, 보관 파일, 휴지통, 버전 기록과 히스토리를 비웁니다. 외부 원본 파일은 유지됩니다.</div>
               </div>

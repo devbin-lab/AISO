@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from 'fs/pro
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { closeMyDbStorage, configureMyDbStorageRoot, getMyDbStore, myDbClearAll, MyDbStore } from './mydb.ts'
+import { closeMyDbStorage, configureMyDbStorageRoot, getMyDbStore, myDbClearAll, myDbTrashCutoff, MyDbStore } from './mydb.ts'
 
 async function temporaryLibrary(): Promise<{ root: string; source: string; store: MyDbStore; dispose: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), 'aiso-mydb-library-'))
@@ -888,5 +888,103 @@ test('이미 저장된 보고서는 생성 로직이 바뀌어도 그대로 남�
     // Windows 는 방금 닫은 sqlite 핸들을 잠시 붙들고 있어 unlink 가 EBUSY 로 실패한다.
     // 검증은 이미 끝났고 남는 건 OS 임시 폴더뿐이므로 정리 실패로 테스트를 깨뜨리지 않는다.
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {})
+  }
+})
+
+
+test('휴지통 비우기가 버려진 것만 지우고 살아 있는 항목은 건드리지 않는다', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const kept = library.store.createCore('남길 코어')
+    const tossedA = library.store.createCore('버릴 코어 A')
+    const tossedB = library.store.createCore('버릴 코어 B')
+    library.store.deleteNode(tossedA.id)
+    library.store.deleteNode(tossedB.id)
+    assert.equal(library.store.trash().nodes.length, 2)
+
+    const result = await library.store.purgeTrash()
+    assert.equal(result.purged, 2)
+    assert.equal(result.failed, 0)
+    assert.equal(library.store.trash().nodes.length, 0, '휴지통이 비어야 한다')
+
+    // 살아 있는 코어는 그대로 — 전체 비우기는 휴지통 밖을 절대 건드리지 않는다.
+    assert.ok(library.store.snapshot().nodes.some((node) => node.id === kept.id))
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('휴지통 비우기가 보관 파일과 버전 기록까지 지운다', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const sourceFile = join(library.source, 'note.md')
+    await writeFile(sourceFile, '처음\n', 'utf8')
+    const core = library.store.createCore('자료')
+    const imported = await library.store.importPaths([sourceFile], core.id)
+    const item = imported.createdNodes.find((node) => node.kind === 'file')
+    assert.ok(item, '파일이 보관되어야 한다')
+    const managed = join(library.root, ...item!.relativePath!.split('/'))
+    assert.ok(existsSync(managed), '보관 복사본이 있어야 한다')
+
+    library.store.deleteNode(item!.id)
+    await library.store.purgeTrash()
+
+    assert.equal(existsSync(managed), false, '보관 파일이 사라져야 한다')
+    assert.equal(library.store.trash().nodes.length, 0)
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('기한 자동 비우기는 기한이 지난 것만 지운다', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const old = library.store.createCore('오래된 것')
+    const fresh = library.store.createCore('방금 버린 것')
+    library.store.deleteNode(old.id)
+    library.store.deleteNode(fresh.id)
+
+    // 한쪽만 30일 전에 버려진 것으로 되돌린다. 스토어의 DB 핸들은 내부용이라
+    // 다른 테스트와 같이 파일을 직접 열어 고친다.
+    const longAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+    const database = new DatabaseSync(join(library.root, 'library.sqlite3'))
+    database.prepare('UPDATE mydb_cores SET deleted_at = ? WHERE id = ?').run(longAgo, old.id)
+    database.close()
+
+    // 보관 기한 7일 → 30일 전 항목만 대상이다.
+    const cutoff = myDbTrashCutoff(7)
+    assert.ok(cutoff)
+    const result = await library.store.purgeTrash(cutoff)
+
+    assert.equal(result.purged, 1, '기한이 지난 하나만 지워야 한다')
+    const left = library.store.trash().nodes
+    assert.equal(left.length, 1)
+    assert.equal(left[0]?.id, fresh.id, '방금 버린 것은 남아야 한다')
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('보관 기한 0은 자동 비우기를 하지 않는다는 뜻이다', () => {
+  // 0을 "즉시 삭제"로 읽으면 사용자가 켜지도 않은 되돌릴 수 없는 동작이 돌아간다.
+  assert.equal(myDbTrashCutoff(0), null)
+  assert.equal(myDbTrashCutoff(-1), null)
+  assert.equal(myDbTrashCutoff(Number.NaN), null)
+})
+
+test('보관 기한은 기준 시각에서 그만큼 거슬러 올라간 시각이다', () => {
+  const reference = new Date('2026-08-22T12:00:00.000Z')
+  assert.equal(myDbTrashCutoff(7, reference), '2026-08-15T12:00:00.000Z')
+  assert.equal(myDbTrashCutoff(1, reference), '2026-08-21T12:00:00.000Z')
+})
+
+test('휴지통이 비어 있으면 비우기는 아무것도 하지 않는다', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const result = await library.store.purgeTrash()
+    assert.equal(result.purged, 0)
+    assert.equal(result.failed, 0)
+  } finally {
+    await library.dispose()
   }
 })

@@ -104,6 +104,12 @@ export interface AppSettings {
    */
   myDbDailyReportCheckHours: number
   /**
+   * 휴지통 항목을 자동으로 완전 삭제하기까지의 보관 기한(일).
+   * 0 이면 자동 비우기를 하지 않는다 — 완전 삭제는 되돌릴 수 없으므로
+   * '꺼 둘 수 있다'가 기본 전제다.
+   */
+  myDbTrashRetentionDays: number
+  /**
    * ComfyUI 이미지 생성 모델 선택 방식.
    * - auto: Agent가 등록·검증된 후보 중 요청과 태그를 기준으로 고른다.
    * - manual: 사용자가 Agent 화면에서 고른 정확한 등록 프로필만 실행한다.
@@ -193,6 +199,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   comfyInstallPath: '',
   myDbStoragePath: '',
   myDbDailyReportCheckHours: 6,
+  // 기본값은 0(자동 비우기 없음). 되돌릴 수 없는 동작을 사용자가 켜지 않았는데 시작하지 않는다.
+  myDbTrashRetentionDays: 0,
   comfyModelSelectionMode: 'auto'
 }
 

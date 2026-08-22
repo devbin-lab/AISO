@@ -32,6 +32,8 @@ export interface MyDbNode {
   tags?: string[]
   createdAt: string
   updatedAt: string
+  /** 휴지통에 있는 항목만 갖는다. 자동 비우기까지 남은 기한을 화면이 계산하는 근거. */
+  deletedAt?: string
 }
 
 export interface MyDbEdge {
@@ -50,6 +52,12 @@ export interface MyDbSnapshot {
 
 export interface MyDbTrashSnapshot {
   nodes: MyDbNode[]
+}
+
+/** 휴지통 비우기 결과. 자동 비우기는 purged 가 0 이면 아무 말도 하지 않는다. */
+export interface MyDbTrashPurgeResult {
+  purged: number
+  failed: number
 }
 
 /** A user-visible change made inside the private My DB library. */
@@ -212,6 +220,10 @@ export interface MyDbBridge {
   /** Removes only the current My DB database, managed files, and revisions. */
   clearAll: () => Promise<void>
   trash?: () => Promise<MyDbTrashSnapshot>
+  /** 휴지통 전체 비우기. 사용자 전용 — 에이전트 브리지에는 없다. */
+  purgeTrash?: () => Promise<MyDbTrashPurgeResult>
+  /** 자동 비우기가 실제로 지웠을 때만 알린다. */
+  onTrashPurged?: (cb: (purged: number) => void) => () => void
   createCore: (title: string, parentCoreId?: string | null) => Promise<MyDbNode>
   renameNode: (id: string, title: string) => Promise<MyDbNode>
   deleteNode: (id: string, options?: MyDbDeleteOptions) => Promise<void>

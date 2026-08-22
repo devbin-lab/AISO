@@ -248,6 +248,15 @@ const api = {
       ipcRenderer.invoke('mydb:delete-node', { id }, options),
     restoreNode: (id: string) => ipcRenderer.invoke('mydb:restore-node', { id }),
     purgeNode: (id: string) => ipcRenderer.invoke('mydb:purge-node', { id }),
+    purgeTrash: () => ipcRenderer.invoke('mydb:purge-trash'),
+    /** 자동 비우기가 실제로 지웠을 때만 온다 — 열어 둔 휴지통 화면을 다시 읽게 한다. */
+    onTrashPurged: (cb: (purged: number) => void): (() => void) => {
+      const listener = (_e: unknown, purged: number): void => cb(purged)
+      ipcRenderer.on('mydb:trash-purged', listener)
+      return () => {
+        ipcRenderer.removeListener('mydb:trash-purged', listener)
+      }
+    },
     link: (sourceId: string, targetId: string, relation?: MyDbRelation) =>
       ipcRenderer.invoke('mydb:link', { id: sourceId }, { id: targetId }, relation),
     unlink: (edgeId: string) => ipcRenderer.invoke('mydb:unlink-edge', edgeId),
