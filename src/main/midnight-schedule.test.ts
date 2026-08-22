@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { nextMidnightWaitMs } from './midnight-schedule.ts'
 
 /**
  * 자정 재시도 시각 계산.
@@ -8,14 +9,10 @@ import test from 'node:test'
  * 없다. 자정 직후 한 번 더 돌려 그 창을 없앤다. 이 계산이 틀리면 증상이
  * 조용히 돌아오므로(하루 늦은 보고서) 여기서 고정한다.
  *
- * index.ts 의 scheduleMyDbMidnightReport 와 같은 식이다. 그쪽은 Electron
- * 모듈을 끌어와 단위 테스트로 부르기 어려워 계산만 옮겨 검사한다.
+ * index.ts 의 scheduleMyDbMidnightReport 가 **이 함수를 그대로** 부른다.
+ * 예전에는 같은 식을 여기 베껴 뒀는데, 그러면 index.ts 만 바뀌어도 이 테스트는
+ * 초록으로 남는다 — 지키는 게 없는 테스트였다.
  */
-function nextMidnightWaitMs(now: Date): number {
-  const nextMidnight = new Date(now)
-  nextMidnight.setHours(24, 0, 30, 0)
-  return Math.max(1000, nextMidnight.getTime() - now.getTime())
-}
 
 /** 대기 후 도달하는 시각. */
 function firesAt(now: Date): Date {

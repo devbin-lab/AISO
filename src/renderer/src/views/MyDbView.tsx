@@ -1520,9 +1520,7 @@ function MyDbView({ active }: Props): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<MyDbSnapshot>(EMPTY_SNAPSHOT)
   const [history, setHistory] = useState<MyDbHistorySnapshot>(EMPTY_HISTORY)
   const [mode, setMode] = useState<MyDbViewMode>('graph')
-  // 히스토리 안에서 목록/달력 전환. 달력은 '언제 많이 했나'를, 목록은 '무엇을 했나'를 본다.
-  const [historyView, setHistoryView] = useState<'list' | 'calendar'>('list')
-  // 달력에서 고른 날. null 이면 전체를 본다.
+  // 달력에서 고른 날. null 이면 오늘을 본다.
   const [historyDay, setHistoryDay] = useState<string | null>(null)
   const [historyMonth, setHistoryMonth] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -1582,7 +1580,7 @@ function MyDbView({ active }: Props): React.JSX.Element {
   )
   // 달력을 열면 오늘이 선택돼 있다 — 사람이 보고 싶은 건 '지금까지 뭘 했나'다.
   // 오늘 보고서는 아직 없지만, 아래 resolveReportDate 가 전날 것으로 물러나
-  // 패널이 비지 않는다. 목록은 오늘 것을 그대로 보여 준다.
+  // 패널이 비지 않는다.
   const selectedDay = historyDay ?? localDayKey(new Date())
   // 그 날 보고서가 없으면 그 이전 가장 최근 보고서를 읽는다. 이력은 오늘 것이
   // 이미 쌓여 있는데 보고서만 없는 어긋남을 이렇게 메운다.
@@ -1591,12 +1589,9 @@ function MyDbView({ active }: Props): React.JSX.Element {
   // 아래 목록은 **고른 날** 그대로다. 보고서가 하루 뒤로 물러났다고 해서
   // 오늘 한 일까지 감추면 안 된다.
   const visibleHistory = useMemo(
-    () => (historyView === 'calendar'
-      ? history.entries.filter((entry) => localDayKey(entry.createdAt) === selectedDay)
-      : history.entries),
-    [history.entries, historyView, selectedDay]
+    () => history.entries.filter((entry) => localDayKey(entry.createdAt) === selectedDay),
+    [history.entries, selectedDay]
   )
-  // 날짜를 고르면 그 날 것만 보여 준다. 목록 보기에도 그대로 적용된다.
 
   const nodesById = useMemo(() => new Map(snapshot.nodes.map((node) => [node.id, node])), [snapshot.nodes])
   const selected = selectedId ? nodesById.get(selectedId) ?? null : null
@@ -2422,26 +2417,9 @@ function MyDbView({ active }: Props): React.JSX.Element {
               <div className="mydb-history">
                 <header className="mydb-history__head">
                   <h2>변경 이력</h2>
-                  <div className="mydb-history__headright">
-                    <span>자동 보고 {history.dailyReports.length}개 · 변경 {history.entries.length}개</span>
-                    <div className="mydb-history__viewtabs" role="group" aria-label="이력 보기 방식">
-                      <button
-                        type="button"
-                        className={`mydb-history__viewtab${historyView === 'list' ? ' is-active' : ''}`}
-                        aria-pressed={historyView === 'list'}
-                        onClick={() => setHistoryView('list')}
-                      >목록</button>
-                      <button
-                        type="button"
-                        className={`mydb-history__viewtab${historyView === 'calendar' ? ' is-active' : ''}`}
-                        aria-pressed={historyView === 'calendar'}
-                        onClick={() => setHistoryView('calendar')}
-                      >달력</button>
-                    </div>
-                  </div>
+                  <span>자동 보고 {history.dailyReports.length}개 · 변경 {history.entries.length}개</span>
                 </header>
-                {historyView === 'calendar' && (
-                  <div className="mydb-cal-row">
+                <div className="mydb-cal-row">
                   <section className="mydb-cal" aria-label="변경 이력 달력">
                     <header className="mydb-cal__head">
                       <button
@@ -2511,31 +2489,11 @@ function MyDbView({ active }: Props): React.JSX.Element {
                       </p>
                     )}
                   </section>
-                  </div>
-                )}
-                {historyView === 'list' && history.dailyReports.length > 0 && (
-                  <section className="mydb-daily-reports" aria-label="My DB 일일 변경 보고서">
-                    <h3>일일 변경 보고서</h3>
-                    {history.dailyReports.map((report) => (
-                      <article
-                        key={report.reportDate}
-                        className={`mydb-daily-report${report.totalChanges === 0 ? ' mydb-daily-report--quiet' : ''}`}
-                      >
-                        <header>
-                          <strong>{formatReportDate(report.reportDate)}</strong>
-                          <span>{report.totalChanges === 0 ? '변경 없음' : `${report.totalChanges}건`}</span>
-                        </header>
-                        <pre>{report.body}</pre>
-                      </article>
-                    ))}
-                  </section>
-                )}
-                {historyView === 'calendar' && (
-                  <h3 className="mydb-history__daylabel">
-                    <strong>{formatReportDate(selectedDay)}</strong>
-                    <span>변경 {visibleHistory.length}건</span>
-                  </h3>
-                )}
+                </div>
+                <h3 className="mydb-history__daylabel">
+                  <strong>{formatReportDate(selectedDay)}</strong>
+                  <span>변경 {visibleHistory.length}건</span>
+                </h3>
                 {visibleHistory.length > 0 ? (
                   <ol className="mydb-history__list">
                     {visibleHistory.map((entry) => (
@@ -2581,9 +2539,7 @@ function MyDbView({ active }: Props): React.JSX.Element {
                     ))}
                   </ol>
                 ) : (
-                  <div className="mydb-history__empty">
-                    {historyView === 'calendar' ? '이 날짜에는 변경 이력이 없습니다.' : '아직 변경 이력이 없습니다.'}
-                  </div>
+                  <div className="mydb-history__empty">이 날짜에는 변경 이력이 없습니다.</div>
                 )}
               </div>
             </div>

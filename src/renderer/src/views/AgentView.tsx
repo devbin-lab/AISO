@@ -27,7 +27,6 @@ import Markdown from '../components/Markdown'
 import { ragStatus, ragIndex, type RagStatus } from '../lib/rag'
 import { authHeaders } from '../lib/backend'
 import {
-  AgentIcon,
   FolderIcon,
   FileIcon,
   RefreshIcon,
@@ -41,6 +40,7 @@ import {
   TerminalIcon
 } from '../components/icons'
 import Dropdown, { type DropdownOption } from '../components/Dropdown'
+import HomeView from './HomeView'
 import GeneratedImage from '../components/GeneratedImage'
 import { ensureComfyReadyForAgent, looksLikeImageGenerationRequest } from '../lib/comfy'
 import { getComfyAgentReadiness, type ComfyModelProfile } from '../../../shared/comfy-model'
@@ -106,6 +106,7 @@ interface Props {
   /** App-level Agent mode only: conversations must begin from a registered project. */
   requireProjectStart?: boolean
   convCollapsed?: boolean
+  onNavigate?: (view: 'todo' | 'graph' | 'settings') => void
 }
 
 /** 런 경계를 넘겨 이어갈 도구 실행 기록 수. 넘길수록 근거는 늘지만 요청이 커진다. */
@@ -172,7 +173,8 @@ function AgentView({
   onSaveSettings,
   conversationRequest,
   onConversationActive = () => {},
-  requireProjectStart = false
+  requireProjectStart = false,
+  onNavigate
 }: Props): React.JSX.Element {
   const [items, setItems] = useState<Item[]>([])
   const [input, setInput] = useState('')
@@ -957,17 +959,14 @@ function AgentView({
 
       <div className="chat-scroll" ref={scrollRef}>
         {items.length === 0 ? (
-          <div className="empty empty--borderless">
-            <div className="empty__icon">
-              <AgentIcon size={18} />
-            </div>
-            <div className="empty__title">파일 작업을 맡겨보세요</div>
-            <div className="empty__desc">
-              “README 만들어줘”, “utils.py에서 버그 찾아 고쳐줘” 처럼 지시하면
-              <br />
-              작업 폴더 안에서 파일을 읽고 편집합니다 · 쓰기 작업은 승인 후 실행됩니다
-            </div>
-          </div>
+          <HomeView
+            active={active}
+            embedded
+            backend={backend}
+            health={health}
+            settings={settings}
+            onNavigate={onNavigate ?? (() => {})}
+          />
         ) : (
           items.map((it, i) => {
             if (it.kind === 'user') return (

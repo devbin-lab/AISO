@@ -99,14 +99,6 @@ export function shiftMonth(yearMonth: string, delta: number): string {
   return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}`
 }
 
-/** 어제(로컬). 보고서는 하루가 끝나야 쓸 수 있으므로 '가장 최근에 완성된 날'이다. */
-export function previousDayKey(today: Date = new Date()): string {
-  const at = new Date(today)
-  at.setHours(0, 0, 0, 0)
-  at.setDate(at.getDate() - 1)
-  return localDayKey(at)
-}
-
 /**
  * 고른 날짜에 대해 **실제로 읽을 수 있는** 보고서 날짜를 정한다.
  *

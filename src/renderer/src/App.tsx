@@ -4,8 +4,6 @@ import { DEFAULT_SETTINGS } from '../../shared/settings'
 import type { BackendInfo, HealthInfo } from '../../shared/backend'
 import type { ConversationKind } from '../../shared/conversation'
 import Titlebar from './components/Titlebar'
-// 홈은 기본 진입 화면이라 lazy로 두면 매 기동마다 로딩 문구가 스친다. 무거운 의존이 없어 정적 import.
-import HomeView from './views/HomeView'
 import Sidebar, { type ConversationRequest, type ViewKey } from './components/Sidebar'
 import TooltipHost from './components/Tooltip'
 import { ConfirmHost } from './components/ConfirmDialog'
@@ -54,8 +52,8 @@ export function keepIfSame(prev: HealthInfo | null, next: HealthInfo): HealthInf
 }
 
 function App(): React.JSX.Element {
-  const [view, setView] = useState<ViewKey>('home')
-  const [visitedViews, setVisitedViews] = useState<Set<ViewKey>>(() => new Set(['home']))
+  const [view, setView] = useState<ViewKey>('chat')
+  const [visitedViews, setVisitedViews] = useState<Set<ViewKey>>(() => new Set(['chat']))
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [backend, setBackend] = useState<BackendInfo>({ state: 'starting', port: null })
   const [health, setHealth] = useState<HealthInfo | null>(null)
@@ -155,7 +153,7 @@ function App(): React.JSX.Element {
   }
 
   // 뷰는 숨김 처리로 유지 → 채팅 대화가 뷰 전환에 사라지지 않는다
-  const wrap = (k: ViewKey): string => `viewwrap${k === 'todo' ? ' viewwrap--todo' : ''}${k === 'graph' ? ' viewwrap--graph' : ''}${k === 'home' ? ' viewwrap--home' : ''}${view === k ? '' : ' viewwrap--hidden'}`
+  const wrap = (k: ViewKey): string => `viewwrap${k === 'todo' ? ' viewwrap--todo' : ''}${k === 'graph' ? ' viewwrap--graph' : ''}${view === k ? '' : ' viewwrap--hidden'}`
   const navigate = (next: ViewKey): void => {
     setVisitedViews((current) => current.has(next) ? current : new Set(current).add(next))
     setView(next)
@@ -185,9 +183,9 @@ function App(): React.JSX.Element {
           collapsed={sidebarCollapsed}
         />
         <main className="content">
-          {visitedViews.has('home') && <div className={wrap('home')} aria-label="홈"><HomeView active={view === 'home'} backend={backend} health={health} settings={settings} onNavigate={navigate} /></div>}
-          {visitedViews.has('chat') && <div className={wrap('chat')}><Suspense fallback={<ViewFallback />}><ChatView settings={settings} backend={backend} health={health} onSaveSettings={saveSettings} conversationRequest={conversationRequest} onConversationActive={(id) => setConversationRequest({ kind: 'chat', id, nonce: Date.now() })} /></Suspense></div>}
-          {visitedViews.has('agent') && <div className={wrap('agent')}><Suspense fallback={<ViewFallback />}><AgentView active={view === 'agent'} settings={settings} backend={backend} health={health} onPickWorkspace={pickWorkspace} onSaveSettings={saveSettings} conversationRequest={conversationRequest} onConversationActive={(id) => setConversationRequest({ kind: 'agent', id, nonce: Date.now() })} /></Suspense></div>}
+          {/* 채팅은 시작 화면이라 늘 방문 상태다 — visitedViews 검사가 참일 수밖에 없어 두지 않는다. */}
+          <div className={wrap('chat')}><Suspense fallback={<ViewFallback />}><ChatView onNavigate={navigate} active={view === 'chat'} settings={settings} backend={backend} health={health} onSaveSettings={saveSettings} conversationRequest={conversationRequest} onConversationActive={(id) => setConversationRequest({ kind: 'chat', id, nonce: Date.now() })} /></Suspense></div>
+          {visitedViews.has('agent') && <div className={wrap('agent')}><Suspense fallback={<ViewFallback />}><AgentView onNavigate={navigate} active={view === 'agent'} settings={settings} backend={backend} health={health} onPickWorkspace={pickWorkspace} onSaveSettings={saveSettings} conversationRequest={conversationRequest} onConversationActive={(id) => setConversationRequest({ kind: 'agent', id, nonce: Date.now() })} /></Suspense></div>}
           {visitedViews.has('todo') && <div className={wrap('todo')}><Suspense fallback={<ViewFallback />}><TodoView active={view === 'todo'} backend={backend} /></Suspense></div>}
           {visitedViews.has('graph') && <div className={wrap('graph')}><Suspense fallback={<ViewFallback />}><MyDbView active={view === 'graph'} /></Suspense></div>}
           {visitedViews.has('comfy') && <div className={wrap('comfy')}><Suspense fallback={<ViewFallback />}><ComfyView settings={settings} backend={backend} active={view === 'comfy'} onSaveSettings={saveSettings} /></Suspense></div>}

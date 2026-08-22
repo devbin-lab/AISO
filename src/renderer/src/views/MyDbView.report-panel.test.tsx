@@ -8,7 +8,7 @@ import type { MyDbDailyReport, MyDbHistoryEntry } from '../../../shared/mydb'
  * MyDbView 는 통째로 렌더하기엔 무겁고(그래프 캔버스·브리지) 이 규칙은 순수
  * 계산이라, 화면이 쓰는 것과 같은 식을 여기서 고정한다.
  *
- * 규칙: 달력을 열면 **오늘**이 선택돼 있다. 목록은 오늘 것을 보여 주고,
+ * 규칙: 이력 화면을 열면 **오늘**이 선택돼 있다. 아래 목록은 오늘 것을 보여 주고,
  * 보고서는 오늘 것이 아직 없으므로 전날로 물러난다(resolveReportDate).
  * 선택일과 보고서 날짜를 분리해 둔 이유가 이것이다.
  */
@@ -107,11 +107,10 @@ describe('달력에서 누를 수 있는 날', () => {
 })
 
 describe('아래 목록이 보여 줄 이력', () => {
-  /** 화면과 같은 규칙: 달력 보기는 보고서와 같은 하루, 목록 보기는 전체. */
-  function visible(view: 'list' | 'calendar', reportDate: string, entries: MyDbHistoryEntry[]) {
-    return view === 'calendar'
-      ? entries.filter((e) => localDayKey(e.createdAt) === reportDate)
-      : entries
+  /** 화면과 같은 규칙: 언제나 달력에서 **고른 하루**만 보여 준다.
+      예전에는 전체를 늘어놓는 목록 보기가 따로 있었지만 지금은 달력뿐이다. */
+  function visible(selectedDay: string, entries: MyDbHistoryEntry[]) {
+    return entries.filter((e) => localDayKey(e.createdAt) === selectedDay)
   }
 
   const entries: MyDbHistoryEntry[] = [
@@ -120,26 +119,22 @@ describe('아래 목록이 보여 줄 이력', () => {
     { id: 'c', action: 'core_created', subjectTitle: '오늘 코어', createdAt: new Date(2026, 7, 22, 9).toISOString() }
   ]
 
-  it('달력 보기는 고른 하루만 보여 준다', () => {
-    const shown = visible('calendar', '2026-08-21', entries)
+  it('고른 하루만 보여 준다', () => {
+    const shown = visible('2026-08-21', entries)
     expect(shown.map((e) => e.id)).toEqual(['a', 'b'])
   })
 
   it('보고서가 전날로 물러나도 목록은 고른 날 그대로다', () => {
     // 오늘 한 일을 감추면 안 된다 — 보고서만 하루 뒤로 물러난다.
-    expect(visible('calendar', '2026-08-22', entries).map((e) => e.id)).toEqual(['c'])
+    expect(visible('2026-08-22', entries).map((e) => e.id)).toEqual(['c'])
   })
 
   it('다른 날짜를 고르면 목록도 따라간다', () => {
-    expect(visible('calendar', '2026-08-22', entries).map((e) => e.id)).toEqual(['c'])
+    expect(visible('2026-08-22', entries).map((e) => e.id)).toEqual(['c'])
   })
 
   it('이력이 없는 날은 빈 목록이다', () => {
-    expect(visible('calendar', '2026-08-19', entries)).toHaveLength(0)
-  })
-
-  it('목록 보기는 전체를 보여 준다 — 날짜를 고를 달력이 없다', () => {
-    expect(visible('list', '2026-08-21', entries)).toHaveLength(3)
+    expect(visible('2026-08-19', entries)).toHaveLength(0)
   })
 })
 

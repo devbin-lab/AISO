@@ -150,6 +150,7 @@ import {
   type ExactNvidiaDiscordTarget
 } from './nvidia-discord-apply'
 import { chromiumStoragePaths } from './chromium-storage-paths'
+import { nextMidnightWaitMs } from './midnight-schedule'
 
 // 로컬 LLM 앱: Chromium GPU 합성이 VRAM ~2.7GB를 점유해 16GB 카드에서
 // 무거운 모델(최대 gpt-oss:20b·13.8GB) 콜드 로드가 OOM(CUDA crash) 날 수 있다.
@@ -731,13 +732,10 @@ function writeMissingMyDbDailyReport(): void {
  */
 function scheduleMyDbMidnightReport(): void {
   if (myDbMidnightTimer) clearTimeout(myDbMidnightTimer)
-  const nextMidnight = new Date()
-  nextMidnight.setHours(24, 0, 30, 0) // 자정 30초 뒤 — 경계에서 어제/오늘이 흔들리지 않게
-  const waitMs = Math.max(1000, nextMidnight.getTime() - Date.now())
   myDbMidnightTimer = setTimeout(() => {
     writeMissingMyDbDailyReport()
     scheduleMyDbMidnightReport()
-  }, waitMs)
+  }, nextMidnightWaitMs())
 }
 
 function startMyDbDailyReportScheduler(settings = loadSettings()): void {

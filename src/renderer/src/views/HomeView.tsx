@@ -25,6 +25,8 @@ interface Props {
   health: HealthInfo | null
   settings: AppSettings
   onNavigate: (view: 'todo' | 'graph' | 'settings') => void
+  /** 채팅·에이전트 첫 화면 안에 얹을 때. 제목/부제 없이 카드만, 위쪽에 붙여 보여 준다. */
+  embedded?: boolean
 }
 
 const PRIORITY_LABEL: Record<Priority, string> = { high: 'P1', medium: 'P2', low: 'P3' }
@@ -108,7 +110,7 @@ function shortWhen(iso: string): string {
     : `${at.getMonth() + 1}/${at.getDate()}`
 }
 
-function HomeView({ active, backend, health, settings, onNavigate }: Props): React.JSX.Element {
+function HomeView({ active, backend, health, settings, onNavigate, embedded = false }: Props): React.JSX.Element {
   const [todos, setTodos] = useState<TodoItem[]>([])
   const [usage, setUsage] = useState<UsageSummary | null>(null)
   const [report, setReport] = useState<MyDbDailyReport | null>(null)
@@ -131,7 +133,10 @@ function HomeView({ active, backend, health, settings, onNavigate }: Props): Rea
             .then((response) => (response.ok ? response.json() : Promise.reject(new Error(String(response.status)))))
             .then((data: { items?: TodoItem[] }) => data.items ?? [])
         : Promise.reject(new Error('backend-not-ready')),
-      window.api?.usage?.summary() ?? Promise.reject(new Error('no-usage-bridge')),
+      // 브리지가 있어도 모양이 다를 수 있다(테스트 스텁·구버전 프리로드). 옵셔널
+      // 체이닝은 undefined 만 막아 주므로 호출 자체를 프로미스 안으로 넣는다 —
+      // 여기서 동기 throw 가 나면 아래 주석과 같은 이유로 세 원천이 통째로 날아간다.
+      Promise.resolve().then(() => window.api?.usage?.summary() ?? Promise.reject(new Error('no-usage-bridge'))),
       // getMyDbBridge()는 브리지가 없으면 **동기 throw**다. allSettled 배열 안에서 그대로
       // 부르면 세 원천이 통째로 날아간다 — 반드시 거부된 프로미스로 바꿔서 넘긴다.
       Promise.resolve().then(() => getMyDbBridge().history())
@@ -185,12 +190,8 @@ function HomeView({ active, backend, health, settings, onNavigate }: Props): Rea
   const peak = week.reduce((max, day) => Math.max(max, day.tokens), 0)
 
   return (
-    <div className="home">
+    <div className={`home${embedded ? ' home--embedded' : ''}`}>
       <header className="home__head">
-        <div>
-          <h1 className="home__title">홈</h1>
-          <p className="home__subtitle">오늘 할 일, 이번 주 사용량, 최근 My DB 변경을 한눈에 봅니다.</p>
-        </div>
         <button
           type="button"
           className="home__refresh"
@@ -199,7 +200,7 @@ function HomeView({ active, backend, health, settings, onNavigate }: Props): Rea
           aria-label="새로 고침"
           title="새로 고침"
         >
-          <RefreshIcon size={15} />
+          <RefreshIcon size={16} />
           <span>{loading ? '불러오는 중…' : '새로 고침'}</span>
         </button>
       </header>
@@ -208,7 +209,7 @@ function HomeView({ active, backend, health, settings, onNavigate }: Props): Rea
         {/* ── 연결 상태 ── */}
         <section className="home-card home-card--status" aria-label="연결 상태">
           <div className="home-card__head">
-            <SlidersIcon size={15} />
+            <SlidersIcon size={16} />
             <h2 className="home-card__title">연결 상태</h2>
             <span className={`home-status__summary home-status__summary--${worstState(checks)}`}>
               {checks.length === 0 ? '확인 중…' : summarizeChecks(checks)}
@@ -232,7 +233,7 @@ function HomeView({ active, backend, health, settings, onNavigate }: Props): Rea
         {/* ── 할 일 ── */}
         <section className="home-card home-card--todos" aria-label="오늘 할 일">
           <div className="home-card__head">
-            <TodoIcon size={15} />
+            <TodoIcon size={16} />
             <h2 className="home-card__title">오늘 할 일</h2>
             <span className="home-card__count">{pending.length}</span>
             <button type="button" className="home-card__link" onClick={() => onNavigate('todo')}>
@@ -295,7 +296,7 @@ function HomeView({ active, backend, health, settings, onNavigate }: Props): Rea
         {/* ── My DB 히스토리 보고서 ── */}
         <section className="home-card home-card--reports" aria-label="My DB 일일 변경 보고서">
           <div className="home-card__head">
-            <DatabaseIcon size={15} />
+            <DatabaseIcon size={16} />
             <h2 className="home-card__title">My DB 일일 변경 보고서</h2>
             {report !== null && <span className="home-card__count">{reportFreshness(report)}</span>}
             <button type="button" className="home-card__link" onClick={() => onNavigate('graph')}>
@@ -316,7 +317,7 @@ function HomeView({ active, backend, health, settings, onNavigate }: Props): Rea
         {/* ── 최근 변경 ── */}
         <section className="home-card home-card--recent" aria-label="최근 My DB 변경">
           <div className="home-card__head">
-            <DatabaseIcon size={15} />
+            <DatabaseIcon size={16} />
             <h2 className="home-card__title">최근 변경</h2>
             {recent.length > 0 && <span className="home-card__count">{recent.length}</span>}
             <button type="button" className="home-card__link" onClick={() => onNavigate('graph')}>

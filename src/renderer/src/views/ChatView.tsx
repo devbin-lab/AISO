@@ -4,7 +4,8 @@ import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import { streamChat, type ChatPayloadMessage } from '../lib/chat'
 import { newConversationId, titleFromText } from '../lib/conversations'
 import { modelInstalled } from '../lib/ollama'
-import { ChatIcon, SearchIcon, GlobeIcon } from '../components/icons'
+import { SearchIcon, GlobeIcon } from '../components/icons'
+import HomeView from './HomeView'
 import { TOOL_LABEL } from '../../../shared/agent'
 import Markdown from '../components/Markdown'
 import type { ConversationRequest } from '../components/Sidebar'
@@ -63,6 +64,9 @@ interface Props {
   onSaveSettings: (patch: Partial<AppSettings>) => Promise<boolean>
   conversationRequest?: ConversationRequest | null
   onConversationActive?: (id: string | null) => void
+  onNavigate?: (view: 'todo' | 'graph' | 'settings') => void
+  /** 첫 화면에 얹은 홈 카드가 숨은 탭에서까지 데이터를 부르지 않도록. */
+  active?: boolean
 }
 
 function ChatView({
@@ -70,6 +74,8 @@ function ChatView({
   backend,
   health,
   onSaveSettings,
+  onNavigate,
+  active = true,
   conversationRequest,
   onConversationActive = () => {}
 }: Props): React.JSX.Element {
@@ -340,21 +346,14 @@ function ChatView({
 
       <div className="chat-scroll" ref={scrollRef}>
         {messages.length === 0 ? (
-          <div className="empty empty--borderless">
-            <div className="empty__icon">
-              <ChatIcon size={18} />
-            </div>
-            <div className="empty__title">무엇이든 물어보세요</div>
-            <div className="empty__desc">
-              {nvidiaSelected
-                ? settings.chatWebSearch
-                  ? '대화와 조사 도구 결과가 선택한 NVIDIA 서비스로 전송됩니다'
-                  : '프롬프트와 대화 문맥이 선택한 NVIDIA 서비스로 전송됩니다'
-                : settings.chatWebSearch
-                ? '필요할 때 자동으로 인터넷을 조사해 답합니다 · 검색이 불필요하면 로컬에서 처리 (설정에서 끌 수 있어요)'
-                : '모든 대화는 로컬에서 처리됩니다 · 사고 과정은 접힌 상태로 표시됩니다'}
-            </div>
-          </div>
+          <HomeView
+            active={active}
+            embedded
+            backend={backend}
+            health={health}
+            settings={settings}
+            onNavigate={onNavigate ?? (() => {})}
+          />
         ) : (
           messages.map((m, i) => (
             <div key={i} className={`msg msg--${m.role}`}>
