@@ -46,10 +46,14 @@ function install(options: {
   }
   // fetch 는 할 일 조회와 연결 점검(ComfyUI)이 함께 쓴다. 테스트가 세려는 것은
   // 할 일 호출이므로 URL 로 갈라 센다 — 원천이 늘어도 이 단언이 깨지지 않는다.
+  // /comfy/health 는 ComfyUI 가 죽어 있어도 200 을 돌려주므로, 목이 빈 본문을 주면
+  // '연결 안 됨'이 된다. 이 테스트들이 보려는 건 ComfyUI 가 아니라 다른 항목이므로
+  // 살아 있는 응답({ online: true })을 준다. 예전에는 판정이 response.ok 만 봐서
+  // 빈 본문도 '정상'으로 통과했다 — 목이 그 버그에 기대고 있었다.
   const fetchMock = vi.fn().mockImplementation((url: unknown) =>
     String(url).includes('/creator/todos')
       ? Promise.resolve(todoResponse)
-      : Promise.resolve({ ok: true, status: 200, json: async () => ({}) })
+      : Promise.resolve({ ok: true, status: 200, json: async () => ({ online: true }) })
   )
   const todoCalls = (): number =>
     fetchMock.mock.calls.filter((call) => String(call[0]).includes('/creator/todos')).length

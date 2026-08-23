@@ -102,13 +102,23 @@ export async function collectConnectionChecks(
         `${backendUrl(backend, '/comfy/health')}?base_url=${encodeURIComponent(settings.comfyBaseUrl)}`,
         { headers: authHeaders() }
       )
+      // response.ok 는 **사이드카가 답했다**는 뜻일 뿐이다. ComfyUI 가 아예 없어도
+      // /comfy/health 는 200 에 { online: false } 를 담아 돌려준다. 그래서 예전에는
+      // ComfyUI 를 설치조차 하지 않은 컴퓨터에서 '정상'으로 떴다. 본문을 읽어야 한다.
+      const health = response.ok
+        ? (await response.json().catch(() => null)) as { online?: boolean; detail?: string } | null
+        : null
+      const online = health?.online === true
       next.push({
         id: 'comfy',
         label: 'ComfyUI 연결',
-        state: response.ok ? 'ok' : 'warning',
-        detail: response.ok
+        state: online ? 'ok' : 'warning',
+        detail: online
           ? '설정한 ComfyUI 서버에 응답이 있습니다.'
-          : 'ComfyUI 서버 응답을 확인하지 못했습니다.'
+          : health?.detail?.trim()
+            || (response.ok
+              ? 'ComfyUI 서버가 응답하지 않습니다. ComfyUI를 실행했는지 확인하세요.'
+              : 'ComfyUI 서버 응답을 확인하지 못했습니다.')
       })
     } catch {
       next.push({

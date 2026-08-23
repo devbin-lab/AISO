@@ -3,9 +3,7 @@ import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import type { AppSettings } from '../../../shared/settings'
 import type { PingResult } from '../../../shared/ipc'
 import type { UsageSummary } from '../../../shared/usage'
-import { authHeaders } from '../lib/backend'
 import {
-  backendUrl,
   collectConnectionChecks,
   stateLabel,
   summarizeChecks,
@@ -13,20 +11,6 @@ import {
 } from '../lib/diagnostics'
 import { RefreshIcon } from './icons'
 import SetupCard from './SetupCard'
-
-interface Scenario {
-  id: string
-  title: string
-  status: 'pass' | 'fail'
-  detail: string
-  durationMs: number
-}
-
-interface QaReport {
-  executedAt: string
-  summary: { passed: number; failed: number; total: number }
-  scenarios: Scenario[]
-}
 
 interface Props {
   backend: BackendInfo
@@ -55,9 +39,7 @@ function DiagnosticRow({ check }: { check: Check | undefined }): React.JSX.Eleme
 
 export default function DiagnosticCenter({ backend, health, settings, onSaveSettings, active }: Props): React.JSX.Element {
   const [checks, setChecks] = useState<Check[]>([])
-  const [qa, setQa] = useState<QaReport | null>(null)
   const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState('')
   const [ping, setPing] = useState<PingResult | null>(null)
   const [conn, setConn] = useState<Conn>('checking')
   const [usage, setUsage] = useState<UsageSummary | null>(null)
@@ -68,7 +50,6 @@ export default function DiagnosticCenter({ backend, health, settings, onSaveSett
 
   const refreshChecks = useCallback(async (): Promise<void> => {
     setBusy(true)
-    setMessage('')
     setChecks(await collectConnectionChecks(backend, health, settings))
     setBusy(false)
   }, [backend, health, settings])
@@ -104,24 +85,6 @@ export default function DiagnosticCenter({ backend, health, settings, onSaveSett
     void refreshAll()
   }, [active, refreshAll])
 
-  const runQa = async (): Promise<void> => {
-    const url = backendUrl(backend, '/qa/scenarios/run')
-    if (!url) return
-    setBusy(true)
-    setMessage('')
-    try {
-      const response = await fetch(url, { method: 'POST', headers: authHeaders() })
-      const result = await response.json() as QaReport & { detail?: string }
-      if (!response.ok) throw new Error(result.detail || `QA 실행 실패 (${response.status})`)
-      setQa(result)
-      setMessage(result.summary.failed === 0 ? '시나리오 QA 평가팩을 모두 통과했습니다.' : `${result.summary.failed}개 시나리오를 확인해야 합니다.`)
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : '시나리오 QA를 실행하지 못했습니다.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
   const summary = useMemo(() => summarizeChecks(checks), [checks])
 
   const connText = conn === 'ok' ? 'IPC 정상' : conn === 'checking' ? '확인 중' : '연결 안 됨'
@@ -132,7 +95,7 @@ export default function DiagnosticCenter({ backend, health, settings, onSaveSett
 
   return <section className="diagnostic-center">
     <div className="diagnostic-center__head">
-      <div><div className="tool-panel__eyebrow">SYSTEM DIAGNOSTICS</div><h2>진단 센터</h2><p>실행 환경, 연결 상태, 시작 준비, 사용량과 회귀 검증 결과를 한곳에서 확인합니다. API 키나 문서 원문은 표시하지 않습니다.</p></div>
+      <div><div className="tool-panel__eyebrow">SYSTEM DIAGNOSTICS</div><h2>진단 센터</h2><p>실행 환경, 연결 상태, 시작 준비, 사용량을 한곳에서 확인합니다. API 키나 문서 원문은 표시하지 않습니다.</p></div>
       <div className="diagnostic-center__head-actions"><span className="diagnostic-center__summary">{summary}</span><button type="button" className="btn btn--ghost2" disabled={busy} onClick={() => void refreshAll()}>{busy ? '점검 중…' : '상태 새로고침'}</button></div>
     </div>
     <SetupCard settings={settings} backend={backend} health={health} onSaveSettings={onSaveSettings} />
@@ -175,14 +138,5 @@ export default function DiagnosticCenter({ backend, health, settings, onSaveSett
           <div className="usage-axis"><span>30일 전</span><span>오늘</span></div>
         </section>
     </div>
-    <div className="diagnostic-qa">
-      <div><div className="tool-panel__eyebrow">REGRESSION PACK</div><b>시나리오 기반 QA 평가팩</b><p>문서 추출, 원문 근거 일정, 저장·상태 변경, PPTX 위치 추출, 작업 폴더 경계를 토큰 소모 없이 검사합니다.</p></div>
-      <button type="button" className="btn" disabled={busy || backend.state !== 'ready'} onClick={() => void runQa()}>QA 평가 실행</button>
-    </div>
-    {message && <div className="diagnostic-center__message" role="status">{message}</div>}
-    {qa && <div className="diagnostic-qa__results">
-      <div className="diagnostic-qa__results-head"><b>{qa.summary.passed}/{qa.summary.total} 통과</b><span>{new Date(qa.executedAt).toLocaleString('ko-KR')}</span></div>
-      {qa.scenarios.map((scenario) => <div className={`diagnostic-scenario diagnostic-scenario--${scenario.status}`} key={scenario.id}><b>{scenario.status === 'pass' ? 'PASS' : 'FAIL'}</b><span>{scenario.title}</span><small>{scenario.detail} · {scenario.durationMs}ms</small></div>)}
-    </div>}
   </section>
 }

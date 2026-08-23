@@ -50,7 +50,6 @@ from document_todos import list_todos as list_document_todos
 from document_todos import list_saved_todos as list_saved_document_todos
 from document_todos import preview_reschedule as preview_document_todo_reschedule
 from document_todos import update_todo as update_document_todo
-from qa_scenarios import run_scenario_pack
 from rag import RagError, build_index
 from rag import search as rag_search
 from rag import status as rag_status
@@ -1839,12 +1838,6 @@ async def creator_todos_replan_apply(req: DocumentTodoReplanRequest):
         return {"ok": True, **apply_document_todo_reschedule(req.asOf)}
     except ToolError as error:
         raise HTTPException(status_code=400, detail=str(error)) from None
-
-
-@app.post("/qa/scenarios/run")
-async def qa_scenarios_run():
-    """Run local contracts without consuming a configured LLM's token budget."""
-    return run_scenario_pack()
 
 
 # ---- RAG: 작업 폴더 의미 색인/검색 (임베딩 모델 = 채팅 모델과 독립) ----

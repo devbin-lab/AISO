@@ -8,7 +8,7 @@
 
 개인 파일, 문서, 일정, 지식 라이브러리와 로컬 AI를 한 곳에서 다룹니다.
 
-[![Version](https://img.shields.io/badge/version-1.3.0-F16522?style=flat-square)](docs/V1.3.0_RELEASE_NOTES.md)
+[![Version](https://img.shields.io/badge/version-1.3.1-F16522?style=flat-square)](docs/V1.3.1_RELEASE_NOTES.md)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6?style=flat-square)
 ![Desktop](https://img.shields.io/badge/desktop-Electron%2043-47848F?style=flat-square&logo=electron&logoColor=white)
 ![Runtime](https://img.shields.io/badge/default%20LLM-Ollama-111827?style=flat-square&logo=ollama)
@@ -252,7 +252,6 @@ My DB는 에이전트가 만든 파일을 자동으로 쌓아 두는 장소가 �
 - ComfyUI 서버, 모델, 워크플로 준비 상태
 - Discord 연결과 권한 상태
 - 작업 폴더, RAG, My DB 저장소, 일일 이력 보고 설정
-- 시나리오 기반 QA 평가팩 실행
 
 진단은 화면을 열었다고 무제한 반복 실행하지 않습니다. 사용자가 새로 고치거나 필요한 설정을 바꿨을 때만 다시 확인하도록 설계되어 있습니다.
 
@@ -421,6 +420,7 @@ Apache License 2.0. 자세한 내용은 [LICENSE](LICENSE)를 참고하세요.
 
 | 버전 | 날짜 | 주요 내용 |
 |---|---|---|
+| **1.3.1** | 2026-08-23 | 설치하지 않은 ComfyUI를 `정상`으로 표시하던 연결 판정 오류 수정(홈 카드·진단 센터 공통). 진단 센터의 시나리오 기반 QA 평가팩 제거. [릴리스 노트](docs/V1.3.1_RELEASE_NOTES.md) |
 | **1.3.0** | 2026-08-23 | My DB 그래프를 선이 엉키지 않는 방사형 배치로 다시 짜고(교차·관통·겹침 0), 군집을 하나의 둥근 뭉치로 모음. 좁은 창에서 어긋나던 설정 메뉴와 목록 필터 배치를 수정. [릴리스 노트](docs/V1.3.0_RELEASE_NOTES.md) |
 | **1.2.0** | 2026-08-22 | 휴지통 전체 비우기와, 보관 기한이 지난 항목을 자동으로 완전 삭제하는 설정을 추가(기본값 사용 안 함). [릴리스 노트](docs/V1.2.0_RELEASE_NOTES.md) |
 | **1.1.0** | 2026-08-22 | 홈 대시보드를 채팅·에이전트의 첫 화면으로 옮기고, My DB 히스토리를 변경 이력 달력과 그 날짜의 일일 보고서 패널로 바꿈. [릴리스 노트](docs/V1.1.0_RELEASE_NOTES.md) |
