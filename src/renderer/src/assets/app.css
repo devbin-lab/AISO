@@ -468,6 +468,11 @@
 .viewwrap {
   height: 100%;
   overflow-y: auto;
+  /* 스크롤바 자리를 늘 잡아 둔다. 이게 없으면 내용이 길어 스크롤바가 생기는 순간
+     화면 폭이 8px 줄고, 그 8px 이 컨테이너 쿼리 경계를 넘겨 배치가 통째로 바뀐다.
+     실측: 창 1080px 에서 DB·화면 탭은 폭 824(2단)인데 내용이 긴 LLM·도구 탭만
+     816 이 되어 설정 메뉴가 위로 튀었다. 탭을 옮길 때마다 배치가 흔들리던 원인. */
+  scrollbar-gutter: stable;
 }
 .viewwrap--hidden {
   display: none;
@@ -1377,7 +1382,10 @@
 .mydb-library__list { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 16px 12px 12px; background: color-mix(in srgb, var(--bg-elev) 90%, var(--mydb-canvas-bg)); border-right: 1px solid var(--border); }
 .mydb-library__search { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; padding: 0 8px; color: var(--text-dim); background: var(--bg-input); border: 1px solid var(--border); border-radius: 7px; }
 .mydb-library__search input { height: 32px; padding: 0; border: 0; background: transparent; font-size: 12px; }
-.mydb-library__filters { display: flex; flex: 0 0 29px; gap: 5px; min-height: 29px; margin: 10px -1px 0; padding: 0 1px 3px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+/* 높이를 29px 로 못 박아 두면 가로 스크롤바(실측 10px)가 그 안에 겹쳐 그려져
+   26px 짜리 버튼 아래가 7px 잘렸다. 내용 높이로 두고 스크롤바 자리를 따로
+   확보해, 필터가 한 줄에 다 들어갈 때와 넘칠 때 모두 버튼이 온전히 보인다. */
+.mydb-library__filters { display: flex; flex: 0 0 auto; gap: 5px; margin: 10px -1px 0; padding: 0 1px 3px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-gutter: stable; }
 .mydb-library__filters button { flex: 0 0 auto; min-height: 26px; padding: 0 8px; color: var(--text-dim); background: transparent; border: 1px solid var(--border); border-radius: 999px; cursor: pointer; font: inherit; font-size: 10.5px; font-weight: 670; }
 .mydb-library__filters button:hover { color: var(--text); background: var(--sidebar-hover); border-color: var(--border-strong); }
 .mydb-library__filters button.is-active { color: var(--text); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 46%, var(--border)); }

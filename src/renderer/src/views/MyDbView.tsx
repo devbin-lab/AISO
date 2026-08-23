@@ -19,6 +19,7 @@ import { confirmDialog } from '../components/ConfirmDialog'
 import { getMyDbBridge } from '../lib/mydb'
 import { buildMonth, countByDay, intensityOf, localDayKey, monthRange, monthsWithHistory, resolveReportDate, shiftMonth } from '../lib/history-calendar'
 import { applyRepulsion, BARNES_HUT_THETA, buildQuadTree } from './mydb-graph/quadtree'
+import { resolveCollisions } from './mydb-graph/collision'
 import { buildGraphRoutes } from './mydb-graph/routing'
 
 interface Props {
@@ -429,7 +430,7 @@ function visibleCoreBranchIds(sourceId: string, nodes: MyDbNode[], edges: MyDbEd
   return result
 }
 
-interface CoreGraphStructure {
+export interface CoreGraphStructure {
   children: Map<string, string[]>
   attachedFiles: Map<string, string[]>
   fileCounts: Map<string, number>
@@ -440,7 +441,7 @@ interface CoreGraphStructure {
   primaryCoreFileEdgeIds: Set<string>
 }
 
-function buildCoreGraphStructure(nodes: MyDbNode[], edges: MyDbEdge[]): CoreGraphStructure {
+export function buildCoreGraphStructure(nodes: MyDbNode[], edges: MyDbEdge[]): CoreGraphStructure {
   const nodesById = new Map(nodes.map((node) => [node.id, node]))
   const children = new Map<string, Set<string>>()
   const attachedFiles = new Map<string, Set<string>>()
@@ -570,7 +571,7 @@ function buildCoreGraphStructure(nodes: MyDbNode[], edges: MyDbEdge[]): CoreGrap
   }
 }
 
-interface GraphLayoutPlan {
+export interface GraphLayoutPlan {
   positions: Map<string, Point>
   coreTargets: Map<string, Point>
   fileSlots: Map<string, { coreId: string; angle: number; radius: number }>
@@ -581,7 +582,158 @@ interface GraphLayoutPlan {
   center: Point
 }
 
-function createInitialLayout(
+/** 덩어리 사이에 반드시 남기는 간격. 붙어 보이면 한 덩어리로 읽힌다. */
+const CLUSTER_GAP = 46
+
+/**
+ * 흩어진 덩어리를 **하나의 둥근 뭉치**로 모은다.
+ *
+ * 화면 비율에 맞춰 가로로 펼쳐 봤더니 덩어리가 서로 멀어져 빈 자리만 넓어졌다.
+ * 옵시디언 그래프처럼 전체가 한 덩어리로 뭉쳐 보이려면, 남는 자리를 채우는 게
+ * 아니라 **가운데로 끌어모아야** 한다. 그래서 덩어리 원반을 원형으로 채운다.
+ *
+ * 덩어리는 통째로 평행이동만 한다. 강체 이동이라 덩어리 안의 기하(교차 0 ·
+ * 관통 0 · 겹침 0)는 그대로이고, 덩어리끼리는 간선이 없으므로 새 교차도 생기지
+ * 않는다. 원반이 서로 안 겹치므로 남의 덩어리를 뚫는 일도 없다.
+ */
+function packClustersIntoCircle(
+  positions: Map<string, Point>,
+  coreTargets: Map<string, Point>,
+  orphanTargets: Map<string, Point>,
+  nodes: MyDbNode[],
+  edges: MyDbEdge[],
+  coreRadii: Map<string, number>
+): void {
+  // 간선으로 이어진 것끼리 한 덩어리다(union-find).
+  const parent = new Map<string, string>()
+  const find = (id: string): string => {
+    let root = id
+    while ((parent.get(root) ?? root) !== root) root = parent.get(root) as string
+    let cursor = id
+    while ((parent.get(cursor) ?? cursor) !== cursor) {
+      const next = parent.get(cursor) as string
+      parent.set(cursor, root)
+      cursor = next
+    }
+    return root
+  }
+  const union = (a: string, b: string): void => {
+    const ra = find(a)
+    const rb = find(b)
+    if (ra !== rb) parent.set(ra, rb)
+  }
+  for (const node of nodes) parent.set(node.id, node.id)
+  for (const edge of edges) {
+    if (positions.has(edge.sourceId) && positions.has(edge.targetId)) union(edge.sourceId, edge.targetId)
+  }
+
+  const groups = new Map<string, string[]>()
+  for (const node of nodes) {
+    if (!positions.has(node.id)) continue
+    const key = find(node.id)
+    const list = groups.get(key)
+    if (list) list.push(node.id)
+    else groups.set(key, [node.id])
+  }
+  if (groups.size < 2) return
+
+  const radiusOfNode = new Map(nodes.map((node) => [
+    node.id,
+    node.kind === 'core' ? coreRadii.get(node.id) ?? 10 : 6
+  ] as const))
+
+  interface ClusterDisc { key: string; cx: number; cy: number; radius: number; members: string[] }
+  const discs: ClusterDisc[] = []
+  for (const [key, members] of groups) {
+    let minX = Infinity
+    let minY = Infinity
+    let maxX = -Infinity
+    let maxY = -Infinity
+    for (const id of members) {
+      const point = positions.get(id) as Point
+      const r = radiusOfNode.get(id) ?? 10
+      minX = Math.min(minX, point.x - r)
+      minY = Math.min(minY, point.y - r)
+      maxX = Math.max(maxX, point.x + r)
+      maxY = Math.max(maxY, point.y + r)
+    }
+    const cx = (minX + maxX) / 2
+    const cy = (minY + maxY) / 2
+    // 덩어리를 감싸는 최소 반지름. 상자 대각선이 아니라 실제 노드까지의 거리로
+    // 잡아야 원반이 헐렁해지지 않는다.
+    let radius = 0
+    for (const id of members) {
+      const point = positions.get(id) as Point
+      radius = Math.max(radius, Math.hypot(point.x - cx, point.y - cy) + (radiusOfNode.get(id) ?? 10))
+    }
+    discs.push({ key, cx, cy, radius, members })
+  }
+
+  // 큰 덩어리부터 가운데에 놓고, 나머지는 **원점에 가장 가까운 빈자리**에 붙인다.
+  // 큰 것을 먼저 놓아야 작은 것이 틈을 메우며 전체가 둥글게 찬다.
+  const order = [...discs].sort((left, right) => (
+    right.radius - left.radius || left.key.localeCompare(right.key)
+  ))
+  const placed: { x: number; y: number; radius: number }[] = []
+  const spot = new Map<string, { x: number; y: number }>()
+
+  for (const disc of order) {
+    if (placed.length === 0) {
+      spot.set(disc.key, { x: 0, y: 0 })
+      placed.push({ x: 0, y: 0, radius: disc.radius })
+      continue
+    }
+    let best: { x: number; y: number } | null = null
+    let bestDistance = Infinity
+    // 이미 놓인 원반마다, 그 둘레를 따라 붙일 자리를 훑는다. 0.5° 간격이면
+    // 눈에 띄는 틈이 남지 않고, 표본이 고정이라 결과도 늘 같다.
+    const STEPS = 720
+    for (const anchor of placed) {
+      const distance = anchor.radius + disc.radius + CLUSTER_GAP
+      for (let step = 0; step < STEPS; step += 1) {
+        const angle = (step / STEPS) * Math.PI * 2
+        const x = anchor.x + Math.cos(angle) * distance
+        const y = anchor.y + Math.sin(angle) * distance
+        let free = true
+        for (const other of placed) {
+          if (Math.hypot(x - other.x, y - other.y) < other.radius + disc.radius + CLUSTER_GAP - 0.5) {
+            free = false
+            break
+          }
+        }
+        if (!free) continue
+        // 원점에서 가장 가까운 자리를 고른다 — 그래야 전체가 원으로 뭉친다.
+        const fromCentre = Math.hypot(x, y) + disc.radius
+        if (fromCentre < bestDistance) {
+          bestDistance = fromCentre
+          best = { x, y }
+        }
+      }
+    }
+    const target = best ?? { x: 0, y: 0 }
+    spot.set(disc.key, target)
+    placed.push({ x: target.x, y: target.y, radius: disc.radius })
+  }
+
+  for (const disc of discs) {
+    const target = spot.get(disc.key)
+    if (!target) continue
+    const dx = target.x - disc.cx
+    const dy = target.y - disc.cy
+    if (dx === 0 && dy === 0) continue
+    for (const id of disc.members) {
+      const point = positions.get(id) as Point
+      positions.set(id, { x: point.x + dx, y: point.y + dy })
+      const core = coreTargets.get(id)
+      if (core) coreTargets.set(id, { x: core.x + dx, y: core.y + dy })
+      const orphan = orphanTargets.get(id)
+      if (orphan) orphanTargets.set(id, { x: orphan.x + dx, y: orphan.y + dy })
+    }
+  }
+}
+
+
+export function createInitialLayout(
   nodes: MyDbNode[],
   edges: MyDbEdge[],
   width: number,
@@ -606,142 +758,512 @@ function createInitialLayout(
     collator.compare(titleById.get(left) ?? '', titleById.get(right) ?? '') || left.localeCompare(right)
   ))
 
+  const full = Math.PI * 2
+  const startAngle = -Math.PI / 2
+
+  // 화면이 실제로 그리는 치수. 여기서 벗어나면 '겹치지 않게 쟀다'가 거짓말이 된다.
+  const FILE_NODE_RADIUS = 6
+  /** 코어 테두리에서 파일 고리까지 띄우는 거리. */
+  const FILE_RING_GAP = 46
+  /** 파일 하나가 고리에서 차지하는 호 길이. */
+  const FILE_ARC = 22
+  /** 원반(코어+파일 고리) 바깥에 두는 여백. 이만큼은 아무도 못 들어온다. */
+  const DISC_PAD = 10
+  /** 부모 원반과 자식 부분트리 사이 최소 간격. */
+  const RING_MARGIN = 56
+  /**
+   * 부모로 돌아가는 선이 지날 자리로 자식이 비워 두는 반각(라디안).
+   *
+   * 자식 **수와 무관한 상수**다. 한 바퀴에서 딱 한 번 빠지므로 자식이 늘어도 요구가
+   * 늘지 않는다. 자식 하나마다 고정 각을 떼어 주면 자식이 2π/각 명을 넘는 순간
+   * 요구 합이 영영 한 바퀴를 넘어서고, 거리 탐색이 천장까지 달려가 노드가 천만 px
+   * 밖으로 날아간다(실제로 겪은 사고다). 그래서 '자식당'이 아니라 '한 번'이다.
+   */
+  const PARENT_RESERVE = 0.12
+  /** 원뿔의 합이 창에서 차지할 수 있는 최대 비율. 나머지는 형제 사이 틈 몫으로 남긴다. */
+  const CONE_SHARE = 0.78
+  /** 원뿔 하나의 반각 상한. 직각을 넘으면 원뿔이 볼록하지 않아 안의 선분이 밖으로 샌다. */
+  const HALF_CONE_CAP = Math.PI * 0.49
+  /**
+   * '고르게 펴려는 욕심'이 거리를 밀어낼 수 있는 최대 배수.
+   *
+   * 겹치지 않을 최소 거리는 기하학적 하한이다. 그 몇 배 안으로 잠가 두면 크기는
+   * 언제나 하한을 따라가고, 어떤 입력에서도 발산할 길이 없다.
+   */
+  const SPREAD_CLAMP = 4
+
+  const parentOf = new Map<string, string>()
+  for (const [parentId, childIds] of children) for (const childId of childIds) parentOf.set(childId, parentId)
+
   const subtreeCounts = new Map<string, number>()
-  const heights = new Map<string, number>()
-  const visiting = new Set<string>()
+  const visitingSubtree = new Set<string>()
   const subtreeOf = (id: string): number => {
     const cached = subtreeCounts.get(id)
     if (cached != null) return cached
-    if (visiting.has(id)) return 0
-    visiting.add(id)
+    if (visitingSubtree.has(id)) return 0
+    visitingSubtree.add(id)
     let count = (attachedFiles.get(id) ?? []).length
     for (const childId of children.get(id) ?? []) count += 1 + subtreeOf(childId)
-    visiting.delete(id)
+    visitingSubtree.delete(id)
     subtreeCounts.set(id, count)
     return count
   }
-  const heightOf = (id: string): number => {
-    const cached = heights.get(id)
-    if (cached != null) return cached
-    let height = 0
-    for (const childId of children.get(id) ?? []) height = Math.max(height, 1 + heightOf(childId))
-    heights.set(id, height)
-    return height
-  }
-  for (const id of coreIds) {
-    subtreeOf(id)
-    heightOf(id)
-  }
+  for (const id of coreIds) subtreeOf(id)
 
-  const spanOf = (id: string): number => Math.max(1, subtreeOf(id))
-  // Keep small libraries visually cohesive. Larger subtrees still receive
-  // proportionally more arc length, but no longer start from a sparse ring.
-  const arcOf = (id: string): number => 54 + Math.sqrt(spanOf(id)) * 24
-  const full = Math.PI * 2
-  const startAngle = -Math.PI / 2
-  const ring = 134
-  let centralExtent = 0
-  let primaryExtent = 0
+  // ── 원반(disc): 코어 하나가 자기 파일 고리까지 합쳐 실제로 먹는 자리 ──
+  // 사용자가 말한 "보이지 않는 더 큰 충돌 원"이 이것이다. 배치가 각을 나눌 때
+  // 자식 '수'가 아니라 이 원들을 재기 때문에, 파일이 많은 코어는 저절로 더 넓은
+  // 자리를 받고 이웃과 절대 겹치지 않는다. DISC_PAD 만큼 실제 노드보다 크게 잡으므로
+  // 원 밖의 점은 그 안의 어떤 노드와도 최소 그만큼 떨어져 있다 — 스쳐도 관통이 아니다.
+  const orderedFiles = new Map<string, string[]>()
+  const fileRingRadius = new Map<string, number>()
+  const discRadius = new Map<string, number>()
+  for (const id of coreIds) {
+    const files = sorted(attachedFiles.get(id) ?? [])
+    orderedFiles.set(id, files)
+    const coreRadius = coreRadii.get(id) ?? 10
+    if (files.length === 0) {
+      fileRingRadius.set(id, 0)
+      discRadius.set(id, coreRadius + DISC_PAD)
+      continue
+    }
+    const ring = Math.max(coreRadius + FILE_RING_GAP, (files.length * FILE_ARC) / full)
+    fileRingRadius.set(id, ring)
+    discRadius.set(id, ring + FILE_NODE_RADIUS + DISC_PAD)
+  }
+  const discOf = (id: string): number => discRadius.get(id) ?? (10 + DISC_PAD)
 
   /**
-   * A one-child chain inherits a 360° sector in a naïve radial tree. If a
-   * lower node later gains siblings, those siblings can fan back through its
-   * ancestors and visually knot the hierarchy. Keep every non-root branch in
-   * its outward-facing cone instead, while roots remain free to use a full
-   * circle.
+   * 좁은 틈부터 물을 채우듯 여유 각을 부어, **가장 넓은 틈을 가장 좁게** 만든다.
+   *
+   * 화면에서 '부채꼴로 몰렸다'는 인상은 자식 중심 사이의 **제일 큰 틈** 하나가 정한다
+   * (품질 자도 360°에서 그 틈을 뺀 값을 폭으로 센다). 남는 각을 형제마다 똑같이 나눠 주면
+   * 원래 좁던 틈은 좁은 채로 남아 그 인상이 안 바뀐다. 수위를 하나로 맞춰야 한다.
+   *
+   * mins 의 합이 total 을 넘으면 부을 여유가 없다는 뜻이라 그대로 돌려준다 — 거리를
+   * 그런 일이 없도록 고르므로 실제로는 오지 않는 길이고, 와도 불변식은 안 깨진다.
    */
-  const MAX_DESCENDANT_SECTOR = Math.PI * 1.3
-  const assignSector = (
-    id: string,
-    from: number,
-    to: number,
-    radius: number,
-    origin: Point,
-    depth: number
-  ): void => {
-    const angle = (from + to) / 2
-    const point = { x: origin.x + Math.cos(angle) * radius, y: origin.y + Math.sin(angle) * radius }
-    coreTargets.set(id, point)
-    positions.set(id, point)
-    centralExtent = Math.max(centralExtent, Math.hypot(point.x - center.x, point.y - center.y))
-    const descendants = sorted(children.get(id) ?? [])
-    if (descendants.length === 0) return
-    const totalArc = descendants.reduce((sum, childId) => sum + arcOf(childId), 0) || 1
-    const inheritedWidth = Math.max(0.001, to - from)
-    const usableWidth = depth === 0 ? inheritedWidth : Math.min(inheritedWidth, MAX_DESCENDANT_SECTOR)
-    const sectorFrom = angle - usableWidth / 2
-    // A small angular gutter stays visible even when sibling titles or core
-    // radii differ. The ring expands as needed, rather than letting nodes or
-    // their structural lines occupy the same ray.
-    const gap = descendants.length > 1
-      ? Math.min(0.14, usableWidth / Math.max(12, descendants.length * 5))
-      : 0
-    const contentWidth = Math.max(0.001, usableWidth - gap * Math.max(0, descendants.length - 1))
-    const childRadius = Math.max(radius + ring, totalArc / contentWidth)
-    let cursor = sectorFrom
-    for (const childId of descendants) {
-      const slice = (arcOf(childId) / totalArc) * contentWidth
-      assignSector(childId, cursor, cursor + slice, childRadius, origin, depth + 1)
-      cursor += slice + gap
+  const waterFill = (mins: readonly number[], total: number): number[] => {
+    const count = mins.length
+    if (count === 0) return []
+    let sum = 0
+    for (const value of mins) sum += value
+    if (sum >= total) return [...mins]
+    const ascending = mins.map((_, index) => index).sort((left, right) => (
+      ((mins[left] as number) - (mins[right] as number)) || (left - right)
+    ))
+    const suffix = new Array<number>(count + 1).fill(0)
+    for (let k = count - 1; k >= 0; k -= 1) {
+      suffix[k] = (suffix[k + 1] as number) + (mins[ascending[k] as number] as number)
     }
+    let level = 0
+    for (let k = count; k >= 1; k -= 1) {
+      const candidate = (total - (suffix[k] as number)) / k
+      if (candidate >= (mins[ascending[k - 1] as number] as number)) {
+        level = candidate
+        break
+      }
+    }
+    return mins.map((value) => Math.max(value, level))
+  }
+
+  /**
+   * 부분트리 하나를 **국소 좌표에 미리 조립해 둔** 결과.
+   *
+   * 원점은 이 부분트리의 뿌리, +x 는 부모의 반대(바깥) 방향이다. 위층은 이 좌표계를
+   * 회전·평행이동만 하므로, 아래에서 조립한 모양이 위에서 글자 그대로 다시 쓰인다.
+   * 크기를 재는 모델과 실제로 놓는 모델이 **같다** — 겹치지 않음을 보장하는 근거가
+   * 바로 이 일치다. (예전 시도가 깨진 곳도 여기였다.)
+   */
+  interface SubtreeShape {
+    /** 부분트리 전 노드의 국소 좌표. */
+    offsets: Map<string, Point>
+    /** 부분트리가 실제로 먹는 원들. 부모는 자식 '수'가 아니라 이 원들로 각을 잰다. */
+    circles: Array<{ x: number; y: number; r: number }>
+    /** 원점에서 잰 바깥 끝. 덩어리끼리 떼어 놓을 때만 쓴다. */
+    radius: number
+  }
+
+  /** 트리가 아닌 입력(순환·다중 부모)에서도 같은 노드를 두 번 놓지 않게 막는다. */
+  const claimed = new Set<string>()
+
+  /**
+   * 부분트리를 아래에서 위로 조립한다 — **부채꼴이 아니라 원뿔**로.
+   *
+   * 예전 배치는 자식을 부모에게 물려받은 부채꼴 안에서만 폈다. 그래야 형제 영역이
+   * 겹치지 않아 선이 안 꼬이지만, 갈래질 때마다 각이 반씩 잘려 깊은 내부 노드는
+   * 구조적으로 부채꼴이 된다(실측 157~193°). 부채꼴은 교차를 막기에 **충분하지만
+   * 필요하지는 않다**.
+   *
+   * 여기서는 각 자식 부분트리를 부모에서 본 **원뿔**(방향각 ± 반각)로 잡는다.
+   *   · 원뿔이 서로 배타적이면 그 안의 원들도 서로 떨어져 있다.
+   *   · 부모→자식 선은 그 원뿔의 축이므로 남의 원뿔에 들어갈 수 없다.
+   *   · 자식 쪽에서 그 선은 뒤쪽(-x)으로 뻗는 반직선이다. 자식이 그 방향으로
+   *     PARENT_RESERVE 만큼만 비워 두면 손자와도 만나지 않는다.
+   *   · 원은 노드 반지름에 DISC_PAD 를 더해 잡으므로, 원 밖의 점은 그 안의 어떤
+   *     노드와도 최소 DISC_PAD 떨어져 있다 — 스치듯 접해도 관통이 아니다.
+   * 각 구간만 갈라 두면 되니 자식은 부모 **둘레 어디에나** 앉을 수 있다.
+   *
+   * 원뿔을 '자식을 감싸는 원반의 반지름'이 아니라 **조립해 둔 모양 자체**로 재는 것이
+   * 핵심이다. 원반으로 뭉뚱그리면 곧게 뻗은 가지도 뚱뚱한 공으로 취급되어 깊이마다
+   * 크기가 배로 불어난다. 원뿔로 재면 곧은 가지는 가늘어 가까이 붙는다.
+   */
+  const layoutSubtree = (id: string, isRoot: boolean): SubtreeShape => {
+    claimed.add(id)
+    const ownRadius = discOf(id)
+    const offsets = new Map<string, Point>([[id, { x: 0, y: 0 }]])
+    const circles: Array<{ x: number; y: number; r: number }> = [{ x: 0, y: 0, r: ownRadius }]
+    const kids = sorted(children.get(id) ?? []).filter((childId) => !claimed.has(childId))
+    if (kids.length === 0) return { offsets, circles, radius: ownRadius }
+    const subs = kids.map((childId) => layoutSubtree(childId, false))
+    const count = kids.length
+
+    // 자식 모양의 **어떤 원도** 내 원반(코어+파일 고리)을 건드리지 않는 최소 거리.
+    // 모양을 직접 재므로 필요한 만큼만 밀어낸다.
+    const clearance = ownRadius + RING_MARGIN
+    const near = subs.map((sub) => {
+      let need = 1
+      for (const circle of sub.circles) {
+        const reach = clearance + circle.r
+        const inside = reach * reach - circle.y * circle.y
+        const distance = -circle.x + (inside > 0 ? Math.sqrt(inside) : 0)
+        if (distance > need) need = distance
+      }
+      return need
+    })
+
+    /** 거리 distance 에 놓았을 때 이 부분트리가 부모에서 차지하는 반각. */
+    const halfConeAt = (index: number, distance: number): number => {
+      const sub = subs[index] as SubtreeShape
+      let half = 0
+      for (const circle of sub.circles) {
+        const px = circle.x + distance
+        const length = Math.hypot(px, circle.y)
+        if (length <= circle.r) return Math.PI * 0.99
+        const towards = Math.abs(Math.atan2(circle.y, px))
+        const spread = Math.asin(Math.min(0.999, circle.r / length))
+        if (towards + spread > half) half = towards + spread
+      }
+      return Math.min(Math.PI * 0.99, half)
+    }
+    const halvesAt = (scale: number): number[] => kids.map(
+      (_, index) => halfConeAt(index, scale * (near[index] as number))
+    )
+
+    // 뿌리가 아니면 부모로 돌아가는 자리를 양쪽 PARENT_RESERVE 만큼 비운다.
+    const window = isRoot ? full : full - 2 * PARENT_RESERVE
+
+    /**
+     * (필수) 원뿔의 합이 창에 들어가고, 하나하나가 **직각 안**인가.
+     *
+     * 합 조건은 형제끼리 안 겹치게 한다. 직각 조건은 그보다 미묘하다 — 반각이 90°를
+     * 넘으면 원뿔이 볼록하지 않아, 그 안의 두 점을 이은 선분이 꼭짓점 근처로 빠져나가
+     * **원뿔 밖으로 나간다**. 실제로 그래서 청강대 수업→2학년 선이 2학년 안쪽의
+     * 1학기→게임 기획 선과 한 번 교차했다. 90° 안으로 잡으면 원뿔이 볼록해지고,
+     * 볼록한 영역은 자기 안의 선분을 전부 품으므로 부분트리의 **모든 간선**이
+     * 자기 원뿔 안에 갇힌다. 그래야 교차 0 이 노드뿐 아니라 선까지 보장된다.
+     */
+    const fits = (halves: readonly number[]): boolean => {
+      let sum = 0
+      for (const half of halves) {
+        if (half > HALF_CONE_CAP) return false
+        sum += 2 * half
+      }
+      return sum <= window * CONE_SHARE
+    }
+    /**
+     * (희망) 이웃한 두 원뿔이 중심 간격 2π/n 안에 들어가는가.
+     *
+     * 들어가면 물채우기가 모든 중심 간격을 2π/n 으로 맞출 수 있고, 그때 자식은
+     * 부모를 정확히 빙 두른다. 자식이 늘수록 목표가 2π/n 로 **같이 좁아지므로**
+     * 거리 요구는 자식 수에 선형이다 — 고정 각을 떼어 주다 발산했던 그 함정이 없다.
+     */
+    const even = (halves: readonly number[]): boolean => {
+      const target = full / count
+      for (let index = 0; index < count; index += 1) {
+        const next = (index + 1) % count
+        if ((halves[index] as number) + (halves[next] as number) > target) return false
+      }
+      return true
+    }
+    /** accept 를 만족하는 가장 작은 배율. 반각은 거리에 대해 단조 감소해 0 으로 간다. */
+    const scaleFor = (accept: (halves: readonly number[]) => boolean): number => {
+      if (accept(halvesAt(1))) return 1
+      let low = 1
+      let high = 2
+      for (let step = 0; step < 48 && !accept(halvesAt(high)); step += 1) high *= 2
+      for (let step = 0; step < 40; step += 1) {
+        const mid = (low + high) / 2
+        if (accept(halvesAt(mid))) high = mid
+        else low = mid
+      }
+      return high
+    }
+    const needScale = scaleFor(fits)
+    const wishScale = scaleFor((halves) => fits(halves) && even(halves))
+    // 욕심은 필수치의 SPREAD_CLAMP 배 안에 가둔다. 이 한 줄이 발산을 원천 봉쇄한다 —
+    // 필수치는 기하학적 하한이라, 그 몇 배 안이면 크기는 언제나 하한을 따라간다.
+    const scale = Math.min(Math.max(needScale, wishScale), needScale * SPREAD_CLAMP)
+
+    const distances = kids.map((_, index) => scale * (near[index] as number))
+    const halves = kids.map((_, index) => halfConeAt(index, distances[index] as number))
+
+    // 중심 사이 최소 각. 마지막 칸이 부모 쪽으로 열린 틈이라 예약분을 더 얹는다.
+    const mins: number[] = []
+    for (let index = 0; index < count; index += 1) {
+      const next = (index + 1) % count
+      const back = !isRoot && index === count - 1 ? 2 * PARENT_RESERVE : 0
+      mins.push((halves[index] as number) + (halves[next] as number) + back)
+    }
+    const gaps = waterFill(mins, full)
+    const spread = (widths: readonly number[]): number[] => {
+      const angles: number[] = []
+      // 부모로 돌아가는 선은 마지막 틈 안을 지난다. 그 틈을 **반씩 나누면 안 된다** —
+      // 양옆 원뿔의 폭이 다르면 넓은 쪽이 선을 덮는다. 실제로 그래서 청강대 수업→2학년
+      // 선이 1학기 안쪽 간선과 한 번 교차했다(1학기 원뿔 85° · 남은 자리 90°).
+      // 각자 자기 폭과 예약분을 먼저 챙기고, 남는 만큼만 절반씩 더 가져간다.
+      const slack = Math.max(0, (widths[count - 1] as number) - (mins[count - 1] as number))
+      const back = isRoot ? 0 : (halves[0] as number) + PARENT_RESERVE + slack / 2
+      let cursor = isRoot ? startAngle : Math.PI + back
+      for (let index = 0; index < count; index += 1) {
+        if (index > 0) cursor += widths[index - 1] as number
+        angles.push(cursor)
+      }
+      return angles
+    }
+
+    /**
+     * 넓힌 결과를 **믿지 않고 확인한다**.
+     *
+     * 원뿔이 서로 겹치거나 부모로 돌아갈 자리를 침범하면 참이다. 참이면 최소치로
+     * 되돌린다 — 최소치는 합이 창보다 좁다는 것이 보장되어 있어 반드시 안전하다.
+     * 가정이 아니라 검사라서, 앞의 계산이 어긋나도 교차 0 은 안 깨진다.
+     */
+    const conflicts = (angles: readonly number[]): boolean => {
+      for (let i = 0; i < count; i += 1) {
+        const ai = angles[i] as number
+        const hi = halves[i] as number
+        if (!isRoot) {
+          let back = Math.abs(ai - Math.PI) % full
+          if (back > Math.PI) back = full - back
+          if (back < hi + PARENT_RESERVE) return true
+        }
+        for (let j = i + 1; j < count; j += 1) {
+          let delta = Math.abs(ai - (angles[j] as number)) % full
+          if (delta > Math.PI) delta = full - delta
+          if (delta < hi + (halves[j] as number)) return true
+        }
+      }
+      return false
+    }
+
+    // 최소치는 합이 창보다 좁다는 게 보장돼 있어 언제나 안전하다. 넓힌 배치가 검사를
+    // 통과하지 못하면 군말 없이 그리로 되돌린다 — 그 노드만 조금 좁아질 뿐이다.
+    let angles = spread(gaps)
+    if (conflicts(angles)) angles = spread(mins)
+
+    let radius = ownRadius
+    kids.forEach((_, index) => {
+      const angle = angles[index] as number
+      const distance = distances[index] as number
+      const cos = Math.cos(angle)
+      const sin = Math.sin(angle)
+      const sub = subs[index] as SubtreeShape
+      // 자식 좌표를 +x 로 distance 만큼 민 뒤 방향각만큼 돌린다. 자식의 '바깥'이 그대로
+      // 부모에서 멀어지는 방향이 되므로, 자식이 비워 둔 뒤쪽이 정확히 부모→자식 선 자리다.
+      const shift = (point: { x: number; y: number }): Point => {
+        const x = point.x + distance
+        return { x: x * cos - point.y * sin, y: x * sin + point.y * cos }
+      }
+      for (const [descendantId, point] of sub.offsets) offsets.set(descendantId, shift(point))
+      for (const circle of sub.circles) {
+        const moved = shift(circle)
+        circles.push({ x: moved.x, y: moved.y, r: circle.r })
+        radius = Math.max(radius, Math.hypot(moved.x, moved.y) + circle.r)
+      }
+    })
+    return { offsets, circles, radius }
+  }
+
+  interface ClusterPlan {
+    rootId: string
+    offsets: Map<string, Point>
+    radius: number
+  }
+
+  const layoutCluster = (rootId: string): ClusterPlan => {
+    const shape = layoutSubtree(rootId, true)
+    return { rootId, offsets: shape.offsets, radius: Math.max(shape.radius, discOf(rootId)) }
   }
 
   const structuralRoots = sorted((roots.length > 0 ? roots : coreIds).filter((id) => subtreeOf(id) > 0))
-  if (structuralRoots.length === 1) {
-    assignSector(structuralRoots[0]!, startAngle, startAngle + full, 0, center, 0)
-    primaryExtent = centralExtent
-  } else if (structuralRoots.length > 1) {
-    const clusterRadius = (id: string): number => ring * (heightOf(id) + 1) + Math.sqrt(spanOf(id)) * 22
-    const clusters = [...structuralRoots].sort((left, right) => clusterRadius(right) - clusterRadius(left) || left.localeCompare(right))
-    assignSector(clusters[0]!, startAngle, startAngle + full, 0, center, 0)
-    primaryExtent = centralExtent
-    const satellites = clusters.slice(1)
-    const satelliteArc = satellites.reduce((sum, id) => sum + 2 * clusterRadius(id), 0) || 1
-    const largestSatellite = Math.max(...satellites.map(clusterRadius), 0)
-    const satelliteRing = 1.2 * Math.max(
-      // Keep separate root clusters visibly distinct, but do not let the
-      // largest hierarchy push every smaller cluster to the far perimeter.
-      largestSatellite + 32,
-      primaryExtent * 0.46 + largestSatellite * 0.55 + 30,
-      satelliteArc / full
-    )
-    let cursor = startAngle
-    for (const id of satellites) {
-      const slice = ((2 * clusterRadius(id)) / satelliteArc) * full
-      const angle = cursor + slice / 2
-      assignSector(id, startAngle, startAngle + full, 0, {
-        x: center.x + Math.cos(angle) * satelliteRing,
-        y: center.y + Math.sin(angle) * satelliteRing
-      }, 0)
-      cursor += slice
-    }
-  }
+  const clusters = structuralRoots.map(layoutCluster)
 
-  for (const [coreId, fileIds] of attachedFiles) {
-    const corePosition = coreTargets.get(coreId)
-    if (!corePosition) continue
-    const orderedFiles = sorted(fileIds)
-    const count = orderedFiles.length
-    const coreRadius = coreRadii.get(coreId) ?? 10
-    const radius = Math.max(coreRadius + 52, (count * 21) / full)
-    orderedFiles.forEach((fileId, index) => {
-      const angle = startAngle + (full * index) / Math.max(1, count)
-      fileSlots.set(fileId, { coreId, angle, radius })
-      positions.set(fileId, {
-        x: corePosition.x + Math.cos(angle) * radius,
-        y: corePosition.y + Math.sin(angle) * radius
-      })
+  // ── 뿌리가 여럿이면 각 덩어리를 하나의 원반으로 보고 바깥 원에 나눠 앉힌다 ──
+  // 덩어리끼리 원반이 겹치지 않으면 덩어리 사이 선도 만날 수 없다.
+  const origins = new Map<string, Point>()
+  let extent = 0
+  if (clusters.length === 1) {
+    origins.set((clusters[0] as ClusterPlan).rootId, center)
+    extent = (clusters[0] as ClusterPlan).radius
+  } else if (clusters.length > 1) {
+    const largest = clusters.reduce((max, cluster) => Math.max(max, cluster.radius), 0)
+    const ringGutter = 34
+    const spanAt = (perimeter: number): number => clusters.reduce(
+      (sum, cluster) => sum + 2 * Math.asin(Math.min(0.999, cluster.radius / perimeter)) + ringGutter / perimeter,
+      0
+    )
+    const budget = full * 0.985
+    let perimeter = Math.max(largest * 1.02, 1)
+    while (perimeter < largest * 4096 && spanAt(perimeter) > budget) perimeter *= 1.5
+    let low = perimeter / 1.5
+    let high = perimeter
+    if (low >= largest * 1.02 && spanAt(low) > budget) {
+      for (let step = 0; step < 44; step += 1) {
+        const mid = (low + high) / 2
+        if (spanAt(mid) <= budget) high = mid
+        else low = mid
+      }
+    }
+    perimeter = high
+    const spans = clusters.map((cluster) => 2 * Math.asin(Math.min(0.999, cluster.radius / perimeter)) + ringGutter / perimeter)
+    const used = spans.reduce((sum, value) => sum + value, 0)
+    const extra = Math.max(0, full - used) / clusters.length
+    let cursor = startAngle
+    clusters.forEach((cluster, index) => {
+      const slot = (spans[index] as number) + extra
+      const angle = cursor + slot / 2
+      const origin = { x: center.x + Math.cos(angle) * perimeter, y: center.y + Math.sin(angle) * perimeter }
+      origins.set(cluster.rootId, origin)
+      extent = Math.max(extent, perimeter + cluster.radius)
+      cursor += slot
     })
   }
 
+  for (const cluster of clusters) {
+    const origin = origins.get(cluster.rootId) ?? center
+    for (const [id, offset] of cluster.offsets) {
+      const point = { x: origin.x + offset.x, y: origin.y + offset.y }
+      coreTargets.set(id, point)
+      positions.set(id, point)
+    }
+  }
+
+  // ── 파일 고리 ──
+  // 파일은 코어를 빙 둘러 360° 로 앉는다(그래야 방사형으로 읽힌다). 다만
+  // 부모·자식으로 나가는 구조선이 지나는 방향만 비워 둔다 — 그 좁은 창만
+  // 피하면 선이 파일을 뚫는 일이 사라지고, 퍼짐은 거의 그대로 남는다.
+  for (const coreId of coreIds) {
+    const files = orderedFiles.get(coreId) ?? []
+    if (files.length === 0) continue
+    const corePosition = coreTargets.get(coreId)
+    if (!corePosition) continue
+    const ring = fileRingRadius.get(coreId) ?? 60
+    const blocked: number[] = []
+    const push = (otherId: string | undefined): void => {
+      if (!otherId) return
+      const other = coreTargets.get(otherId)
+      if (!other) return
+      const dx = other.x - corePosition.x
+      const dy = other.y - corePosition.y
+      if (dx === 0 && dy === 0) return
+      blocked.push(Math.atan2(dy, dx))
+    }
+    push(parentOf.get(coreId))
+    for (const childId of children.get(coreId) ?? []) push(childId)
+
+    const halfWindow = Math.asin(Math.min(0.6, (FILE_NODE_RADIUS + 4) / ring))
+    const emit = (fileId: string, angle: number): void => {
+      fileSlots.set(fileId, { coreId, angle, radius: ring })
+      positions.set(fileId, {
+        x: corePosition.x + Math.cos(angle) * ring,
+        y: corePosition.y + Math.sin(angle) * ring
+      })
+    }
+
+    // 1순위: 완전 균등한 고리를 통째로 **돌려서** 구조선이 지나는 방향을 비켜 간다.
+    // 파일 간격을 손대지 않으므로 퍼짐이 1 에 가깝게 유지된다.
+    const step = full / files.length
+    let bestOffset = 0
+    let bestClearance = -1
+    const samples = 512
+    for (let sample = 0; sample < samples; sample += 1) {
+      const offset = (step * sample) / samples
+      let worst = Math.PI
+      for (const angle of blocked) {
+        const rest = (((angle - startAngle - offset) % step) + step) % step
+        const distance = Math.min(rest, step - rest)
+        if (distance < worst) worst = distance
+      }
+      if (worst > bestClearance + 1e-9) {
+        bestClearance = worst
+        bestOffset = offset
+      }
+    }
+    if (bestClearance >= halfWindow) {
+      files.forEach((fileId, index) => emit(fileId, startAngle + bestOffset + step * index))
+      continue
+    }
+
+    // 2순위: 균등 고리로는 창을 못 피한다. 막힌 창을 뺀 열린 호에 길이 비례로 나눈다.
+    const normalized = blocked
+      .map((angle) => ((angle - startAngle) % full + full) % full)
+      .sort((left, right) => left - right)
+    let arcs: Array<{ from: number; length: number }> = []
+    if (normalized.length === 0) {
+      arcs = [{ from: 0, length: full }]
+    } else {
+      for (let index = 0; index < normalized.length; index += 1) {
+        const from = (normalized[index] as number) + halfWindow
+        const next = (normalized[(index + 1) % normalized.length] as number) - halfWindow
+        const length = ((next - from) % full + full) % full
+        if (length > halfWindow * 0.5) arcs.push({ from, length })
+      }
+    }
+    const openLength = arcs.reduce((sum, arc) => sum + arc.length, 0)
+    if (arcs.length === 0 || openLength <= 0) arcs = [{ from: 0, length: full }]
+    const total = arcs.reduce((sum, arc) => sum + arc.length, 0)
+
+    // 최대 잉여법으로 정수 배분한다 — 같은 입력이면 언제나 같은 배분이다.
+    const quota = arcs.map((arc) => (arc.length / total) * files.length)
+    const counts = quota.map((value) => Math.floor(value))
+    let remaining = files.length - counts.reduce((sum, value) => sum + value, 0)
+    const byRemainder = quota
+      .map((value, index) => ({ index, rest: value - Math.floor(value) }))
+      .sort((left, right) => right.rest - left.rest || left.index - right.index)
+    for (const entry of byRemainder) {
+      if (remaining <= 0) break
+      counts[entry.index] = (counts[entry.index] as number) + 1
+      remaining -= 1
+    }
+
+    let cursor = 0
+    arcs.forEach((arc, arcIndex) => {
+      const count = counts[arcIndex] as number
+      for (let slot = 0; slot < count; slot += 1) {
+        const fileId = files[cursor] as string
+        cursor += 1
+        emit(fileId, startAngle + arc.from + (arc.length * (slot + 0.5)) / count)
+      }
+    })
+  }
+
+  // ── 아무 데도 매이지 않은 노드 ──
+  // 배치의 바깥 테두리 너머에 둔다. 안쪽에 끼워 넣으면 남의 선을 가로지른다.
   const orphanIds = sorted(nodes.filter((node) => !positions.has(node.id)).map((node) => node.id))
-  const orphanRadius = 1.2 * Math.max(76, primaryExtent * 0.5 + 62)
-  orphanIds.forEach((id, index) => {
-    const angle = startAngle + (full * index) / Math.max(1, orphanIds.length)
-    const point = { x: center.x + Math.cos(angle) * orphanRadius, y: center.y + Math.sin(angle) * orphanRadius }
-    orphanTargets.set(id, point)
-    positions.set(id, point)
-  })
+  if (orphanIds.length > 0) {
+    const orphanRadius = Math.max(96, extent + 78, (orphanIds.length * 38) / full)
+    orphanIds.forEach((id, index) => {
+      const angle = startAngle + (full * index) / orphanIds.length
+      const point = { x: center.x + Math.cos(angle) * orphanRadius, y: center.y + Math.sin(angle) * orphanRadius }
+      orphanTargets.set(id, point)
+      positions.set(id, point)
+    })
+  }
+
+  // ── 흩어진 덩어리를 하나의 둥근 뭉치로 모은다 ──
+  packClustersIntoCircle(positions, coreTargets, orphanTargets, nodes, edges, coreRadii)
+
   const secondaryEdgeIds = new Set(
     edges
       .filter((edge) => (
@@ -879,6 +1401,13 @@ function MyDbGraphCanvas({
 
     let disposed = false
     let initialized = false
+    // '전체 보기' 요청. 배치가 준비된 첫 프레임에 한 번 수행한다.
+    //
+    // 처음부터 true 다. 화면에 들어올 때 recenter 를 부르는 효과가 이 그래프 효과보다
+    // **먼저** 도는 경우가 있어서, 그때는 recenterRef 가 아직 비어 있어 요청이 통째로
+    // 사라진다. 실측으로 배율이 맞춰지지 않고 1.0 인 채로 남아 배치가 화면 밖으로
+    // 넘쳤다. 배치를 새로 만들었으면 어차피 전체를 보여 주는 게 맞으므로 여기서 켠다.
+    let pendingFit = true
     let wake: () => void = () => undefined
     let alpha = savedNodePositions.size === 0
       ? 0.5
@@ -1184,6 +1713,12 @@ function MyDbGraphCanvas({
     const DAMPING = 0.85
     const MAX_VELOCITY = 40
     const THETA_SQUARED = BARNES_HUT_THETA * BARNES_HUT_THETA
+    // 보이는 원 바깥으로 확보하는 여유. 라벨이 붙는 노드가 서로 붙어 보이지 않게 한다.
+    const COLLISION_PADDING = 7
+    // 셋 이상이 뭉친 자리는 한 번에 안 풀린다. 프레임마다 도는 값이라 크게 두지 않는다.
+    const COLLISION_ITERATIONS = 2
+    // 1 이면 즉시 떨어지지만 튀어 보인다. 몇 프레임에 걸쳐 부드럽게 민다.
+    const COLLISION_STRENGTH = 0.62
 
     const simulate = (fixedNodeId: string | null = null): number => {
       const graphNodes = nodesRef.current
@@ -1217,8 +1752,21 @@ function MyDbGraphCanvas({
         const dx = target.x - source.x
         const dy = target.y - source.y
         const distance = Math.max(1, Math.hypot(dx, dy))
+        // 구조 간선의 자연 길이는 **배치가 정한 거리**다.
+        //
+        // 예전에는 240px 고정이었다. 방사형 배치는 깊이마다 고리 반지름이 다른데
+        // 모든 구조 간선을 같은 길이로 끌어당기면 고리가 무너진다. 실측으로,
+        // 초기 배치는 관통 0·거의 겹치는 선 0 인데 물리를 거치면 각각 2 건이
+        // 생겼다 — 1학기에서 나가는 두 선이 1.8° 로 붙어 2학년 원을 29.9px
+        // 파고들었다. 용수철이 배치와 싸운 결과다. 계획 거리를 쓰면 용수철이
+        // 배치를 무너뜨리는 대신 붙잡아 준다.
+        const plannedSource = layoutPlan.coreTargets.get(edge.sourceId)
+        const plannedTarget = layoutPlan.coreTargets.get(edge.targetId)
+        const plannedDistance = plannedSource && plannedTarget
+          ? Math.hypot(plannedTarget.x - plannedSource.x, plannedTarget.y - plannedSource.y)
+          : null
         const restLength = structuralCoreEdge
-          ? STRUCTURAL_LENGTH + source.radius + target.radius
+          ? plannedDistance ?? STRUCTURAL_LENGTH + source.radius + target.radius
           : RELATED_LENGTH
         const spring = structuralCoreEdge ? STRUCTURAL_SPRING : SPRING
         const force = (distance - restLength) * spring * alpha
@@ -1255,6 +1803,21 @@ function MyDbGraphCanvas({
         item.y += item.vy
         energy += Math.abs(item.vx) + Math.abs(item.vy)
       }
+      // 속도를 적분한 **뒤** 겹침을 좌표로 직접 푼다.
+      //
+      // 위의 Barnes-Hut 반발력은 1/r² 이고 alpha 로 감쇠하므로, 배치가 식으면
+      // 사실상 0 이 되어 겹친 채 멈춘 화면이 남는다. 여기서 미는 것은 힘이 아니라
+      // 위치라서 alpha 와 무관하게 항상 듣는다.
+      //
+      // 그리는 반지름보다 COLLISION_PADDING 만큼 큰 원을 쓴다 — 라벨이 차지하는
+      // 자리를 감안하고, 여유가 있어야 군집이 동그랗게 뭉친다.
+      resolveCollisions(graphNodes, {
+        padding: COLLISION_PADDING,
+        iterations: COLLISION_ITERATIONS,
+        strength: COLLISION_STRENGTH,
+        // 사용자가 끌고 있는 노드는 손에서 벗어나면 안 된다.
+        isPinned: (body) => (body as CanvasNode).node.id === fixedNodeId
+      })
       kineticEnergy = energy
       if (alpha > 0.03) alpha *= 0.998
       return energy
@@ -1266,6 +1829,10 @@ function MyDbGraphCanvas({
     const tick = (): void => {
       frameRef.current = null
       if (disposed) return
+      if (pendingFit && layoutPlan.positions.size > 0 && nodesRef.current.length > 0) {
+        pendingFit = false
+        fitToContent()
+      }
       const fixedNodeId = dragRef.current.nodeId
       simulate(fixedNodeId)
       draw()
@@ -1283,18 +1850,55 @@ function MyDbGraphCanvas({
       if (frameRef.current == null) frameRef.current = window.requestAnimationFrame(tick)
     }
     wakeRef.current = wake
-    recenterRef.current = (): void => {
+    // 배치가 끝난 **뒤에** 재야 한다. 이 함수는 화면에 들어오는 순간 불리는데,
+    // 그 시점에 노드가 아직 안 만들어졌거나 이전 그래프의 좌표가 남아 있을 수 있다.
+    // 실제로 같은 코드가 실행마다 다른 배율을 내는 경쟁이 있었다. 한 프레임 미뤄
+    // 항상 같은 순서로 재게 한다.
+    const fitToContent = (): void => {
       const { width, height } = sizeRef.current
-      // Returning to My DB should show the whole working area at a calm,
-      // slightly zoomed-out overview rather than preserving a tight camera.
-      // Focus mode immediately applies its own readable minimum afterward.
-      const scale = 0.58
+      // **배치 계획**을 잰다 — 살아 움직이는 좌표가 아니라.
+      //
+      // 물리는 화면에 들어온 뒤로도 몇 초간 노드를 바깥으로 퍼뜨린다. 그 좌표를
+      // 재면 언제 재느냐에 따라 배율이 달라져, 같은 그래프가 실행마다 다르게
+      // 잡히고 가장자리가 잘렸다(실측: 두 번 연속 실행이 서로 다른 화면).
+      // 계획은 결정적이고 물리가 향하는 목표이므로, 이걸 재면 항상 같은 결과다.
+      const radiusById = new Map(nodesRef.current.map((item) => [item.node.id, item.radius]))
+      let minX = Infinity
+      let minY = Infinity
+      let maxX = -Infinity
+      let maxY = -Infinity
+      for (const [id, point] of layoutPlan.positions) {
+        const r = radiusById.get(id) ?? 10
+        minX = Math.min(minX, point.x - r)
+        minY = Math.min(minY, point.y - r)
+        maxX = Math.max(maxX, point.x + r)
+        maxY = Math.max(maxY, point.y + r)
+      }
+      const hasBounds = Number.isFinite(minX) && maxX > minX && maxY > minY
+      // 라벨이 원 밖으로 나가고, 물리가 자리를 잡는 동안 계획보다 조금 더 퍼진다.
+      const MARGIN = 220
+      const spanX = hasBounds ? maxX - minX + MARGIN : 1
+      const spanY = hasBounds ? maxY - minY + MARGIN : 1
+      // 작은 라이브러리를 확대해 띄우지는 않는다(0.58 = 예전의 차분한 기본 배율).
+      const scale = hasBounds
+        ? Math.max(0.12, Math.min(0.58, Math.min(width / spanX, height / spanY)))
+        : 0.58
+      const focusX = hasBounds ? (minX + maxX) / 2 : layoutPlan.center.x
+      const focusY = hasBounds ? (minY + maxY) / 2 : layoutPlan.center.y
       viewportRef.current = {
         scale,
-        x: width / 2 - layoutPlan.center.x * scale,
-        y: height / 2 - layoutPlan.center.y * scale
+        x: width / 2 - focusX * scale,
+        y: height / 2 - focusY * scale
       }
       savedViewport = { ...viewportRef.current }
+      wake()
+    }
+    recenterRef.current = (): void => {
+      // 여기서 바로 재면 안 된다 — 이 함수는 화면에 들어오는 순간 불리는데, 그때
+      // layoutPlan 은 아직 빈 초기값이고 nodesRef 도 비어 있을 수 있다. 그 상태로
+      // 재면 배율이 기본값으로 튀거나 실행마다 달라진다(실측으로 두 번 연속 실행이
+      // 서로 다른 화면을 냈다). 배치가 준비된 첫 프레임에 tick 이 대신 맞춘다.
+      pendingFit = true
       wake()
     }
     focusRef.current = (): void => {

@@ -8,7 +8,7 @@
 
 개인 파일, 문서, 일정, 지식 라이브러리와 로컬 AI를 한 곳에서 다룹니다.
 
-[![Version](https://img.shields.io/badge/version-1.2.0-F16522?style=flat-square)](docs/V1.2.0_RELEASE_NOTES.md)
+[![Version](https://img.shields.io/badge/version-1.3.0-F16522?style=flat-square)](docs/V1.3.0_RELEASE_NOTES.md)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6?style=flat-square)
 ![Desktop](https://img.shields.io/badge/desktop-Electron%2043-47848F?style=flat-square&logo=electron&logoColor=white)
 ![Runtime](https://img.shields.io/badge/default%20LLM-Ollama-111827?style=flat-square&logo=ollama)
@@ -121,6 +121,11 @@ My DB는 에이전트가 만든 파일을 자동으로 쌓아 두는 장소가 �
 #### 그래프와 목록
 
 - 그래프/목록/히스토리 화면을 전환합니다.
+- 그래프는 **선이 서로 가로지르지 않는 방사형 배치**입니다. 코어와 파일이 모두 `contains`로
+  이어진 트리라, 하위 트리를 서로 겹치지 않는 영역에 놓으면 교차가 구성상 생기지 않습니다.
+  자식은 부모를 빙 두르며, 서로 이어지지 않은 덩어리는 하나의 둥근 뭉치로 모입니다.
+- 노드는 보이는 원보다 큰 충돌 원을 둘러 서로 파고들지 않습니다. 끌어서 옮겨도 유지됩니다.
+- 화면에 들어오면 배치 전체가 들어오도록 자동으로 맞춰집니다.
 - 빈 공간 우클릭으로 코어 생성과 방사형 검색을 사용합니다.
 - 노드 우클릭으로 이름 변경, 연결, 연결 해제, 휴지통 이동을 수행합니다.
 - 중간 코어를 선택하면 그 코어를 최상위로 한 포커스 보기로 전환됩니다. `Esc` 또는 마우스 뒤로가기로 전체 보기로 돌아갑니다.
@@ -416,6 +421,7 @@ Apache License 2.0. 자세한 내용은 [LICENSE](LICENSE)를 참고하세요.
 
 | 버전 | 날짜 | 주요 내용 |
 |---|---|---|
+| **1.3.0** | 2026-08-23 | My DB 그래프를 선이 엉키지 않는 방사형 배치로 다시 짜고(교차·관통·겹침 0), 군집을 하나의 둥근 뭉치로 모음. 좁은 창에서 어긋나던 설정 메뉴와 목록 필터 배치를 수정. [릴리스 노트](docs/V1.3.0_RELEASE_NOTES.md) |
 | **1.2.0** | 2026-08-22 | 휴지통 전체 비우기와, 보관 기한이 지난 항목을 자동으로 완전 삭제하는 설정을 추가(기본값 사용 안 함). [릴리스 노트](docs/V1.2.0_RELEASE_NOTES.md) |
 | **1.1.0** | 2026-08-22 | 홈 대시보드를 채팅·에이전트의 첫 화면으로 옮기고, My DB 히스토리를 변경 이력 달력과 그 날짜의 일일 보고서 패널로 바꿈. [릴리스 노트](docs/V1.1.0_RELEASE_NOTES.md) |
 | **1.0.2** | 2026-08-21 | 창을 좁혔을 때 버튼 글자가 버튼 밖으로 새던 문제 수정. [릴리스 노트](docs/V1.0.2_RELEASE_NOTES.md) |
