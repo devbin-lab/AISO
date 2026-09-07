@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   snapshotLlmSettings,
   type AppSettings,
-  type ReasoningEffort
+  type ReasoningEffort,
+  type SettingsSaveResult
 } from '../../../shared/settings'
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import type {
@@ -100,7 +101,7 @@ interface Props {
   backend: BackendInfo
   health: HealthInfo | null
   onPickWorkspace: () => Promise<void>
-  onSaveSettings: (patch: Partial<AppSettings>) => Promise<boolean>
+  onSaveSettings: (patch: Partial<AppSettings>) => Promise<SettingsSaveResult>
   conversationRequest?: ConversationRequest | null
   onConversationActive?: (id: string | null) => void
   /** App-level Agent mode only: conversations must begin from a registered project. */

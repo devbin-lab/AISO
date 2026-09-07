@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { AppSettings, ReasoningEffort } from '../../../shared/settings'
+import type { AppSettings, ReasoningEffort, SettingsSaveResult } from '../../../shared/settings'
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import { streamChat, type ChatPayloadMessage } from '../lib/chat'
 import { newConversationId, titleFromText } from '../lib/conversations'
@@ -61,7 +61,7 @@ interface Props {
   settings: AppSettings
   backend: BackendInfo
   health: HealthInfo | null
-  onSaveSettings: (patch: Partial<AppSettings>) => Promise<boolean>
+  onSaveSettings: (patch: Partial<AppSettings>) => Promise<SettingsSaveResult>
   conversationRequest?: ConversationRequest | null
   onConversationActive?: (id: string | null) => void
   onNavigate?: (view: 'todo' | 'graph' | 'settings') => void

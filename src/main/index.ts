@@ -26,6 +26,7 @@ import {
   clearBackendTodoWorkspaceRegistry
 } from './backend'
 import { buildRendererCsp } from './renderer-csp'
+import { sanitizeSettingsPatch } from './settings-patch'
 import { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
 import {
   clearAttachmentStore,
@@ -816,8 +817,12 @@ app.whenReady().then(() => {
   ipcMain.handle('settings:set', async (_e, patch: Partial<AppSettings>) => {
     console.log('[ipc] settings:set', Object.keys(patch ?? {}))
     const previous = loadSettings()
-    if (patch?.discordLlmProvider === 'nvidia' && previous.discordLlmProvider !== 'nvidia') {
-      throw new Error('Discord NVIDIA는 전용 전송 범위 확인을 거쳐야 활성화할 수 있습니다.')
+    // Discord 공급자는 전용 동의 IPC(discord:set-llm-provider)만 쓴다. 일반 저장 경로에서
+    // 예외를 던지면 폼 전체 저장이 함께 죽으므로 그 필드만 걷어낸다(settings-patch.ts 참고).
+    const sanitized = sanitizeSettingsPatch(patch ?? {})
+    patch = sanitized.patch
+    if (sanitized.ignoredDiscordProvider === 'nvidia' && previous.discordLlmProvider !== 'nvidia') {
+      console.warn('[settings] Discord NVIDIA 전환은 전용 동의 흐름에서만 처리한다 — 일반 저장에서는 무시.')
     }
     if ('myDbStoragePath' in (patch ?? {})) assertMyDbStoragePath(patch.myDbStoragePath)
     const next = saveSettings(patch)

@@ -90,7 +90,7 @@ describe('SettingsView', () => {
   afterEach(() => vi.unstubAllGlobals())
 
   it('combines engine, generation, and search settings in the LLM tab', () => {
-    render(<SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={vi.fn().mockResolvedValue(true)} active={false} />)
+    render(<SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={vi.fn().mockResolvedValue({ ok: true })} active={false} />)
 
     expect(screen.getByRole('button', { name: 'LLM' })).not.toBeNull()
     expect(screen.queryByRole('button', { name: '엔진' })).toBeNull()
@@ -107,7 +107,7 @@ describe('SettingsView', () => {
 
   it('lets the user choose and save a separate My DB storage location', async () => {
     const user = userEvent.setup()
-    const onSave = vi.fn().mockResolvedValue(true)
+    const onSave = vi.fn().mockResolvedValue({ ok: true })
     window.api.myDb!.pickStorageRoot = vi.fn().mockResolvedValue('D:\\Library\\My DB')
     render(<SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={onSave} active />)
 
@@ -124,7 +124,7 @@ describe('SettingsView', () => {
 
   it('keeps NVIDIA key lifecycle separate from persisted settings', async () => {
     const user = userEvent.setup()
-    const onSave = vi.fn().mockResolvedValue(true)
+    const onSave = vi.fn().mockResolvedValue({ ok: true })
     render(<SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={onSave} active />)
 
     openLlmTab()
@@ -160,7 +160,7 @@ describe('SettingsView', () => {
 
   it('performs no model refresh or capability probe on startup or provider selection', async () => {
     const user = userEvent.setup()
-    render(<SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={vi.fn().mockResolvedValue(true)} active />)
+    render(<SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={vi.fn().mockResolvedValue({ ok: true })} active />)
 
     expect(window.api.nvidia.models.refresh).not.toHaveBeenCalled()
     expect(window.api.nvidia.capabilities.probe).not.toHaveBeenCalled()
@@ -184,7 +184,7 @@ describe('SettingsView', () => {
         settings={{ ...DEFAULT_SETTINGS, activeLlmProvider: 'nvidia', nvidiaModel: 'model/a' }}
         backend={READY_BACKEND}
         health={null}
-        onSave={vi.fn().mockResolvedValue(true)}
+        onSave={vi.fn().mockResolvedValue({ ok: true })}
         active
       />
     )
@@ -210,7 +210,7 @@ describe('SettingsView', () => {
       nvidiaModel: 'model/a',
       chatWebSearch: false
     }
-    render(<SettingsView settings={nvidiaSettings} backend={READY_BACKEND} health={null} onSave={vi.fn().mockResolvedValue(true)} active />)
+    render(<SettingsView settings={nvidiaSettings} backend={READY_BACKEND} health={null} onSave={vi.fn().mockResolvedValue({ ok: true })} active />)
 
     openLlmTab()
     expect(window.api.nvidia.models.refresh).not.toHaveBeenCalled()
@@ -239,7 +239,7 @@ describe('SettingsView', () => {
       chatWebSearch: false
     }
     render(<>
-      <SettingsView settings={nvidiaSettings} backend={READY_BACKEND} health={null} onSave={vi.fn().mockResolvedValue(true)} active />
+      <SettingsView settings={nvidiaSettings} backend={READY_BACKEND} health={null} onSave={vi.fn().mockResolvedValue({ ok: true })} active />
       <ConfirmHost />
     </>)
 
@@ -289,7 +289,7 @@ describe('SettingsView', () => {
       })
     }))
 
-    render(<SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={vi.fn().mockResolvedValue(true)} active />)
+    render(<SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={vi.fn().mockResolvedValue({ ok: true })} active />)
     await user.click(screen.getByRole('button', { name: '도구' }))
 
     expect(await screen.findByText('폴더 목록')).not.toBeNull()
@@ -311,7 +311,7 @@ describe('SettingsView', () => {
 
   it('keeps provider tool policies independent and disables unsupported NVIDIA tools', async () => {
     const user = userEvent.setup()
-    const onSave = vi.fn().mockResolvedValue(true)
+    const onSave = vi.fn().mockResolvedValue({ ok: true })
     const programmingTools = [
       ['write_code_file', '프로젝트 코드 파일을 작성합니다.'],
       ['edit_code_file', '프로젝트 코드 파일을 편집합니다.'],
@@ -399,7 +399,7 @@ describe('SettingsView', () => {
 
   it('preserves an unsaved ComfyUI value when unrelated external settings change', async () => {
     const user = userEvent.setup()
-    const onSave = vi.fn().mockResolvedValue(true)
+    const onSave = vi.fn().mockResolvedValue({ ok: true })
     const { rerender } = render(
       <SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={onSave} active={false} />
     )
@@ -428,7 +428,7 @@ describe('SettingsView', () => {
     let persisted = { ...DEFAULT_SETTINGS }
     const onSave = vi.fn().mockImplementation(async (next) => {
       persisted = { ...next }
-      return true
+      return { ok: true }
     })
     window.api.discord.setLlmProvider = vi.fn().mockImplementation(async () => ({
       ...persisted,
@@ -465,7 +465,7 @@ describe('SettingsView', () => {
 
   it('clears successfully saved dirty fields even when the provider IPC fails', async () => {
     const user = userEvent.setup()
-    const onSave = vi.fn().mockResolvedValue(true)
+    const onSave = vi.fn().mockResolvedValue({ ok: true })
     window.api.discord.setLlmProvider = vi.fn().mockRejectedValue(new Error('provider failed'))
     const { rerender } = render(
       <SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={onSave} active />
@@ -514,7 +514,7 @@ describe('SettingsView', () => {
         settings={{ ...DEFAULT_SETTINGS, comfyInstallPath: 'D:\\ComfyUI' }}
         backend={READY_BACKEND}
         health={null}
-        onSave={vi.fn().mockResolvedValue(true)}
+        onSave={vi.fn().mockResolvedValue({ ok: true })}
         active={false}
       />
     )
@@ -531,7 +531,7 @@ describe('SettingsView', () => {
 
   it('saves the ComfyUI model-selection mode independently of model registration', async () => {
     const user = userEvent.setup()
-    const onSave = vi.fn().mockResolvedValue(true)
+    const onSave = vi.fn().mockResolvedValue({ ok: true })
     render(<SettingsView settings={DEFAULT_SETTINGS} backend={READY_BACKEND} health={null} onSave={onSave} active={false} />)
 
     await user.click(screen.getByRole('button', { name: 'ComfyUI' }))

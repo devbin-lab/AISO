@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
-import type { AppSettings } from '../../shared/settings'
+import type { AppSettings, SettingsSaveResult } from '../../shared/settings'
 import { DEFAULT_SETTINGS } from '../../shared/settings'
 import type { BackendInfo, HealthInfo } from '../../shared/backend'
 import type { ConversationKind } from '../../shared/conversation'
@@ -138,17 +138,24 @@ function App(): React.JSX.Element {
 
   /** 실제 저장에 성공했을 때만 Renderer 상태를 갱신한다.
    * false는 호출자가 저장 완료 UI나 후속 작업을 진행하면 안 된다는 뜻이다. */
-  const saveSettings = async (patch: Partial<AppSettings>): Promise<boolean> => {
+  /**
+   * 설정을 저장하고 **실패 사유까지** 돌려준다.
+   *
+   * 예전에는 boolean 만 돌려주고 사유는 콘솔에만 남겼다. 그래서 메인이 정책상 거부해도
+   * 화면에는 "권한·디스크 상태를 확인하라"는 엉뚱한 안내만 떴고, 사용자는 무엇이 막혔는지
+   * 알 길이 없었다. 실제로 그 상태로 설정이 몇 주 동안 저장되지 않은 적이 있다.
+   */
+  const saveSettings = async (patch: Partial<AppSettings>): Promise<SettingsSaveResult> => {
     try {
       let next: AppSettings = { ...settings, ...patch }
       if (window.api?.settings) {
         next = await window.api.settings.set(patch)
       }
       setSettings(next)
-      return true
+      return { ok: true }
     } catch (err) {
       console.error('설정 저장 실패:', err)
-      return false
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   }
 

@@ -23,6 +23,14 @@ export interface SettingsRecoveryStatus {
   backupPath?: string
 }
 
+/**
+ * 설정 저장 결과. 실패했으면 그 사유를 함께 돌려준다 — 화면이 엉뚱한 안내를 하지 않도록.
+ */
+export interface SettingsSaveResult {
+  ok: boolean
+  error?: string
+}
+
 export interface AppSettings {
   /** Persisted settings contract. v0.4.x uses schema 9. */
   schemaVersion: 10

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { AppSettings } from '../../../shared/settings'
+import type { AppSettings, SettingsSaveResult } from '../../../shared/settings'
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import { modelInstalled, pullModel, type PullEvent } from '../lib/ollama'
 import Select from './Select'
@@ -19,7 +19,7 @@ interface Props {
   settings: AppSettings
   backend: BackendInfo
   health: HealthInfo | null
-  onSaveSettings: (patch: Partial<AppSettings>) => Promise<boolean>
+  onSaveSettings: (patch: Partial<AppSettings>) => Promise<SettingsSaveResult>
 }
 
 type StepState = 'done' | 'todo' | 'pending'

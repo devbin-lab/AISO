@@ -3,6 +3,7 @@ import {
   type AppSettings,
   type ComfyModelSelectionMode,
   type ReasoningEffort,
+  type SettingsSaveResult,
   type ThemeMode,
   type TempPreset,
   TEMP_MODE_OPTIONS,
@@ -40,7 +41,7 @@ interface Props {
   settings: AppSettings
   backend: BackendInfo
   health: HealthInfo | null
-  onSave: (patch: Partial<AppSettings>) => Promise<boolean>
+  onSave: (patch: Partial<AppSettings>) => Promise<SettingsSaveResult>
   onExternalSettingsChange?: (settings: AppSettings) => void
   /** 지금 이 화면이 실제로 보이는 탭인지 — 개발자 모드 단축키 감지 범위를 설정 탭에 한정한다.
    *  (뷰는 항상 마운트 상태로 유지되므로 이 플래그 없이는 다른 탭에서도 단축키가 먹힌다.) */
@@ -376,9 +377,11 @@ function SettingsView({
   }
 
   const submit = async (): Promise<void> => {
-    const ok = await onSave(form)
-    if (!ok) {
-      setSaveError('설정을 저장하지 못했습니다. 권한·디스크 상태를 확인한 뒤 다시 시도해 주세요.')
+    const saved = await onSave(form)
+    if (!saved.ok) {
+      // 메인이 준 사유를 그대로 보여 준다. 예전에는 사유를 콘솔에만 남기고 화면에는 늘
+      // 권한·디스크 이야기만 해서, 정책상 거부를 몇 주 동안 아무도 알아채지 못했다.
+      setSaveError(saved.error || '설정을 저장하지 못했습니다. 권한·디스크 상태를 확인한 뒤 다시 시도해 주세요.')
       return
     }
     setSaveError('')
@@ -580,8 +583,12 @@ function SettingsView({
         const savedDirtyVersions = new Map(
           [...dirtyFields].map((field) => [field, dirtyFieldVersions.current.get(field) ?? 0])
         )
-        if (!await onSave(form)) {
-          setDiscordStat({ running: false, last_error: '설정을 저장하지 못해 공급자를 바꾸지 않았습니다.' })
+        const saved = await onSave(form)
+        if (!saved.ok) {
+          setDiscordStat({
+            running: false,
+            last_error: saved.error || '설정을 저장하지 못해 공급자를 바꾸지 않았습니다.'
+          })
           return
         }
         // 저장을 기다리는 동안 다시 편집된 필드는 새 초안이므로 dirty 상태를 유지한다.
@@ -618,8 +625,9 @@ function SettingsView({
   const applyDiscord = async (): Promise<void> => {
     setDiscordApplying(true)
     try {
-      if (!await onSave(form)) {
-        setSaveError('설정을 저장하지 못해 Discord 연결을 적용하지 않았습니다.')
+      const saved = await onSave(form)
+      if (!saved.ok) {
+        setSaveError(saved.error || '설정을 저장하지 못해 Discord 연결을 적용하지 않았습니다.')
         return
       }
       setDirtyFields(new Set())

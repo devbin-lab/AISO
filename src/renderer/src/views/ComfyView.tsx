@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { AppSettings } from '../../../shared/settings'
+import type { AppSettings, SettingsSaveResult } from '../../../shared/settings'
 import type { BackendInfo } from '../../../shared/backend'
 import type { ComfyHealthInfo, ComfyLaunchResult } from '../../../shared/comfy'
 import type { ComfyModelProfile } from '../../../shared/comfy-model'
@@ -19,7 +19,7 @@ interface Props {
   settings: AppSettings
   backend: BackendInfo
   active: boolean
-  onSaveSettings: (patch: Partial<AppSettings>) => Promise<boolean>
+  onSaveSettings: (patch: Partial<AppSettings>) => Promise<SettingsSaveResult>
 }
 
 function gib(bytes?: number): string {
@@ -204,8 +204,10 @@ function ComfyView({ settings, backend, active, onSaveSettings }: Props): React.
   const chooseInstall = async (): Promise<void> => {
     try {
       const selected = await window.api.comfy.pickInstall()
-      if (selected && !await onSaveSettings({ comfyInstallPath: selected })) {
-        setMessage('설치 폴더를 저장하지 못했습니다. 설정 권한과 디스크 상태를 확인해 주세요.')
+      if (!selected) return
+      const saved = await onSaveSettings({ comfyInstallPath: selected })
+      if (!saved.ok) {
+        setMessage(saved.error || '설치 폴더를 저장하지 못했습니다. 설정 권한과 디스크 상태를 확인해 주세요.')
       }
     } catch (err) {
       setMessage(`폴더 선택 실패: ${String(err)}`)

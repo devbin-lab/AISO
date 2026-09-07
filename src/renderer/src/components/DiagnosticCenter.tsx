@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
-import type { AppSettings } from '../../../shared/settings'
+import type { AppSettings, SettingsSaveResult } from '../../../shared/settings'
 import type { PingResult } from '../../../shared/ipc'
 import type { UsageSummary } from '../../../shared/usage'
 import {
@@ -16,7 +16,7 @@ interface Props {
   backend: BackendInfo
   health: HealthInfo | null
   settings: AppSettings
-  onSaveSettings: (patch: Partial<AppSettings>) => Promise<boolean>
+  onSaveSettings: (patch: Partial<AppSettings>) => Promise<SettingsSaveResult>
   active: boolean
 }
 

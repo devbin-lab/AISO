@@ -54,7 +54,7 @@ const commonProps = {
   backend,
   health,
   onPickWorkspace: vi.fn().mockResolvedValue(undefined),
-  onSaveSettings: vi.fn().mockResolvedValue(true),
+  onSaveSettings: vi.fn().mockResolvedValue({ ok: true }),
   convCollapsed: true
 }
 
@@ -127,7 +127,7 @@ describe('AgentView NVIDIA capability gate', () => {
   it('shows the selected NVIDIA model instead of the Ollama model in the Agent model control', async () => {
     const status = vi.fn().mockResolvedValue(capability('nvidia/model-selected'))
     installApiStub(status)
-    const onSaveSettings = vi.fn().mockResolvedValue(true)
+    const onSaveSettings = vi.fn().mockResolvedValue({ ok: true })
     render(
       <AgentView
         {...commonProps}
