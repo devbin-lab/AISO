@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import type { MyDbEdge, MyDbNode } from '../../../../shared/mydb'
 import { createInitialLayout } from '../MyDbView'
-import { measureLayoutQuality } from './layout-quality'
+import { childArcDegrees, measureLayoutQuality } from './layout-quality'
 import { measureCurrentLayout, radiusForNodes, REAL_LIBRARY } from './layout-quality.bench'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 /**
  * 방사형 배치의 계약.
@@ -181,5 +183,51 @@ describe('물리가 배치를 무너뜨리지 않기 위한 전제', () => {
     const max = Math.max(...distances)
     // 예전 고정값 240px 은 이 범위 안의 한 점일 뿐이다.
     expect(max / min).toBeGreaterThan(1.8)
+  })
+})
+
+/**
+ * 2026-09 라이브러리(코어 46 · 파일 122 · 뿌리 6). 탐색기로 넣은 폴더가 코어가 되면서
+ * 합창[W] 아래에 자식 코어가 생겼고, 그 원뿔이 40.8° 로 커지자 부모 2학기의 자식 8명이
+ * 121° 부채꼴로 몰렸다. 원인은 물채우기가 마지막 틈을 최소치 그대로 둔 탓에 마지막
+ * 자식이 부모 방향 예약선에 **정확히 접하게** 놓였고, 부동소수점 오차로 충돌 검사가
+ * 그것을 겹침으로 오판해 최소 배치(부채꼴)로 떨어진 것이다. 이 픽스처가 그 회귀를 고정한다.
+ */
+describe('2026-09 라이브러리 — 등호 접촉을 충돌로 오판해 부채꼴로 떨어지지 않는다', () => {
+  const fixture = JSON.parse(
+    readFileSync(resolve('src/renderer/src/views/mydb-graph/__fixtures__/real-library-2026-09.json'), 'utf8')
+  ) as { nodes: MyDbNode[]; edges: MyDbEdge[] }
+  const plan = createInitialLayout(fixture.nodes, fixture.edges, 1600, 900)
+  const q = measureLayoutQuality({
+    nodes: fixture.nodes, edges: fixture.edges, positions: plan.positions, radiusOf: radiusForNodes(fixture.nodes, fixture.edges)
+  })
+
+  it('2학기의 자식 8명이 부모를 두른다 (고치기 전: 121° · 천장 315°)', () => {
+    const parent = fixture.nodes.find((node) => node.kind === 'core' && node.title === '2학기')!
+    const origin = plan.positions.get(parent.id)!
+    const angles = fixture.edges
+      .filter((edge) => edge.relation === 'contains' && edge.sourceId === parent.id)
+      .map((edge) => plan.positions.get(edge.targetId)!)
+      .map((point) => Math.atan2(point.y - origin.y, point.x - origin.x))
+    expect(angles.length).toBe(8)
+    expect(childArcDegrees(angles)).toBeGreaterThanOrEqual(300)
+  })
+
+  it('부채꼴 판정은 알려진 한 곳(코어 2 + 파일 1 의 T자)뿐이다 — 래칫', () => {
+    // 게임과 음악 편곡법: 코어 자식 둘이 ±90° 에 앉고 파일 하나가 바깥(0°)에 앉아 180°.
+    // 코어는 원뿔로, 파일은 고리로 따로 놓는 설계의 결과라 이번 증상(자식 8명이 한쪽에
+    // 몰림)과는 다른 모양이다. 나빠지면(2 이상) 실패하고, 좋아지면 0 으로 조인다.
+    expect(q.fanShapedParents).toBeLessThanOrEqual(1)
+    expect(q.narrowestArcDegrees).toBeGreaterThanOrEqual(180)
+  })
+
+  it('교차·관통·겹침은 여전히 0 이다', () => {
+    expect(q.edgeCrossings).toBe(0)
+    expect(q.edgeNodeHits).toBe(0)
+    expect(q.nodeOverlaps).toBe(0)
+  })
+
+  it('노드를 하나도 잃지 않는다', () => {
+    expect(plan.positions.size).toBe(fixture.nodes.length)
   })
 })

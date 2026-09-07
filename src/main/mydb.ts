@@ -64,6 +64,8 @@ const RECONCILE_DEBOUNCE_MS = 1500
 const RECONCILE_SETTLE_MS = 1000
 // 지우고 다시 쓰는 방식으로 저장하는 편집기는 파일이 잠깐 없다가 돌아온다.
 const RECONCILE_MISSING_GRACE_MS = 1200
+// "아직 저장 중" 파일 때문에 스스로 다시 훑는 횟수의 상한. 그 뒤엔 다음 실제 변화까지 쉰다.
+const RECONCILE_UNSETTLED_RETRIES = 5
 const TRANSIENT_FILE_NAMES = new Set(['thumbs.db', 'desktop.ini', '.ds_store'])
 const TRANSIENT_FILE_SUFFIXES = ['.tmp', '.temp', '.crdownload', '.part', '.partial', '.download', '.swp']
 
@@ -571,6 +573,14 @@ export class MyDbStore {
   private reconcileChain: Promise<MyDbSyncResult> | null = null
   /** 가져오기처럼 "파일 먼저, 행은 나중" 순서로 쓰는 작업의 수. 0 이 아닐 때는 스캔을 미룬다. */
   private libraryMutations = 0
+  /**
+   * 스캔이 "아직 저장 중" 파일 때문에 스스로 다시 잡은 횟수.
+   *
+   * 상한이 없으면 잠긴 파일(다른 프로그램이 독점한 문서, 복사 실패)이 하나만 있어도
+   * 1초마다 폴더 전체를 훑고 행을 넣었다 물리기를 영원히 반복한다 — 앱이 주기적으로
+   * 뚝뚝 끊기는 느낌의 유력한 원인이다. 몇 번 물러선 뒤엔 다음 실제 폴더 변화까지 쉰다.
+   */
+  private unsettledRounds = 0
   private closed = false
 
   constructor(root: string) {
@@ -2109,8 +2119,10 @@ export class MyDbStore {
     }
   }
 
-  private queueReconcile(delay = RECONCILE_DEBOUNCE_MS): void {
+  private queueReconcile(delay = RECONCILE_DEBOUNCE_MS, external = true): void {
     if (this.closed || !this.diskSyncEnabled) return
+    // 실제 폴더 변화(감시 이벤트·시작 스캔)는 재시도 횟수를 새로 센다.
+    if (external) this.unsettledRounds = 0
     if (this.reconcileTimer) clearTimeout(this.reconcileTimer)
     this.reconcileTimer = setTimeout(() => {
       this.reconcileTimer = null
@@ -2221,7 +2233,15 @@ export class MyDbStore {
       this.organizeManagedFilesByCore()
       this.restartFileWatchers()
     }
-    if (unsettled) this.queueReconcile(RECONCILE_SETTLE_MS)
+    if (unsettled) {
+      this.unsettledRounds += 1
+      if (this.unsettledRounds <= RECONCILE_UNSETTLED_RETRIES) {
+        // 점점 길게 물러선다. 잠깐 저장 중이면 한두 번 안에 잡히고, 잠긴 파일이면 곧 쉰다.
+        this.queueReconcile(RECONCILE_SETTLE_MS * this.unsettledRounds, false)
+      } else if (this.unsettledRounds === RECONCILE_UNSETTLED_RETRIES + 1) {
+        console.warn('[mydb] 저장 폴더에 아직 등록할 수 없는 파일이 있어 다음 변화까지 스캔을 쉽니다.')
+      }
+    }
     return result
   }
 
@@ -2293,7 +2313,10 @@ export class MyDbStore {
     }
     if (!stats.isFile()) return 'skipped'
     // 방금 쓰인 파일은 아직 저장 중일 수 있다. 다음 스캔이 다시 본다.
-    if (Date.now() - stats.mtimeMs < RECONCILE_SETTLE_MS) return 'unsettled'
+    // 미래 시각이 찍힌 파일(다른 컴퓨터·클라우드에서 온 것)은 '방금'이 아니라 '이미'다 —
+    // 부호를 안 보면 그 파일은 영원히 '아직 저장 중'이라 스캔이 끝없이 되돌아온다.
+    const age = Date.now() - stats.mtimeMs
+    if (age >= 0 && age < RECONCILE_SETTLE_MS) return 'unsettled'
     const relativePath = this.toLibraryRelative(path)
     if (this.itemByRelativePath(relativePath)) return 'skipped' // 훑는 사이 등록됐다
     let fileName: string

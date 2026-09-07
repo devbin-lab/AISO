@@ -1215,3 +1215,20 @@ test('My DB watches the library folder once disk sync is enabled', async () => {
     await library.dispose()
   }
 })
+
+test('My DB registers a file stamped with a future time right away instead of deferring it forever', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const directory = join(library.root, 'files', '미분류')
+    await mkdir(directory, { recursive: true })
+    const fromElsewhere = join(directory, 'from-another-clock.md')
+    await writeFile(fromElsewhere, 'future', 'utf8')
+    const future = new Date(Date.now() + 60 * 60 * 1000)
+    await utimes(fromElsewhere, future, future)
+
+    const result = await library.store.reconcileWithDisk()
+    assert.equal(result.addedFiles, 1)
+  } finally {
+    await library.dispose()
+  }
+})

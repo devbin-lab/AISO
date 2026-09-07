@@ -1058,6 +1058,17 @@ export function createInitialLayout(
      * 되돌린다 — 최소치는 합이 창보다 좁다는 것이 보장되어 있어 반드시 안전하다.
      * 가정이 아니라 검사라서, 앞의 계산이 어긋나도 교차 0 은 안 깨진다.
      */
+    /**
+     * 등호는 충돌이 아니다.
+     *
+     * 물채우기가 어떤 틈을 최소치 그대로 두면, 그 틈의 양쪽 자식은 서로의 원뿔에
+     * **정확히 접하도록** 놓인다(마지막 틈이면 부모 방향 예약선에 정확히 접한다).
+     * 그 각을 더하고 빼는 과정에서 부동소수점이 1e-13 쯤 어긋나 `<` 가 참이 되면,
+     * 겹친 게 하나도 없는데 최소 배치로 떨어져 자식 8명이 121° 부채꼴로 몰렸다
+     * (실측 — 2학기 아래 합창[W] 이 새 코어를 얻어 원뿔이 40.8° 로 커진 뒤).
+     * 1e-6 rad 은 화면에서 0.001px 도 안 된다. 그 안쪽은 접한 것이지 파고든 게 아니다.
+     */
+    const TOUCH_EPSILON = 1e-6
     const conflicts = (angles: readonly number[]): boolean => {
       for (let i = 0; i < count; i += 1) {
         const ai = angles[i] as number
@@ -1065,21 +1076,30 @@ export function createInitialLayout(
         if (!isRoot) {
           let back = Math.abs(ai - Math.PI) % full
           if (back > Math.PI) back = full - back
-          if (back < hi + PARENT_RESERVE) return true
+          if (back + TOUCH_EPSILON < hi + PARENT_RESERVE) return true
         }
         for (let j = i + 1; j < count; j += 1) {
           let delta = Math.abs(ai - (angles[j] as number)) % full
           if (delta > Math.PI) delta = full - delta
-          if (delta < hi + (halves[j] as number)) return true
+          if (delta + TOUCH_EPSILON < hi + (halves[j] as number)) return true
         }
       }
       return false
     }
 
-    // 최소치는 합이 창보다 좁다는 게 보장돼 있어 언제나 안전하다. 넓힌 배치가 검사를
-    // 통과하지 못하면 군말 없이 그리로 되돌린다 — 그 노드만 조금 좁아질 뿐이다.
+    // 넓힌 배치가 검사를 통과하지 못하면 물러선다 — 다만 곧장 최소 배치로 가지 않는다.
+    // 최소 배치는 자식을 한쪽에 몰아 놓는 부채꼴이라, 그 자체가 사용자가 고쳐 달라던
+    // 증상이다. 먼저 남는 각을 형제에게 똑같이 나눠 준 배치를 시도한다: 틈마다
+    // 최소치 이상이고 합이 한 바퀴라 원리적으로 안전하며, 자식은 여전히 부모를 두른다.
+    // 그마저 안 되면 그때 최소치다 — 최소치는 합이 창보다 좁다는 게 보장돼 언제나 안전하다.
     let angles = spread(gaps)
-    if (conflicts(angles)) angles = spread(mins)
+    if (conflicts(angles)) {
+      let minSum = 0
+      for (const value of mins) minSum += value
+      const extra = Math.max(0, full - minSum) / count
+      angles = spread(mins.map((value) => value + extra))
+      if (conflicts(angles)) angles = spread(mins)
+    }
 
     let radius = ownRadius
     kids.forEach((_, index) => {
