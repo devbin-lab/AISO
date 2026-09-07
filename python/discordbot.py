@@ -222,7 +222,9 @@ class _State:
         self.guild_id: str = ""          # 고정된 단일 서버
         self.channel_id: str = ""        # 자동 생성 명령 채널
         self.allowlist: set[str] = set() # 슬래시로 동적 관리
-        self.synced: bool = False
+        # 슬래시 커맨드를 **어느 길드에** 올렸는지. 불리언이면 서버를 옮겼을 때
+        # "이미 했다"로 읽혀 새 서버에는 /allow 가 하나도 뜨지 않는다.
+        self.synced_guild_id: str = ""
         self.history: "dict[int, deque]" = defaultdict(lambda: deque(maxlen=HISTORY_TURNS))
         self.gen_lock = asyncio.Lock()
         self.last_error: str | None = None
@@ -324,10 +326,20 @@ async def _lock_overwrites(guild: "discord.Guild") -> dict:
 
     허용목록 사용자에게 view를 주지 않으면 is_authorized가 인가해도 채널이 안 보여 말을 걸 수 없다
     (/allow가 응답만 하고 실제로 작동 안 하던 문제). 허용목록 변경 시 _refresh_command_overwrites로 갱신."""
-    ow = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    # 키에 Role 과 Member 가 섞인다. 첫 항목만으로 추론시키면 dict[Role, ...] 이 되어
+    # 아래에서 Member 를 넣을 때 타입이 어긋난다.
+    ow: dict[Any, discord.PermissionOverwrite] = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False)
     }
+    # guild.me 는 멤버 캐시 조회다. members 인텐트가 꺼져 있으면 갓 조인한 서버에서 None 이
+    # 나올 수 있는데, 그대로 키에 넣으면 discord.py 가 "Role 이나 Member 가 아니다"로 거절해
+    # 채널 생성 자체가 실패한다. 그러면 채널이 없어 봇이 어디서도 대답하지 못한다.
+    # REST fetch 로 보강하고, 그래도 없으면 봇 몫만 빼고 만든다 — 채널을 만든 주체라 접근은 된다.
+    me = guild.me
+    if me is None and _S.app_id:
+        me = await _resolve_member(guild, _S.app_id)
+    if me is not None:
+        ow[me] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
     view_send = discord.PermissionOverwrite(view_channel=True, send_messages=True)
     owner_m = await _resolve_member(guild, _S.owner_id)
     if owner_m is not None:
@@ -390,24 +402,32 @@ async def _ensure_command_channel(guild: "discord.Guild") -> None:
             "\"팀 서버로 꾸며줘\"처럼 서버 구성도 요청할 수 있습니다."
         )
     except discord.Forbidden:
-        _S.last_error = "채널 생성 권한(Manage Channels)이 없습니다 — 초대 권한을 확인하세요."
+        _S.last_error = (
+            "채널 생성 권한(Manage Channels)이 없습니다 — 봇을 내보낸 뒤 설정탭의 초대 링크로 다시 초대하거나, "
+            "서버 설정에서 Aiso 역할에 '채널 관리' 권한을 주세요."
+        )
     except Exception as e:  # noqa: BLE001
-        _S.last_error = f"명령 채널 생성 실패: {e}"
+        _S.last_error = f"명령 채널 생성 실패: {type(e).__name__}: {e}"
 
 
 async def _bind_guild(guild: "discord.Guild") -> None:
     """단일 서버로 고정하고 명령 채널을 확보한 뒤 슬래시 커맨드를 동기화한다."""
+    # 서버를 옮겼으면 옛 서버의 채널 기록은 버린다. 남겨 두면 _ensure_command_channel 이
+    # 그 id 를 먼저 조회하는데, 스노플레이크는 서버를 가리지 않으므로 "있다"고 오판할 여지가
+    # 생기고, 그 순간 새 서버에는 채널이 없는 채로 대화가 영원히 막힌다.
+    if _S.guild_id != str(guild.id):
+        _S.channel_id = ""
     _S.guild_id = str(guild.id)
     _save_state()
     await _ensure_command_channel(guild)
-    if _S.tree is not None and not _S.synced:
+    if _S.tree is not None and _S.synced_guild_id != str(guild.id):
         try:
             # 명령은 전역(guild 인자 없이)으로 등록돼 있다. 길드 sync에 포함되려면 먼저 전역 명령을
             # 이 길드로 복사해야 한다 — 안 하면 빈 배열이 올라가 /allow가 하나도 안 뜬다.
             guild_obj = discord.Object(id=guild.id)
             _S.tree.copy_global_to(guild=guild_obj)
             await _S.tree.sync(guild=guild_obj)
-            _S.synced = True
+            _S.synced_guild_id = str(guild.id)
         except Exception as e:  # noqa: BLE001
             print(f"[discord] 슬래시 동기화 실패: {e}")
 
@@ -784,7 +804,18 @@ def _build_client(generate: GenerateFn) -> "discord.Client":
 
     @client.event
     async def on_guild_join(guild: "discord.Guild") -> None:
-        # 최대 1개 서버 — 이미 다른 서버에 고정돼 있으면 새 초대는 퇴장
+        # 최대 1개 서버 — 다만 **아직 그 서버에 남아 있을 때만** 새 초대를 거절한다.
+        #
+        # 예전에는 기록된 guild_id 가 다르기만 하면 무조건 퇴장했다. 그래서 봇을 옛 서버에서
+        # 내보낸 뒤 새 서버로 초대하면, 기록이 그대로 남아 있어 새 서버에서도 곧바로 나가
+        # 버렸다 — 다시 초대해도 같은 일이 반복되니 "초대했는데 아무 반응이 없다"가 된다.
+        # 살아 있는 길드 목록으로 확인해, 없는 서버를 가리키는 기록은 낡은 것으로 보고 버린다.
+        if _S.guild_id and _S.guild_id.isdigit() and int(_S.guild_id) != guild.id:
+            still_there = client.get_guild(int(_S.guild_id)) is not None
+            if not still_there:
+                _S.guild_id = ""
+                _S.channel_id = ""
+                _save_state()
         if _S.guild_id and _S.guild_id.isdigit() and int(_S.guild_id) != guild.id:
             try:
                 sys_ch = guild.system_channel
@@ -1110,11 +1141,30 @@ async def _run_job(job: dict) -> None:
     await discordops.send_message_live(guild, job.get("channel_id", ""), text)
 
 
+async def _retry_command_channel() -> None:
+    """명령 채널이 없으면 다시 확보를 시도한다.
+
+    채널이 없으면 is_authorized 가 모든 메시지를 거부하므로 봇은 어디서도 대답하지 못한다.
+    그런데 채널 확보는 서버에 고정되는 순간 딱 한 번만 시도했다 — 그때 권한이 아직 반영되지
+    않았거나 일시적으로 실패하면, 앱을 다시 켜기 전까지 영영 침묵한다. 사용자가 채널을
+    지운 경우도 같다. 러너가 주기적으로 확인해 스스로 복구한다."""
+    if _S.channel_id:
+        return
+    guild = bound_guild()
+    if guild is None:
+        return
+    await _ensure_command_channel(guild)
+
+
 async def _sched_runner(client: "discord.Client") -> None:
     import discordsched  # noqa: PLC0415
 
     await client.wait_until_ready()
     while not client.is_closed():
+        try:
+            await _retry_command_channel()
+        except Exception as e:  # noqa: BLE001 — 복구 시도가 러너를 죽이면 안 된다
+            print(f"[discord] 명령 채널 재시도 실패: {e}")
         try:
             for job in discordsched.pop_due():
                 await _run_job(job)
@@ -1144,7 +1194,7 @@ async def apply_config(
     if not config.get("enabled") or not str(config.get("token") or "").strip():
         return
     token = str(config["token"]).strip()
-    _S.synced = False
+    _S.synced_guild_id = ""
     client = _build_client(generate)
     _S.client = client
     _S.last_error = None
@@ -1192,4 +1242,4 @@ async def stop() -> None:
     _S.client = None
     _S.task = None
     _S.tree = None
-    _S.synced = False
+    _S.synced_guild_id = ""
