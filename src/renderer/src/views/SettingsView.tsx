@@ -304,7 +304,9 @@ function SettingsView({
     setNvidiaModelsMessage('')
     try {
       const result = await window.api.nvidia.models.refresh(currentCredentialBinding())
-      setNvidiaModels(result.models)
+      // 응답 순서는 제공자 마음이라 같은 계열이 흩어져 보인다. 이름순으로 세워 두면
+      // 검색으로 좁힌 뒤에도, 그냥 훑을 때도 찾는 자리가 예측된다.
+      setNvidiaModels([...result.models].sort((left, right) => left.localeCompare(right)))
       setNvidiaModelsRefreshedAt(result.refreshedAt)
       if (form.nvidiaModel.trim() && !result.models.includes(form.nvidiaModel.trim())) {
         setManualNvidiaModel(true)
