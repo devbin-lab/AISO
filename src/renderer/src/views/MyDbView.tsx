@@ -2923,7 +2923,14 @@ ${files > 0 ? '보관된 파일과 모든 버전 기록이 함께 사라지며 '
           </button>
         </div>
         <div className="mydb-toolbar__actions">
-          <button type="button" className="mydb-toolbar-button" onClick={() => void runAction(() => getMyDbBridge().openFolder())} title="저장 폴더 열기" aria-label="저장 폴더 열기">
+          <button
+            type="button"
+            className="mydb-toolbar-button"
+            // 포커스한 코어(없으면 선택한 항목)의 폴더를 연다. 최상위에서 다시 찾아 내려가지 않게.
+            onClick={() => void runAction(() => getMyDbBridge().openFolder(focusCore?.id ?? selected?.id ?? null))}
+            title={focusCore ? `'${focusCore.title}' 폴더 열기` : selected ? `'${selected.title}' 위치 열기` : '저장 폴더 열기'}
+            aria-label={focusCore ? `'${focusCore.title}' 폴더 열기` : selected ? `'${selected.title}' 위치 열기` : '저장 폴더 열기'}
+          >
             <FolderIcon size={16} />
           </button>
           <button type="button" className="mydb-toolbar-button" onClick={() => void syncFromDisk()} disabled={loading} title="저장 폴더에서 직접 넣거나 지운 파일을 지금 반영" aria-label="저장 폴더 반영">

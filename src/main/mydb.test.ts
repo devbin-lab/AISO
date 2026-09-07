@@ -1232,3 +1232,25 @@ test('My DB registers a file stamped with a future time right away instead of de
     await library.dispose()
   }
 })
+
+test('My DB resolves the folder to open for a focused core, a file, and an empty core', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const parent = library.store.createCore('수업')
+    const child = library.store.createCore('1주차', parent.id)
+    const sourceFile = join(library.source, 'memo.txt')
+    await writeFile(sourceFile, 'hello', 'utf8')
+    const item = (await library.store.importPaths([sourceFile], child.id)).createdNodes[0]!
+
+    assert.equal(library.store.resolveNodeDirectory(child.id), join(library.root, 'files', '수업', '1주차'))
+    assert.equal(library.store.resolveNodeDirectory(item.id), join(library.root, 'files', '수업', '1주차'))
+
+    // 파일이 없는 코어는 폴더가 아직 없다 — 열 때 만들어서 최상위로 떨어지지 않게 한다.
+    const empty = library.store.createCore('빈 코어', parent.id)
+    const emptyDirectory = library.store.resolveNodeDirectory(empty.id)
+    assert.equal(emptyDirectory, join(library.root, 'files', '수업', '빈 코어'))
+    assert.equal(existsSync(emptyDirectory), true)
+  } finally {
+    await library.dispose()
+  }
+})

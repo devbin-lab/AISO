@@ -1108,9 +1108,13 @@ app.whenReady().then(() => {
     requireMyDbWindow(e.sender)
     return myDbSyncFromDisk()
   })
-  ipcMain.handle('mydb:open-folder', async (e) => {
+  ipcMain.handle('mydb:open-folder', async (e, nodeId?: unknown) => {
     requireMyDbWindow(e.sender)
-    const error = await shell.openPath(myDbStorageRoot())
+    // 포커스한 코어가 있으면 그 폴더로 바로 간다. 최상위에서 다시 찾아 내려가는 수고를 없앤다.
+    const target = typeof nodeId === 'string' && nodeId.trim()
+      ? getMyDbStore().resolveNodeDirectory(nodeId)
+      : myDbStorageRoot()
+    const error = await shell.openPath(target)
     if (error) throw new Error(error)
   })
   ipcMain.handle('mydb:open-file', async (e, id: unknown) => {

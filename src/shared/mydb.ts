@@ -260,7 +260,8 @@ export interface MyDbBridge {
   syncFromDisk?: () => Promise<MyDbSyncResult>
   /** 메인이 저장 폴더 변화를 스스로 반영했을 때 알린다. 바뀐 것이 없으면 오지 않는다. */
   onDiskSynced?: (cb: (result: MyDbSyncResult) => void) => () => void
-  openFolder: () => Promise<void>
+  /** 저장 폴더를 연다. 코어 id 를 주면 그 코어의 폴더, 파일 id 를 주면 그 파일이 든 폴더다. */
+  openFolder: (nodeId?: string | null) => Promise<void>
   openFile?: (id: string) => Promise<void>
   showInFolder?: (id: string) => Promise<void>
 }

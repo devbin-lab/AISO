@@ -278,7 +278,7 @@ const api = {
         ipcRenderer.removeListener('mydb:disk-synced', listener)
       }
     },
-    openFolder: () => ipcRenderer.invoke('mydb:open-folder'),
+    openFolder: (nodeId?: string | null) => ipcRenderer.invoke('mydb:open-folder', nodeId ?? null),
     openFile: (id: string) => ipcRenderer.invoke('mydb:open-file', id),
     showInFolder: (id: string) => ipcRenderer.invoke('mydb:show-in-folder', id)
   },

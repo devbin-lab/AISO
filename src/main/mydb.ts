@@ -66,6 +66,8 @@ const RECONCILE_SETTLE_MS = 1000
 const RECONCILE_MISSING_GRACE_MS = 1200
 // "아직 저장 중" 파일 때문에 스스로 다시 훑는 횟수의 상한. 그 뒤엔 다음 실제 변화까지 쉰다.
 const RECONCILE_UNSETTLED_RETRIES = 5
+// 파일 시스템 시계가 앞서는 정도의 허용치. 이보다 더 미래면 다른 컴퓨터의 시계로 본다.
+const RECONCILE_CLOCK_SKEW_MS = 2000
 const TRANSIENT_FILE_NAMES = new Set(['thumbs.db', 'desktop.ini', '.ds_store'])
 const TRANSIENT_FILE_SUFFIXES = ['.tmp', '.temp', '.crdownload', '.part', '.partial', '.download', '.swp']
 
@@ -1291,6 +1293,21 @@ export class MyDbStore {
     return this.resolveLibraryFile(item.relative_path)
   }
 
+  /**
+   * 노드가 있는 폴더. 코어면 그 코어의 폴더, 파일이면 그 파일이 든 폴더.
+   *
+   * 파일이 하나도 없는 코어는 폴더가 아직 없을 수 있다. 그때는 만들어서 연다 —
+   * 사용자가 거기에 파일을 넣으면 스캔이 그 코어의 자료로 등록하므로 빈 폴더가
+   * 곧 그 코어다. 최상위 폴더로 떨어뜨려 다시 찾아 내려가게 하지 않는다.
+   */
+  resolveNodeDirectory(id: string): string {
+    const node = this.requireNodeRow(id, false)
+    if (node.kind === 'file') return dirname(this.resolveItemPath(id))
+    const directory = this.storageDirectoryForCore(id)
+    mkdirSync(directory, { recursive: true })
+    return directory
+  }
+
   private buildDailyReportBody(
     reportDate: string,
     rows: HistoryRow[],
@@ -2315,8 +2332,9 @@ export class MyDbStore {
     // 방금 쓰인 파일은 아직 저장 중일 수 있다. 다음 스캔이 다시 본다.
     // 미래 시각이 찍힌 파일(다른 컴퓨터·클라우드에서 온 것)은 '방금'이 아니라 '이미'다 —
     // 부호를 안 보면 그 파일은 영원히 '아직 저장 중'이라 스캔이 끝없이 되돌아온다.
+    // 다만 방금 쓴 파일의 mtime 도 파일 시스템 시계 탓에 몇 ms 앞설 수 있다. 그건 미래가 아니라 '방금'이다.
     const age = Date.now() - stats.mtimeMs
-    if (age >= 0 && age < RECONCILE_SETTLE_MS) return 'unsettled'
+    if (age > -RECONCILE_CLOCK_SKEW_MS && age < RECONCILE_SETTLE_MS) return 'unsettled'
     const relativePath = this.toLibraryRelative(path)
     if (this.itemByRelativePath(relativePath)) return 'skipped' // 훑는 사이 등록됐다
     let fileName: string
