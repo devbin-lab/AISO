@@ -58,8 +58,10 @@ import {
   myDbSetSourcePath,
   myDbState,
   myDbStorageRoot,
+  myDbSyncFromDisk,
   myDbTrash,
-  myDbUnlink
+  myDbUnlink,
+  onMyDbDiskSynced
 } from './mydb'
 import { recordUsage, usageSummary, clearUsage } from './usage'
 import { listSkills, deleteSkill } from './skills'
@@ -779,7 +781,11 @@ app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.aiso.app')
   // My DB is a user-owned library, intentionally outside Aiso's resettable
   // application state and completely independent from Agent activity.
-  configureMyDbStorageRoot(myDbStoragePathFor(loadSettings()))
+  configureMyDbStorageRoot(myDbStoragePathFor(loadSettings()), { syncWithDisk: true })
+  // 탐색기로 저장 폴더를 바꾼 것을 메인이 반영하면 열어 둔 My DB 화면이 옛 그래프를 보여 준다.
+  onMyDbDiskSynced((result) => {
+    BrowserWindow.getAllWindows().forEach((w) => w.webContents.send('mydb:disk-synced', result))
+  })
   startMyDbDailyReportScheduler(loadSettings())
 
   app.on('browser-window-created', (_, window) => {
@@ -816,7 +822,7 @@ app.whenReady().then(() => {
     if ('myDbStoragePath' in (patch ?? {})) assertMyDbStoragePath(patch.myDbStoragePath)
     const next = saveSettings(patch)
     if ('myDbStoragePath' in patch && next.myDbStoragePath !== previous.myDbStoragePath) {
-      configureMyDbStorageRoot(myDbStoragePathFor(next))
+      configureMyDbStorageRoot(myDbStoragePathFor(next), { syncWithDisk: true })
       writeMissingMyDbDailyReport()
     }
     if ('myDbDailyReportCheckHours' in patch && next.myDbDailyReportCheckHours !== previous.myDbDailyReportCheckHours) {
@@ -1097,6 +1103,10 @@ app.whenReady().then(() => {
   ipcMain.handle('mydb:import-dropped', async (e, paths: unknown, parentCoreId?: unknown) => {
     requireMyDbWindow(e.sender)
     return myDbImportDropped(myDbPaths(paths), myDbParentId(parentCoreId))
+  })
+  ipcMain.handle('mydb:sync-from-disk', (e) => {
+    requireMyDbWindow(e.sender)
+    return myDbSyncFromDisk()
   })
   ipcMain.handle('mydb:open-folder', async (e) => {
     requireMyDbWindow(e.sender)

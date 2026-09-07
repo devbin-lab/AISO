@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { existsSync } from 'fs'
-import { mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from 'fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, utimes, writeFile } from 'fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -984,6 +984,233 @@ test('휴지통이 비어 있으면 비우기는 아무것도 하지 않는다',
     const result = await library.store.purgeTrash()
     assert.equal(result.purged, 0)
     assert.equal(result.failed, 0)
+  } finally {
+    await library.dispose()
+  }
+})
+
+// ---- 저장 폴더 → DB 조정 --------------------------------------------------
+
+/** 스캔은 방금 쓰인 파일을 "아직 저장 중"으로 보고 미룬다. 테스트는 시각을 뒤로 돌려 바로 잡히게 한다. */
+async function settle(path: string): Promise<void> {
+  const past = new Date(Date.now() - 10_000)
+  await utimes(path, past, past)
+}
+
+test('My DB registers a file dropped into a core folder and links it to that core', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const core = library.store.createCore('프로젝트 자료')
+    const dropped = join(library.root, 'files', '프로젝트 자료', 'dropped.md')
+    await mkdir(join(library.root, 'files', '프로젝트 자료'), { recursive: true })
+    await writeFile(dropped, '# dropped\n', 'utf8')
+    await settle(dropped)
+
+    const result = await library.store.reconcileWithDisk()
+    assert.deepEqual(result, { addedCores: 0, addedFiles: 1, movedFiles: 0, trashedFiles: 0, skippedPaths: [] })
+
+    const state = library.store.snapshot()
+    const file = state.nodes.find((node) => node.kind === 'file')
+    assert.ok(file)
+    assert.equal(file!.title, 'dropped.md')
+    assert.equal(file!.relativePath, 'files/프로젝트 자료/dropped.md')
+    assert.ok(state.edges.some((edge) => edge.sourceId === core.id && edge.targetId === file!.id && edge.relation === 'contains'))
+    // 처음 버전이 남아야 나중에 수정을 되돌릴 수 있다.
+    assert.equal((await library.store.fileHistory(file!.id)).revisions.length, 1)
+    const entry = library.store.history().entries[0]
+    assert.equal(entry?.action, 'imported')
+    assert.equal(entry?.subjectTitle, 'dropped.md')
+    assert.match(entry?.detail ?? '', /저장 폴더에서 발견/)
+
+    // 다시 훑어도 같은 파일을 두 번 등록하지 않는다.
+    const again = await library.store.reconcileWithDisk()
+    assert.equal(again.addedFiles, 0)
+    assert.equal(library.store.snapshot().nodes.filter((node) => node.kind === 'file').length, 1)
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('My DB turns a folder tree created in Explorer into cores and keeps the parent link', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const nested = join(library.root, 'files', '수업', '1주차')
+    await mkdir(nested, { recursive: true })
+    const memo = join(nested, 'memo.txt')
+    await writeFile(memo, 'hello', 'utf8')
+    await settle(memo)
+
+    const result = await library.store.reconcileWithDisk()
+    assert.equal(result.addedCores, 2)
+    assert.equal(result.addedFiles, 1)
+
+    const state = library.store.snapshot()
+    const parent = state.nodes.find((node) => node.kind === 'core' && node.title === '수업')
+    const child = state.nodes.find((node) => node.kind === 'core' && node.title === '1주차')
+    const file = state.nodes.find((node) => node.kind === 'file')
+    assert.ok(parent && child && file)
+    assert.ok(state.edges.some((edge) => edge.sourceId === parent!.id && edge.targetId === child!.id && edge.relation === 'contains'))
+    assert.ok(state.edges.some((edge) => edge.sourceId === child!.id && edge.targetId === file!.id && edge.relation === 'contains'))
+    assert.equal(file!.relativePath, 'files/수업/1주차/memo.txt')
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('My DB follows a file moved between core folders in Explorer without losing its identity', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const from = library.store.createCore('이전')
+    const to = library.store.createCore('이후')
+    const sourceFile = join(library.source, 'plan.md')
+    await writeFile(sourceFile, 'plan v1', 'utf8')
+    const item = (await library.store.importPaths([sourceFile], from.id)).createdNodes[0]!
+    const formerPath = library.store.resolveItemPath(item.id)
+
+    const target = join(library.root, 'files', '이후', 'plan-renamed.md')
+    await mkdir(join(library.root, 'files', '이후'), { recursive: true })
+    await rename(formerPath, target)
+    await settle(target)
+
+    const result = await library.store.reconcileWithDisk()
+    assert.equal(result.movedFiles, 1)
+    assert.equal(result.addedFiles, 0)
+    assert.equal(result.trashedFiles, 0)
+
+    const state = library.store.snapshot()
+    const moved = state.nodes.find((node) => node.id === item.id)
+    assert.ok(moved, '같은 항목이 살아 있어야 한다')
+    assert.equal(moved!.title, 'plan-renamed.md')
+    assert.equal(moved!.relativePath, 'files/이후/plan-renamed.md')
+    assert.ok(state.edges.some((edge) => edge.sourceId === to.id && edge.targetId === item.id && edge.relation === 'contains'))
+    assert.ok(!state.edges.some((edge) => edge.sourceId === from.id && edge.targetId === item.id))
+    assert.equal((await library.store.fileHistory(item.id)).revisions.length, 1)
+    assert.equal(library.store.trash().nodes.length, 0)
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('My DB moves a file deleted in Explorer to the trash but never purges it', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const core = library.store.createCore('자료')
+    const keep = join(library.source, 'keep.md')
+    const gone = join(library.source, 'gone.md')
+    await writeFile(keep, 'keep', 'utf8')
+    await writeFile(gone, 'gone', 'utf8')
+    const imported = await library.store.importPaths([keep, gone], core.id)
+    const goneItem = imported.createdNodes.find((node) => node.title === 'gone.md')!
+    await rm(library.store.resolveItemPath(goneItem.id), { force: true })
+
+    const result = await library.store.reconcileWithDisk()
+    assert.equal(result.trashedFiles, 1)
+    assert.equal(library.store.snapshot().nodes.filter((node) => node.kind === 'file').length, 1)
+    const trashed = library.store.trash().nodes
+    assert.equal(trashed.length, 1)
+    assert.equal(trashed[0]?.id, goneItem.id)
+    const entry = library.store.history().entries[0]
+    assert.equal(entry?.action, 'moved_to_trash')
+    assert.equal(entry?.subjectId, goneItem.id)
+    assert.match(entry?.detail ?? '', /저장 폴더에서 사라짐/)
+
+    // 휴지통에서 되살린 뒤 버전에서 내용을 되찾을 수 있다 — 폴더째 지워졌어도.
+    library.store.restoreNode(goneItem.id)
+    const versions = (await library.store.fileHistory(goneItem.id)).revisions
+    assert.equal(versions.length, 1)
+    await library.store.restoreRevision(goneItem.id, versions[0]!.id)
+    assert.equal(await readFile(library.store.resolveItemPath(goneItem.id), 'utf8'), 'gone')
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('My DB does not trash everything when the whole library vanishes at once', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const core = library.store.createCore('자료')
+    const a = join(library.source, 'a.md')
+    const b = join(library.source, 'b.md')
+    await writeFile(a, 'a', 'utf8')
+    await writeFile(b, 'b', 'utf8')
+    await library.store.importPaths([a, b], core.id)
+    await rm(join(library.root, 'files', '자료'), { recursive: true, force: true })
+
+    const result = await library.store.reconcileWithDisk()
+    assert.equal(result.trashedFiles, 0)
+    assert.equal(library.store.snapshot().nodes.filter((node) => node.kind === 'file').length, 2)
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('My DB skips editor scratch files and defers a file that is still being written', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const directory = join(library.root, 'files', '미분류')
+    await mkdir(directory, { recursive: true })
+    const scratch = join(directory, '~$report.docx')
+    const partial = join(directory, 'movie.mp4.crdownload')
+    const fresh = join(directory, 'fresh.md')
+    await writeFile(scratch, 'x', 'utf8')
+    await writeFile(partial, 'x', 'utf8')
+    await writeFile(fresh, 'fresh', 'utf8')
+    await settle(scratch)
+    await settle(partial)
+
+    const first = await library.store.reconcileWithDisk()
+    assert.equal(first.addedFiles, 0, '방금 쓰인 파일은 다음 스캔으로 미룬다')
+    assert.deepEqual(first.skippedPaths, [])
+
+    await settle(fresh)
+    const second = await library.store.reconcileWithDisk()
+    assert.equal(second.addedFiles, 1)
+    const file = library.store.snapshot().nodes.find((node) => node.kind === 'file')
+    assert.equal(file?.title, 'fresh.md')
+    assert.equal(file?.relativePath, 'files/미분류/fresh.md')
+    assert.equal(library.store.snapshot().edges.length, 0, '미분류 파일은 코어에 속하지 않는다')
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('My DB files dropped at the library root land in 미분류', async () => {
+  const library = await temporaryLibrary()
+  try {
+    const loose = join(library.root, 'files', 'loose.txt')
+    await writeFile(loose, 'loose', 'utf8')
+    await settle(loose)
+
+    const result = await library.store.reconcileWithDisk()
+    assert.equal(result.addedFiles, 1)
+    const file = library.store.snapshot().nodes.find((node) => node.kind === 'file')
+    assert.equal(file?.relativePath, 'files/미분류/loose.txt')
+    assert.equal(existsSync(join(library.root, 'files', '미분류', 'loose.txt')), true)
+    assert.equal(existsSync(loose), false)
+  } finally {
+    await library.dispose()
+  }
+})
+
+test('My DB watches the library folder once disk sync is enabled', async () => {
+  const library = await temporaryLibrary()
+  try {
+    library.store.enableDiskSync()
+    const core = library.store.createCore('감시')
+    const dropped = join(library.root, 'files', '감시', 'auto.md')
+    await mkdir(join(library.root, 'files', '감시'), { recursive: true })
+    await writeFile(dropped, 'auto', 'utf8')
+    await settle(dropped)
+
+    const deadline = Date.now() + 8_000
+    while (Date.now() < deadline) {
+      if (library.store.snapshot().nodes.some((node) => node.kind === 'file')) break
+      await new Promise((done) => setTimeout(done, 200))
+    }
+    const state = library.store.snapshot()
+    const file = state.nodes.find((node) => node.kind === 'file')
+    assert.ok(file, '감시가 새 파일을 스스로 등록해야 한다')
+    assert.ok(state.edges.some((edge) => edge.sourceId === core.id && edge.targetId === file!.id))
   } finally {
     await library.dispose()
   }

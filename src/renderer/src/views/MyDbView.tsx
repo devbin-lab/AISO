@@ -11,10 +11,12 @@ import type {
   MyDbNodeKind,
   MyDbRevision,
   MyDbSnapshot,
+  MyDbSyncResult,
   MyDbTextDiff,
   MyDbTrashSnapshot
 } from '../../../shared/mydb'
-import { CloseIcon, DownloadIcon, EditIcon, FileIcon, FolderIcon, GraphIcon, LinkIcon, SearchIcon, TrashIcon, UnlinkIcon } from '../components/icons'
+import { myDbSyncChangeCount } from '../../../shared/mydb'
+import { CloseIcon, DownloadIcon, EditIcon, FileIcon, FolderIcon, GraphIcon, LinkIcon, RefreshIcon, SearchIcon, TrashIcon, UnlinkIcon } from '../components/icons'
 import { confirmDialog } from '../components/ConfirmDialog'
 import { getMyDbBridge } from '../lib/mydb'
 import { buildMonth, countByDay, intensityOf, localDayKey, monthRange, monthsWithHistory, resolveReportDate, shiftMonth } from '../lib/history-calendar'
@@ -193,6 +195,23 @@ function formatReportDate(reportDate: string): string {
   if (Number.isNaN(at.getTime())) return reportDate
   const weekday = ['일', '월', '화', '수', '목', '금', '토'][at.getDay()]
   return `${at.getMonth() + 1}월 ${at.getDate()}일 (${weekday})`
+}
+
+/** 저장 폴더 스캔 결과를 한 줄로. 바뀐 것이 없으면 그렇다고 말해 준다. */
+export function syncResultMessage(result: MyDbSyncResult): string {
+  if (myDbSyncChangeCount(result) === 0) {
+    return result.skippedPaths.length > 0
+      ? `저장 폴더와 이미 같습니다. ${result.skippedPaths.length}개 항목은 등록할 수 없어 건너뛰었습니다.`
+      : '저장 폴더와 이미 같습니다.'
+  }
+  const parts = [
+    result.addedCores > 0 ? `새 코어 ${result.addedCores}개` : '',
+    result.addedFiles > 0 ? `새 파일 ${result.addedFiles}개` : '',
+    result.movedFiles > 0 ? `옮긴 파일 ${result.movedFiles}개` : '',
+    result.trashedFiles > 0 ? `사라진 파일 ${result.trashedFiles}개는 휴지통으로` : ''
+  ].filter(Boolean)
+  const skipped = result.skippedPaths.length > 0 ? ` ${result.skippedPaths.length}개는 건너뛰었습니다.` : ''
+  return `저장 폴더 반영: ${parts.join(', ')}.${skipped}`
 }
 
 function historyActionLabel(action: MyDbHistoryAction): string {
@@ -2405,6 +2424,36 @@ function MyDbView({ active, settings }: Props): React.JSX.Element {
     return bridge.onDailyReport(() => { void load() })
   }, [load])
 
+  // 탐색기로 저장 폴더를 바꾼 것을 메인이 반영했다 — 열어 둔 그래프가 옛 것이다.
+  useEffect(() => {
+    const bridge = window.api?.myDb
+    if (!bridge?.onDiskSynced) return
+    return bridge.onDiskSynced((result) => {
+      void (async () => {
+        if (result.trashedFiles > 0) setTrash(await getMyDbBridge().trash?.() ?? { nodes: [] })
+        await load()
+        setNotice(syncResultMessage(result))
+      })()
+    })
+  }, [load])
+
+  const syncFromDisk = useCallback(async (): Promise<void> => {
+    const bridge = getMyDbBridge()
+    if (!bridge.syncFromDisk) return
+    setLoading(true)
+    setError(null)
+    try {
+      const result = await bridge.syncFromDisk()
+      if (result.trashedFiles > 0) setTrash(await bridge.trash?.() ?? { nodes: [] })
+      await load()
+      setNotice(syncResultMessage(result))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '저장 폴더를 반영하지 못했습니다.')
+    } finally {
+      setLoading(false)
+    }
+  }, [load])
+
   // 자동 비우기가 항목을 지웠으면 열어 둔 휴지통이 이미 사라진 것을 보여 주고 있다.
   useEffect(() => {
     const bridge = window.api?.myDb
@@ -2856,6 +2905,9 @@ ${files > 0 ? '보관된 파일과 모든 버전 기록이 함께 사라지며 '
         <div className="mydb-toolbar__actions">
           <button type="button" className="mydb-toolbar-button" onClick={() => void runAction(() => getMyDbBridge().openFolder())} title="저장 폴더 열기" aria-label="저장 폴더 열기">
             <FolderIcon size={16} />
+          </button>
+          <button type="button" className="mydb-toolbar-button" onClick={() => void syncFromDisk()} disabled={loading} title="저장 폴더에서 직접 넣거나 지운 파일을 지금 반영" aria-label="저장 폴더 반영">
+            <RefreshIcon size={16} />
           </button>
           {mode === 'graph' && focusCore?.kind === 'core' && (
             <button type="button" className="mydb-toolbar-button" onClick={exportFocusedCore} title="하위 자료 다운로드" aria-label="포커스한 코어의 하위 자료 다운로드">

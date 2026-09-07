@@ -8,7 +8,8 @@
  */
 
 import { createHash, randomUUID } from 'crypto'
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmdirSync, unwatchFile, watchFile } from 'fs'
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, realpathSync, renameSync, rmdirSync, unwatchFile, watch, watchFile } from 'fs'
+import type { Dirent, FSWatcher } from 'fs'
 import { copyFile, lstat, mkdir, readFile, readdir, rename, rm, stat } from 'fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'path'
@@ -32,10 +33,12 @@ import type {
   MyDbRevision,
   MyDbRevisionReason,
   MyDbSnapshot,
+  MyDbSyncResult,
   MyDbTextDiff,
   MyDbTrashPurgeResult,
   MyDbTrashSnapshot
 } from '../shared/mydb.ts'
+import { myDbSyncChangeCount } from '../shared/mydb.ts'
 
 const LIBRARY_DATABASE_FILE = 'library.sqlite3'
 const LIBRARY_FILES_DIR = 'files'
@@ -55,6 +58,14 @@ const GRAPH_CHECKPOINT_LIMIT = 200
 // 항목당 리비전 보존 한도. 초기본(sequence=1)은 이 한도와 무관하게 항상 남긴다 —
 // "수정되면 어떻게 수정되었는지 기록이 남아서 복구할 수 있으면 좋겠다"는 요구사항의 최소선.
 const REVISION_KEEP_PER_ITEM = 30
+// 저장 폴더 → DB 조정. 탐색기 조작은 이벤트가 몰아서 오므로 잠시 모았다가 한 번만 훑는다.
+const RECONCILE_DEBOUNCE_MS = 1500
+// 방금 쓰인 파일은 아직 저장 중일 수 있다. 다음 스캔으로 미룬다.
+const RECONCILE_SETTLE_MS = 1000
+// 지우고 다시 쓰는 방식으로 저장하는 편집기는 파일이 잠깐 없다가 돌아온다.
+const RECONCILE_MISSING_GRACE_MS = 1200
+const TRANSIENT_FILE_NAMES = new Set(['thumbs.db', 'desktop.ini', '.ds_store'])
+const TRANSIENT_FILE_SUFFIXES = ['.tmp', '.temp', '.crdownload', '.part', '.partial', '.download', '.swp']
 
 const LEGACY_CORE_LINK_MIGRATION_KEY = 'legacy_core_links_to_contains_v1'
 
@@ -486,6 +497,39 @@ function buildTextDiff(beforeText: string, afterText: string): Pick<MyDbTextDiff
  * stream avoids holding a large binary file in memory. The size check avoids
  * recording a half-saved file while an external editor is still writing it.
  */
+/** 탐색기·편집기가 남기는 작업 파일은 자료가 아니다. */
+function isTransientFileName(name: string): boolean {
+  const lower = name.toLowerCase()
+  if (TRANSIENT_FILE_NAMES.has(lower)) return true
+  if (lower.startsWith('~$') || lower.startsWith('.~lock.')) return true
+  return TRANSIENT_FILE_SUFFIXES.some((suffix) => lower.endsWith(suffix))
+}
+
+/** 윈도우·맥 파일 시스템은 대소문자를 가리지 않는다. 폴더 이름 비교도 같아야 한다. */
+function directoryKey(absolutePath: string): string {
+  const resolved = resolve(absolutePath)
+  return process.platform === 'win32' || process.platform === 'darwin' ? resolved.toLowerCase() : resolved
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((done) => setTimeout(done, ms))
+}
+
+function emptySyncResult(): MyDbSyncResult {
+  return { addedCores: 0, addedFiles: 0, movedFiles: 0, trashedFiles: 0, skippedPaths: [] }
+}
+
+async function hashFile(path: string): Promise<{ hash: string; size: number }> {
+  const hash = createHash('sha256')
+  let size = 0
+  for await (const chunk of createReadStream(path)) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string)
+    hash.update(buffer)
+    size += buffer.byteLength
+  }
+  return { hash: hash.digest('hex'), size }
+}
+
 async function copyAndHashFile(source: string, destination: string, expectedSize: number): Promise<{ hash: string; size: number }> {
   const hash = createHash('sha256')
   let size = 0
@@ -521,6 +565,12 @@ export class MyDbStore {
   private readonly watchedPaths = new Map<string, string>()
   private readonly watchedSourcePaths = new Map<string, string>()
   private readonly pendingSourceChanges = new Map<string, ReturnType<typeof setTimeout>>()
+  private diskSyncEnabled = false
+  private directoryWatcher: FSWatcher | null = null
+  private reconcileTimer: ReturnType<typeof setTimeout> | null = null
+  private reconcileChain: Promise<MyDbSyncResult> | null = null
+  /** 가져오기처럼 "파일 먼저, 행은 나중" 순서로 쓰는 작업의 수. 0 이 아닐 때는 스캔을 미룬다. */
+  private libraryMutations = 0
   private closed = false
 
   constructor(root: string) {
@@ -542,6 +592,10 @@ export class MyDbStore {
 
   close(): void {
     this.closed = true
+    if (this.reconcileTimer) clearTimeout(this.reconcileTimer)
+    this.reconcileTimer = null
+    this.directoryWatcher?.close()
+    this.directoryWatcher = null
     for (const path of this.watchedPaths.values()) unwatchFile(path)
     this.watchedPaths.clear()
     for (const path of this.watchedSourcePaths.values()) unwatchFile(path)
@@ -819,6 +873,8 @@ export class MyDbStore {
 
     const source = this.resolveRevisionFile(revision.snapshot_relative_path)
     const destination = this.resolveLibraryFile(item.relative_path)
+    // 탐색기에서 폴더째 지운 파일을 버전에서 되살리는 경우다. 폴더부터 다시 만든다.
+    await mkdir(dirname(destination), { recursive: true })
     await copyFile(source, destination)
     const restored = await this.snapshotCurrentFile(item, 'restored', true)
     if (!restored) throw new Error('복원한 파일의 새 버전을 만들지 못했습니다.')
@@ -1087,41 +1143,50 @@ export class MyDbStore {
     for (const source of unique) await this.assertSafeImportSource(source)
 
     const result: MyDbImportResult = { createdNodes: [], createdEdges: [], skippedPaths: [] }
-    for (const source of unique) {
-      const sourceStat = await lstat(source)
-      if (sourceStat.isFile()) {
-        const created = await this.importFile(source, parentCoreId ?? null)
-        result.createdNodes.push(created.node)
-        if (created.edge) result.createdEdges.push(created.edge)
-      } else if (sourceStat.isDirectory()) {
-        await this.importFolder(source, parentCoreId ?? null, result)
-      } else {
-        result.skippedPaths.push(source)
+    this.libraryMutations += 1
+    try {
+      for (const source of unique) {
+        const sourceStat = await lstat(source)
+        if (sourceStat.isFile()) {
+          const created = await this.importFile(source, parentCoreId ?? null)
+          result.createdNodes.push(created.node)
+          if (created.edge) result.createdEdges.push(created.edge)
+        } else if (sourceStat.isDirectory()) {
+          await this.importFolder(source, parentCoreId ?? null, result)
+        } else {
+          result.skippedPaths.push(source)
+        }
       }
+    } finally {
+      this.libraryMutations -= 1
     }
-    if (result.createdNodes.length > 0) {
-      const coreCount = result.createdNodes.filter((node) => node.kind === 'core').length
-      const fileCount = result.createdNodes.filter((node) => node.kind === 'file').length
-      // 개수만 남기면 나중에 "무엇이 들어왔는지" 알 수 없다. 이름을 함께 적되,
-      // 대량 가져오기에서 detail 이 무한정 길어지지 않게 앞 5개까지만 남긴다.
-      // (전체 목록은 보고서의 [새로 생성된 코어와 파일] 절이 항상 보여 준다.)
-      const names = result.createdNodes.filter((node) => node.kind === 'file').map((node) => node.title)
-      // 한 개만 들어왔으면 subjectTitle 이 이미 그 이름이다 — 같은 이름을 두 번 적지 않는다.
-      const listed = names.length > 1 ? names : []
-      const shown = listed.slice(0, 5).join(', ')
-      const rest = listed.length > 5 ? ` 외 ${listed.length - 5}개` : ''
-      const detail = [
-        coreCount > 0 ? `코어 ${coreCount}개` : '',
-        fileCount > 0 ? `파일 ${fileCount}개` : '',
-        shown ? `${shown}${rest}` : ''
-      ].filter(Boolean).join(' · ')
-      this.recordHistory({
-        action: 'imported',
-        subjectTitle: result.createdNodes.length === 1 ? result.createdNodes[0]!.title : `${result.createdNodes.length}개 항목`,
-        detail
-      })
-    }
+    if (result.createdNodes.length > 0) this.recordImportSummary(result.createdNodes)
     return result
+  }
+
+  /** 가져오기 한 묶음을 이력 한 줄로 남긴다. 저장 폴더 스캔도 같은 모양을 쓴다. */
+  private recordImportSummary(createdNodes: readonly MyDbNode[], note?: string): void {
+    const coreCount = createdNodes.filter((node) => node.kind === 'core').length
+    const fileCount = createdNodes.filter((node) => node.kind === 'file').length
+    // 개수만 남기면 나중에 "무엇이 들어왔는지" 알 수 없다. 이름을 함께 적되,
+    // 대량 가져오기에서 detail 이 무한정 길어지지 않게 앞 5개까지만 남긴다.
+    // (전체 목록은 보고서의 [새로 생성된 코어와 파일] 절이 항상 보여 준다.)
+    const names = createdNodes.filter((node) => node.kind === 'file').map((node) => node.title)
+    // 한 개만 들어왔으면 subjectTitle 이 이미 그 이름이다 — 같은 이름을 두 번 적지 않는다.
+    const listed = names.length > 1 ? names : []
+    const shown = listed.slice(0, 5).join(', ')
+    const rest = listed.length > 5 ? ` 외 ${listed.length - 5}개` : ''
+    const detail = [
+      note ?? '',
+      coreCount > 0 ? `코어 ${coreCount}개` : '',
+      fileCount > 0 ? `파일 ${fileCount}개` : '',
+      shown ? `${shown}${rest}` : ''
+    ].filter(Boolean).join(' · ')
+    this.recordHistory({
+      action: 'imported',
+      subjectTitle: createdNodes.length === 1 ? createdNodes[0]!.title : `${createdNodes.length}개 항목`,
+      detail
+    })
   }
 
   /**
@@ -1998,6 +2063,357 @@ export class MyDbStore {
     this.startFileWatchers(items)
   }
 
+  // ---- 저장 폴더 → DB 조정 -------------------------------------------------
+  //
+  // 지금까지는 DB → 디스크 한 방향뿐이었다. 코어를 옮기면 파일이 따라갔지만,
+  // 탐색기로 저장 폴더에 파일을 넣거나 지워도 DB는 몰랐다. 아래는 그 반대 방향이다.
+  //  - 모르는 파일은 새 항목이 되고, 폴더 경로는 코어에 대응한다(없으면 코어를 만든다).
+  //  - 보관 파일이 사라졌으면 휴지통으로 보낸다. 완전 삭제는 여전히 사용자만 한다.
+  //  - 사라진 항목과 내용(해시·크기)이 같은 새 파일은 "옮긴 것"으로 보고 항목을 잇는다.
+  //    이렇게 해야 탐색기로 자리만 바꿔도 수정 이력이 끊기지 않는다.
+
+  /**
+   * 저장 폴더 감시와 시작 시 1회 스캔을 켠다. 메인 프로세스만 부른다.
+   *
+   * 생성자에서 켜지 않는 이유: 테스트는 저장소를 만든 채 파일을 직접 옮기며
+   * 마이그레이션을 검증하는데, 그 사이 스캔이 끼어들면 옮기는 중인 파일을
+   * "사라짐"으로 읽는다. 감시는 명시적으로 켠 저장소에서만 돈다.
+   */
+  enableDiskSync(): void {
+    if (this.closed || this.diskSyncEnabled) return
+    this.diskSyncEnabled = true
+    this.startDirectoryWatcher()
+    void this.revisionTrackingReady.then(() => this.queueReconcile(0))
+  }
+
+  private startDirectoryWatcher(): void {
+    try {
+      // 윈도우 libuv 는 감시 경로가 8.3 짧은 이름(DEVBIN~1 같은)이면 이벤트 경로와
+      // 앞부분이 안 맞는다며 프로세스를 통째로 죽인다(fs-event.c assert). 긴 이름으로 푼다.
+      let target = this.filesRoot
+      try {
+        target = realpathSync.native(this.filesRoot)
+      } catch {
+        // 실제 경로를 못 구하면 원래 경로로라도 시도한다.
+      }
+      const watcher = watch(target, { recursive: true, persistent: false }, () => this.queueReconcile())
+      watcher.on('error', (error) => {
+        // 감시가 죽어도 시작 시 스캔과 수동 동기화는 남는다. 기능이 아니라 즉시성만 잃는다.
+        console.warn('[mydb] 저장 폴더 감시가 멈췄습니다:', error)
+        watcher.close()
+        if (this.directoryWatcher === watcher) this.directoryWatcher = null
+      })
+      this.directoryWatcher = watcher
+    } catch (error) {
+      console.warn('[mydb] 저장 폴더 감시를 시작하지 못했습니다:', error)
+    }
+  }
+
+  private queueReconcile(delay = RECONCILE_DEBOUNCE_MS): void {
+    if (this.closed || !this.diskSyncEnabled) return
+    if (this.reconcileTimer) clearTimeout(this.reconcileTimer)
+    this.reconcileTimer = setTimeout(() => {
+      this.reconcileTimer = null
+      this.reconcileWithDisk()
+        .then((result) => {
+          if (myDbSyncChangeCount(result) > 0) notifyDiskSynced(result)
+        })
+        .catch((error) => {
+          if (!this.closed) console.warn('[mydb] 저장 폴더 반영 실패:', error)
+        })
+    }, delay)
+  }
+
+  /**
+   * 저장 폴더를 지금 훑어 DB와 맞춘다.
+   *
+   * 동시에 불리면 차례로 돈다. 스캔 둘이 겹치면 같은 새 파일을 둘 다 "모르는 파일"로
+   * 읽어 두 번 등록한다.
+   */
+  async reconcileWithDisk(): Promise<MyDbSyncResult> {
+    await this.revisionTrackingReady
+    const previous = this.reconcileChain ?? Promise.resolve()
+    const current = previous.catch(() => undefined).then(() => this.runReconcile())
+    this.reconcileChain = current
+    try {
+      return await current
+    } finally {
+      if (this.reconcileChain === current) this.reconcileChain = null
+    }
+  }
+
+  private async runReconcile(): Promise<MyDbSyncResult> {
+    const result = emptySyncResult()
+    if (this.closed) return result
+    if (this.libraryMutations > 0) {
+      // 가져오기는 파일을 먼저 복사하고 행은 나중에 넣는다. 그 틈에 훑으면 같은 파일이 두 번 등록된다.
+      this.queueReconcile()
+      return result
+    }
+    // 저장소 드라이브가 빠졌거나 폴더째 옮겨졌다면 "전부 사라짐"이지 "전부 지움"이 아니다.
+    if (!existsSync(this.filesRoot)) return result
+
+    const ownerByDirectory = this.buildCoreDirectoryIndex()
+    const items = this.allItems()
+    const knownPaths = new Set(items.map((item) => item.relative_path))
+    const liveItems = items.filter((item) => !item.deleted_at)
+    const missing = liveItems.filter((item) => !this.managedFileExists(item))
+    const addedNodes: MyDbNode[] = []
+    const discovered: Array<{ path: string; ownerId: string | null }> = []
+    const trashDirectory = directoryKey(join(this.filesRoot, LIBRARY_TRASH_DIR))
+
+    const visit = async (directory: string, ownerId: string | null): Promise<void> => {
+      let entries: Dirent[]
+      try {
+        entries = await readdir(directory, { withFileTypes: true })
+      } catch {
+        return
+      }
+      entries.sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }))
+      for (const entry of entries) {
+        if (this.closed) return
+        const path = join(directory, entry.name)
+        if (entry.isSymbolicLink()) {
+          result.skippedPaths.push(path)
+          continue
+        }
+        if (entry.isDirectory()) {
+          if (directoryKey(path) === trashDirectory) continue
+          if (directory === this.filesRoot && entry.name === LIBRARY_UNSORTED_DIR) {
+            await visit(path, null)
+            continue
+          }
+          let childOwner = ownerByDirectory.get(directoryKey(path)) ?? null
+          if (!childOwner) {
+            childOwner = this.createDiscoveredCore(entry.name, ownerId, result, addedNodes)
+            if (!childOwner) {
+              result.skippedPaths.push(path)
+              continue
+            }
+            ownerByDirectory.set(directoryKey(path), childOwner)
+          }
+          await visit(path, childOwner)
+          continue
+        }
+        if (!entry.isFile()) {
+          result.skippedPaths.push(path)
+          continue
+        }
+        if (isTransientFileName(entry.name)) continue
+        if (knownPaths.has(this.toLibraryRelative(path))) continue
+        discovered.push({ path, ownerId })
+      }
+    }
+    await visit(this.filesRoot, null)
+    if (this.closed) return result
+
+    let unsettled = false
+    for (const candidate of discovered) {
+      if (this.closed) return result
+      const outcome = await this.adoptDiscoveredFile(candidate.path, candidate.ownerId, missing, result, addedNodes)
+      if (outcome === 'unsettled') unsettled = true
+    }
+    if (addedNodes.length > 0) this.recordImportSummary(addedNodes, '저장 폴더에서 발견')
+
+    await this.trashMissingItems(missing, liveItems.length, discovered.length, result)
+
+    if (myDbSyncChangeCount(result) > 0) {
+      this.organizeManagedFilesByCore()
+      this.restartFileWatchers()
+    }
+    if (unsettled) this.queueReconcile(RECONCILE_SETTLE_MS)
+    return result
+  }
+
+  /** 살아 있는 코어마다 "지금 파일이 놓이는 폴더" → 코어 id. 먼저 만든 코어가 폴더를 갖는다. */
+  private buildCoreDirectoryIndex(): Map<string, string> {
+    const index = new Map<string, string>()
+    const cores = this.database.prepare(
+      'SELECT id FROM mydb_cores WHERE deleted_at IS NULL ORDER BY created_at ASC, id ASC'
+    ).all() as Array<{ id: string }>
+    for (const core of cores) {
+      const key = directoryKey(this.storageDirectoryForCore(core.id))
+      if (!index.has(key)) index.set(key, core.id)
+    }
+    return index
+  }
+
+  private allItems(): ItemRow[] {
+    return this.database.prepare(
+      `SELECT id, title, extension, file_type, tags_json, size, relative_path, source_path, created_at, updated_at, deleted_at
+       FROM mydb_items`
+    ).all() as unknown as ItemRow[]
+  }
+
+  private itemByRelativePath(relativePath: string): ItemRow | undefined {
+    return this.database.prepare(
+      `SELECT id, title, extension, file_type, tags_json, size, relative_path, source_path, created_at, updated_at, deleted_at
+       FROM mydb_items WHERE relative_path = ?`
+    ).get(relativePath) as unknown as ItemRow | undefined
+  }
+
+  /** 옛 배치의 경로는 판단하지 않는다 — 시작 시 마이그레이션이 다룬다. */
+  private managedFileExists(item: ItemRow): boolean {
+    try {
+      return existsSync(this.resolveLibraryFile(item.relative_path))
+    } catch {
+      return true
+    }
+  }
+
+  private createDiscoveredCore(
+    name: string,
+    parentId: string | null,
+    result: MyDbSyncResult,
+    addedNodes: MyDbNode[]
+  ): string | null {
+    try {
+      const created = this.createCoreWithOptionalParent(name, parentId)
+      result.addedCores += 1
+      addedNodes.push(created.node)
+      return created.node.id
+    } catch (error) {
+      console.warn('[mydb] 저장 폴더의 새 폴더를 코어로 만들지 못했습니다:', name, error)
+      return null
+    }
+  }
+
+  private async adoptDiscoveredFile(
+    path: string,
+    ownerId: string | null,
+    missing: ItemRow[],
+    result: MyDbSyncResult,
+    addedNodes: MyDbNode[]
+  ): Promise<'adopted' | 'skipped' | 'unsettled'> {
+    let stats: Awaited<ReturnType<typeof stat>>
+    try {
+      stats = await stat(path)
+    } catch {
+      return 'skipped' // 훑는 사이 사라졌다
+    }
+    if (!stats.isFile()) return 'skipped'
+    // 방금 쓰인 파일은 아직 저장 중일 수 있다. 다음 스캔이 다시 본다.
+    if (Date.now() - stats.mtimeMs < RECONCILE_SETTLE_MS) return 'unsettled'
+    const relativePath = this.toLibraryRelative(path)
+    if (this.itemByRelativePath(relativePath)) return 'skipped' // 훑는 사이 등록됐다
+    let fileName: string
+    try {
+      fileName = assertSafeFileName(basename(path))
+    } catch {
+      result.skippedPaths.push(path)
+      return 'skipped'
+    }
+
+    if (missing.length > 0) {
+      const { hash, size } = await hashFile(path)
+      const index = missing.findIndex((item) => {
+        const latest = this.listRevisions(item.id)[0]
+        return Boolean(latest && latest.content_hash === hash && Number(latest.size) === size)
+      })
+      if (index >= 0) {
+        const [item] = missing.splice(index, 1)
+        this.relocateDiscoveredFile(item!, relativePath, fileName, ownerId, size)
+        result.movedFiles += 1
+        return 'adopted'
+      }
+    }
+
+    const extension = extname(fileName).toLowerCase()
+    const id = randomUUID()
+    this.transaction(() => {
+      const createdAt = now()
+      this.database.prepare(
+        `INSERT INTO mydb_items
+         (id, title, extension, file_type, tags_json, size, relative_path, source_path, created_at, updated_at, deleted_at)
+         VALUES (?, ?, ?, ?, '[]', ?, ?, NULL, ?, ?, NULL)`
+      ).run(id, fileName, extension, detectFileType(extension), stats.size, relativePath, createdAt, createdAt)
+      if (ownerId) this.createEdge(ownerId, id, 'contains')
+    })
+    try {
+      const initial = await this.snapshotCurrentFile(this.requireItem(id, false), 'initial', true)
+      if (!initial) throw new Error('발견한 파일의 원본 버전을 만들지 못했습니다.')
+    } catch {
+      // 복사 도중 크기가 바뀌었다 — 아직 쓰는 중이다. 행을 물리고 다음 스캔에 맡긴다.
+      this.transaction(() => {
+        this.database.prepare('DELETE FROM mydb_edges WHERE source_id = ? OR target_id = ?').run(id, id)
+        this.database.prepare('DELETE FROM mydb_revisions WHERE item_id = ?').run(id)
+        this.database.prepare('DELETE FROM mydb_items WHERE id = ?').run(id)
+      })
+      await rm(join(this.revisionsRoot, id), { recursive: true, force: true }).catch(() => undefined)
+      return 'unsettled'
+    }
+    result.addedFiles += 1
+    addedNodes.push(this.requireNode(id, false))
+    return 'adopted'
+  }
+
+  /** 사라진 항목을 새 자리로 잇는다. 폴더가 다른 코어면 포함 관계도 따라간다. */
+  private relocateDiscoveredFile(
+    item: ItemRow,
+    relativePath: string,
+    fileName: string,
+    ownerId: string | null,
+    size: number
+  ): void {
+    const extension = extname(fileName).toLowerCase()
+    const previousOwner = this.storageOwnerCoreId(item.id)
+    this.transaction(() => {
+      this.database.prepare(
+        `UPDATE mydb_items
+         SET title = ?, extension = ?, file_type = ?, relative_path = ?, size = ?, updated_at = ?
+         WHERE id = ?`
+      ).run(fileName, extension, detectFileType(extension), relativePath, size, now(), item.id)
+      if (previousOwner !== ownerId) {
+        this.database.prepare(`DELETE FROM mydb_edges WHERE target_id = ? AND relation = 'contains'`).run(item.id)
+        if (ownerId) this.createEdge(ownerId, item.id, 'contains')
+      }
+      this.recordHistory({
+        action: 'renamed',
+        subject: this.requireNode(item.id, false),
+        detail: `저장 폴더에서 옮김 · 이전 위치: ${item.relative_path}`
+      })
+    })
+  }
+
+  private async trashMissingItems(
+    missing: ItemRow[],
+    liveCount: number,
+    discoveredCount: number,
+    result: MyDbSyncResult
+  ): Promise<void> {
+    if (missing.length === 0 || this.closed) return
+    // 아무것도 새로 안 보이는데 보관 파일이 전부 없다면 폴더째 옮겨졌거나 드라이브가
+    // 빠진 쪽이 훨씬 그럴듯하다. 한 번에 전부 휴지통으로 보내지 않는다.
+    if (missing.length === liveCount && liveCount >= 2 && discoveredCount === 0) {
+      console.warn('[mydb] 보관 파일이 전부 보이지 않아 휴지통 이동을 건너뜁니다.')
+      return
+    }
+    await sleep(RECONCILE_MISSING_GRACE_MS)
+    if (this.closed) return
+    const stillMissing = missing.filter((item) => {
+      const current = this.itemByRelativePath(item.relative_path)
+      return Boolean(current && current.id === item.id && !current.deleted_at) && !this.managedFileExists(item)
+    })
+    if (stillMissing.length === 0) return
+
+    const deletedAt = now()
+    this.transaction(() => {
+      for (const item of stillMissing) {
+        this.database.prepare('UPDATE mydb_items SET deleted_at = ?, updated_at = ? WHERE id = ?').run(deletedAt, deletedAt, item.id)
+      }
+      const names = stillMissing.map((item) => item.title)
+      const shown = names.length > 1 ? names.slice(0, 5).join(', ') : ''
+      const rest = names.length > 5 ? ` 외 ${names.length - 5}개` : ''
+      this.recordHistory({
+        action: 'moved_to_trash',
+        subject: stillMissing.length === 1 ? this.requireNode(stillMissing[0]!.id, true) : undefined,
+        subjectTitle: stillMissing.length === 1 ? undefined : `${stillMissing.length}개 파일`,
+        detail: ['저장 폴더에서 사라짐', shown ? `${shown}${rest}` : ''].filter(Boolean).join(' · ')
+      })
+    })
+    result.trashedFiles += stillMissing.length
+  }
+
   /**
    * Poll individual managed files rather than recursively watching the entire
    * library. This remains reliable for editors that use atomic replacement
@@ -2099,6 +2515,8 @@ export class MyDbStore {
   }
 
   private async captureChangedRevision(item: ItemRow, reason: MyDbRevisionReason): Promise<MyDbRevision | null> {
+    // 탐색기에서 지워진 파일은 지금 담을 내용이 없다. 남은 버전으로 되살릴 길은 열어 둔다.
+    if (!this.managedFileExists(item)) return null
     return this.withRevisionLock(item.id, async () => {
       const revision = await this.snapshotCurrentFileUnsafe(item, reason, false)
       if (!revision) return null
@@ -2349,14 +2767,44 @@ export class MyDbStore {
 }
 
 let configuredStore: MyDbStore | null = null
+const diskSyncListeners = new Set<(result: MyDbSyncResult) => void>()
+
+function notifyDiskSynced(result: MyDbSyncResult): void {
+  for (const listener of diskSyncListeners) {
+    try {
+      listener(result)
+    } catch (error) {
+      console.warn('[mydb] 저장 폴더 반영 알림 실패:', error)
+    }
+  }
+}
+
+/** 메인이 저장 폴더 변화를 스스로 반영했을 때(바뀐 것이 있을 때만) 알린다. */
+export function onMyDbDiskSynced(listener: (result: MyDbSyncResult) => void): () => void {
+  diskSyncListeners.add(listener)
+  return () => {
+    diskSyncListeners.delete(listener)
+  }
+}
 
 /** Configure the singleton from Electron's main-process startup path. */
-export function configureMyDbStorageRoot(root: string): MyDbStore {
+/**
+ * `syncWithDisk` 는 메인 프로세스가 켠다. 저장 폴더 감시와 시작 스캔이 붙는다.
+ * 테스트는 켜지 않는다 — 파일을 직접 옮기는 검증에 스캔이 끼어들면 안 된다.
+ */
+export function configureMyDbStorageRoot(root: string, options: { syncWithDisk?: boolean } = {}): MyDbStore {
   const resolved = resolve(root)
-  if (configuredStore?.root === resolved) return configuredStore
-  configuredStore?.close()
-  configuredStore = new MyDbStore(resolved)
+  if (configuredStore?.root !== resolved) {
+    configuredStore?.close()
+    configuredStore = new MyDbStore(resolved)
+  }
+  if (options.syncWithDisk) configuredStore.enableDiskSync()
   return configuredStore
+}
+
+/** 저장 폴더를 지금 훑는다. 사용자 전용 — 에이전트 브리지에는 없다. */
+export function myDbSyncFromDisk(): Promise<MyDbSyncResult> {
+  return getMyDbStore().reconcileWithDisk()
 }
 
 export function getMyDbStore(): MyDbStore {

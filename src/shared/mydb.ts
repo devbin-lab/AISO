@@ -177,6 +177,26 @@ export interface MyDbCoreExportResult {
   skippedFiles: number
 }
 
+/**
+ * 저장 폴더를 직접 훑어 DB와 맞춘 결과.
+ *
+ * 탐색기로 넣은 파일·폴더는 새 항목이 되고, 사라진 파일은 휴지통으로 가며,
+ * 내용이 같은 채로 자리만 바뀐 파일은 같은 항목으로 이어진다.
+ * 네 수가 모두 0 이면 아무것도 바뀌지 않은 것이고 화면은 조용히 지나간다.
+ */
+export interface MyDbSyncResult {
+  addedCores: number
+  addedFiles: number
+  movedFiles: number
+  trashedFiles: number
+  /** 등록할 수 없어 건너뛴 경로(바로가기, 이름 규칙 위반 등). */
+  skippedPaths: string[]
+}
+
+export function myDbSyncChangeCount(result: MyDbSyncResult): number {
+  return result.addedCores + result.addedFiles + result.movedFiles + result.trashedFiles
+}
+
 export interface MyDbDeleteOptions {
   /** Delete child cores and files that are only linked inside the child tree. */
   cascade?: boolean
@@ -236,6 +256,10 @@ export interface MyDbBridge {
   pickFolder?: (parentCoreId?: string | null) => Promise<MyDbImportResult>
   importDropped: (paths: string[], parentCoreId?: string | null) => Promise<MyDbImportResult>
   onDrop?: (callback: (event: MyDbDropEvent) => void) => () => void
+  /** 저장 폴더를 지금 훑어 탐색기로 넣거나 지운 것을 DB에 반영한다. */
+  syncFromDisk?: () => Promise<MyDbSyncResult>
+  /** 메인이 저장 폴더 변화를 스스로 반영했을 때 알린다. 바뀐 것이 없으면 오지 않는다. */
+  onDiskSynced?: (cb: (result: MyDbSyncResult) => void) => () => void
   openFolder: () => Promise<void>
   openFile?: (id: string) => Promise<void>
   showInFolder?: (id: string) => Promise<void>

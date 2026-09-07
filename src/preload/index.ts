@@ -30,7 +30,8 @@ import type { AttachmentDropEvent, AttachmentRef } from '../shared/attachments'
 import type {
   MyDbDropEvent,
   MyDbImportResult,
-  MyDbRelation
+  MyDbRelation,
+  MyDbSyncResult
 } from '../shared/mydb'
 import type {
   ComfyModelImportProgress,
@@ -267,6 +268,15 @@ const api = {
     onDrop: (callback: (event: MyDbDropEvent) => void): (() => void) => {
       myDbDropListeners.add(callback)
       return () => myDbDropListeners.delete(callback)
+    },
+    syncFromDisk: () => ipcRenderer.invoke('mydb:sync-from-disk'),
+    /** 메인이 저장 폴더 변화를 스스로 반영했을 때만 온다 — 열어 둔 그래프를 다시 읽게 한다. */
+    onDiskSynced: (cb: (result: MyDbSyncResult) => void): (() => void) => {
+      const listener = (_e: unknown, result: MyDbSyncResult): void => cb(result)
+      ipcRenderer.on('mydb:disk-synced', listener)
+      return () => {
+        ipcRenderer.removeListener('mydb:disk-synced', listener)
+      }
     },
     openFolder: () => ipcRenderer.invoke('mydb:open-folder'),
     openFile: (id: string) => ipcRenderer.invoke('mydb:open-file', id),
