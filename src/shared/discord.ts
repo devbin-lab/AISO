@@ -1,11 +1,27 @@
 // 디스코드 봇 상태 — 사이드카(discordbot.py)가 /discord/status로 돌려주는 런타임 상태.
 // 소유자·서버·채널·허용목록은 봇이 자동 판별/관리하므로 설정이 아니라 '상태'로 표시한다.
+/** 봇이 붙어 있는 서버 하나의 상태. */
+export interface DiscordGuildStatus {
+  guild_id: string
+  guild_name: string
+  /** 그 서버의 명령 채널. 비어 있으면 그 서버에서는 아직 대화할 수 없다. */
+  channel_id: string
+  allowlist: string[]
+}
+
 export interface DiscordStatus {
   running: boolean
   user?: string | null
   owner_id?: string
   app_id?: string
+  /**
+    * 붙어 있는 서버 전부. 봇은 여러 서버에서 동시에 동작하며, 서버마다 명령 채널과
+    * 허용목록을 따로 둔다 — 한 서버에서 허용한 사용자가 다른 서버를 조작할 수 없다.
+    */
+  guilds?: DiscordGuildStatus[]
+  /** 첫 서버의 값. 서버가 하나뿐인 화면·도구가 그대로 동작하도록 함께 싣는다. */
   guild_id?: string
+  guild_name?: string
   channel_id?: string
   allowlist?: string[]
   /**

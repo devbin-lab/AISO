@@ -194,20 +194,37 @@ def test_image_tool_sends_validated_comfy_output_to_discord(monkeypatch):
 
 # ── 동적 상태 영속(guild·channel·allowlist) ─────────────────────────────
 def test_state_save_load_roundtrip(tmp_path):
+    """서버별 상태가 그대로 오간다. 서버마다 명령 채널과 허용목록을 따로 들고 있어야 한다."""
     discordbot._S.data_dir = str(tmp_path)
-    discordbot._S.guild_id = "555"
-    discordbot._S.channel_id = "666"
-    discordbot._S.allowlist = {"222", "333"}
+    discordbot._S.guilds = {
+        "555": discordbot.GuildState(name="A팀", channel_id="666", allowlist={"222", "333"}),
+        "777": discordbot.GuildState(name="B팀", channel_id="888", allowlist={"999"}),
+    }
     discordbot._save_state()
 
-    # 상태를 비우고 다시 로드하면 복원돼야 한다
-    discordbot._S.guild_id = ""
-    discordbot._S.channel_id = ""
-    discordbot._S.allowlist = set()
+    discordbot._S.guilds = {}
     discordbot._load_state()
-    assert discordbot._S.guild_id == "555"
-    assert discordbot._S.channel_id == "666"
-    assert discordbot._S.allowlist == {"222", "333"}
+    assert set(discordbot._S.guilds) == {"555", "777"}
+    assert discordbot._S.guilds["555"].name == "A팀"
+    assert discordbot._S.guilds["555"].channel_id == "666"
+    assert discordbot._S.guilds["555"].allowlist == {"222", "333"}
+    assert discordbot._S.guilds["777"].allowlist == {"999"}, "서버끼리 허용목록이 섞이면 안 된다"
+
+
+def test_state_load_migrates_the_old_single_server_file(tmp_path):
+    """옛 파일을 버리면 사용자가 만들어 둔 명령 채널과 허용목록을 잃는다."""
+    import json
+
+    (tmp_path / discordbot.STATE_FILE).write_text(
+        json.dumps({"guild_id": "555", "channel_id": "666", "allowlist": ["222"]}),
+        encoding="utf-8",
+    )
+    discordbot._S.data_dir = str(tmp_path)
+    discordbot._S.guilds = {}
+    discordbot._load_state()
+    assert set(discordbot._S.guilds) == {"555"}
+    assert discordbot._S.guilds["555"].channel_id == "666"
+    assert discordbot._S.guilds["555"].allowlist == {"222"}
 
 
 def test_state_load_missing_is_noop(tmp_path):

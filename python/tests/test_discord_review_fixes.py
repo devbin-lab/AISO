@@ -172,6 +172,7 @@ def test_lock_overwrites_includes_allowlist(monkeypatch):
             self.id = mid
 
     class FakeGuild:
+        id = 42
         default_role = "everyone"
         me = "botself"
         owner = None
@@ -184,11 +185,43 @@ def test_lock_overwrites_includes_allowlist(monkeypatch):
             return FakeMember(uid)
 
     discordbot._S.owner_id = "1"
-    discordbot._S.allowlist = {"555", "666"}
+    # 허용목록은 이제 서버마다 따로다. FakeGuild 의 id 로 그 서버의 목록을 채운다.
+    discordbot._S.guilds = {"42": discordbot.GuildState(allowlist={"555", "666"})}
     ow = asyncio.run(discordbot._lock_overwrites(FakeGuild()))
     ids = {k.id if isinstance(k, FakeMember) else k for k in ow.keys()}
     assert 555 in ids and 666 in ids  # 허용목록 멤버가 view 권한 키로 포함됨
-    discordbot._S.allowlist = set()  # 다른 테스트 오염 방지
+    discordbot._S.guilds = {}  # 다른 테스트 오염 방지
+
+
+def test_lock_overwrites_uses_only_that_servers_allowlist():
+    """A 서버에서 허용한 사람이 B 서버의 명령 채널을 보면 안 된다."""
+    class FakeMember:
+        def __init__(self, mid):
+            self.id = mid
+
+    class FakeGuild:
+        id = 42
+        default_role = "everyone"
+        me = "botself"
+        owner = None
+        owner_id = 0
+
+        def get_member(self, uid):
+            return FakeMember(uid)
+
+        async def fetch_member(self, uid):
+            return FakeMember(uid)
+
+    discordbot._S.owner_id = "1"
+    discordbot._S.guilds = {
+        "42": discordbot.GuildState(allowlist={"555"}),
+        "99": discordbot.GuildState(allowlist={"666"}),
+    }
+    ow = asyncio.run(discordbot._lock_overwrites(FakeGuild()))
+    ids = {k.id if isinstance(k, FakeMember) else k for k in ow.keys()}
+    assert 555 in ids
+    assert 666 not in ids, "다른 서버의 허용 사용자가 새어 들어오면 안 된다"
+    discordbot._S.guilds = {}
 
 
 def test_discord_step_other_400_does_not_loop(monkeypatch):
@@ -253,6 +286,7 @@ def test_lock_overwrites_uses_fetch_when_cache_empty(monkeypatch):
 
     class FakeGuild:
         def __init__(self):
+            self.id = 42
             self.default_role = "everyone"
             self.me = "botself"
             self.owner = None

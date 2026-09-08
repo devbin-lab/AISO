@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import io
 import json
@@ -42,6 +43,9 @@ ImageFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 DISCORD_MSG_LIMIT = 2000       # 디스코드 단일 메시지 길이 상한
 HISTORY_TURNS = 12             # 채널별 최근 대화 유지(간단한 문맥)
 COMMAND_CHANNEL = "aiso"       # 자동 생성할 명령 채널 이름
+# 동시에 붙을 수 있는 서버 수 상한. 서버마다 명령 채널·허용목록·대화 문맥을 들고 있으므로
+# 무제한이면 메모리와 API 호출이 함께 늘어난다. 개인용 봇에 필요한 수를 넉넉히 잡았다.
+MAX_GUILDS = 10
 STATE_FILE = "state.json"      # data_dir 안에 봇 동적 상태 영속
 MAX_TOOL_TURNS = 6             # 서버 구성 루프의 생성 턴 상한(폭주 방지)
 APPROVAL_TIMEOUT_S = 120       # 서버 구성 승인 버튼 대기 시간(초) — 지나면 자동 취소
@@ -172,6 +176,10 @@ def _tools_prompt(image_enabled: bool = False, response_language: str = "ko") ->
         "Register a recurring channel-conversation report with "
         "discord_channel_report_add(channels, report_channel, interval_hours, instruction). Summarize only new "
         "messages posted after registration, and never include a successfully reported message again.\n\n"
+        "Register a recurring git repository report with "
+        "discord_repo_report_add(repo_path, branch, report_channel, interval_hours, instruction). Use the folder "
+        "path the user gave, verbatim - never invent or complete a path. Only commits made after registration "
+        "are reported, and commit content is limited to messages and file/line counts.\n\n"
         + image_guide
         + discordops.DESIGN_GUIDE + "\n\n"
         + "Every ops entry MUST use exactly these field names (aliases such as op, parent, and type are not accepted): "
@@ -204,6 +212,22 @@ def is_authorized(owner_id: str, command_channel_id: str, allowlist, author_id, 
     return str(author_id) == owner or str(author_id) in allow
 
 
+class GuildState:
+    """봇이 붙어 있는 서버 하나의 상태.
+
+    명령 채널과 허용목록이 서버마다 따로 있어야 한다. 하나로 합치면 A 서버에서 허용한
+    사용자가 B 서버의 명령 채널에서도 말을 걸 수 있다 — 서버는 서로 남이다.
+    """
+
+    def __init__(self, name: str = "", channel_id: str = "", allowlist: "set[str] | None" = None) -> None:
+        self.name = name
+        self.channel_id = channel_id
+        self.allowlist: set[str] = set(allowlist or ())
+
+    def to_json(self) -> dict:
+        return {"name": self.name, "channel_id": self.channel_id, "allowlist": sorted(self.allowlist)}
+
+
 class _State:
     def __init__(self) -> None:
         self.client: "discord.Client | None" = None
@@ -224,12 +248,12 @@ class _State:
         # 런타임에 자동 판별/관리되는 동적 상태
         self.owner_id: str = ""          # application_info 제작자
         self.app_id: str = ""            # 봇 애플리케이션 ID(=봇 user id) — 초대 링크 생성용
-        self.guild_id: str = ""          # 고정된 단일 서버
-        self.channel_id: str = ""        # 자동 생성 명령 채널
-        self.allowlist: set[str] = set() # 슬래시로 동적 관리
-        # 슬래시 커맨드를 **어느 길드에** 올렸는지. 불리언이면 서버를 옮겼을 때
-        # "이미 했다"로 읽혀 새 서버에는 /allow 가 하나도 뜨지 않는다.
-        self.synced_guild_id: str = ""
+        # 서버마다 따로 관리한다. 예전에는 봇이 한 서버에만 붙을 수 있어 값이 하나씩이었고,
+        # 두 번째 초대는 그냥 퇴장시켰다. 서버끼리 명령 채널·허용목록이 섞이면 한쪽 서버의
+        # 사용자가 다른 서버를 조작할 수 있으므로, 격리는 기능이 아니라 안전 요건이다.
+        self.guilds: "dict[str, GuildState]" = {}
+        # 슬래시 커맨드를 올린 길드들. 서버마다 한 번씩 올려야 /allow 가 뜬다.
+        self.synced_guilds: set[str] = set()
         self.history: "dict[int, deque]" = defaultdict(lambda: deque(maxlen=HISTORY_TURNS))
         self.gen_lock = asyncio.Lock()
         self.last_error: str | None = None
@@ -250,9 +274,21 @@ def status() -> dict:
         "user": user,
         "owner_id": _S.owner_id,
         "app_id": _S.app_id,
-        "guild_id": _S.guild_id,
-        "channel_id": _S.channel_id,
-        "allowlist": sorted(_S.allowlist),
+        # 붙어 있는 서버 전부. 첫 서버의 값을 guild_id/channel_id 로도 실어 두어
+        # 서버가 하나뿐인 기존 화면·도구가 그대로 동작한다.
+        "guilds": [
+            {
+                "guild_id": gid,
+                "guild_name": g.name,
+                "channel_id": g.channel_id,
+                "allowlist": sorted(g.allowlist),
+            }
+            for gid, g in _S.guilds.items()
+        ],
+        "guild_id": next(iter(_S.guilds), ""),
+        "guild_name": next((g.name for g in _S.guilds.values()), ""),
+        "channel_id": next((g.channel_id for g in _S.guilds.values()), ""),
+        "allowlist": sorted({uid for g in _S.guilds.values() for uid in g.allowlist}),
         "provider": _S.provider,
         "model": _S.model,
         "attachment_images": _S.allow_attachment_images,
@@ -261,16 +297,47 @@ def status() -> dict:
     }
 
 
-def bound_guild():
-    """고정된 단일 서버의 라이브 길드 객체 — 없으면 None. (discordops가 서버 구성에 사용)"""
-    if not is_running() or not _S.guild_id.isdigit():
+# 지금 처리 중인 요청이 어느 서버에서 왔는지. 도구 실행 경로가 여기서 대상을 읽는다.
+#
+# contextvar 를 쓰는 이유: 메시지 처리는 서버마다 동시에 돌 수 있어서, 전역 변수 하나에
+# 담으면 A 서버의 요청이 B 서버를 건드릴 수 있다. contextvar 는 async 작업마다 따로 산다.
+_CURRENT_GUILD: "contextvars.ContextVar[str]" = contextvars.ContextVar("aiso_discord_guild", default="")
+
+
+def guild_state(guild_id: str) -> "GuildState":
+    """서버 상태를 얻는다. 없으면 만들어 둔다 — 조회가 곧 등록이 되지 않게 저장은 호출부가 한다."""
+    key = str(guild_id)
+    state = _S.guilds.get(key)
+    if state is None:
+        state = GuildState()
+        _S.guilds[key] = state
+    return state
+
+
+def current_guild_id() -> str:
+    """처리 중인 요청의 서버. 지정되지 않았고 서버가 하나뿐이면 그 서버로 본다."""
+    explicit = _CURRENT_GUILD.get()
+    if explicit:
+        return explicit
+    return next(iter(_S.guilds), "") if len(_S.guilds) == 1 else ""
+
+
+def bound_guild(guild_id: str = ""):
+    """라이브 길드 객체 — 없으면 None. (discordops 가 서버 구성에 사용)
+
+    인자가 없으면 지금 처리 중인 요청의 서버를 쓴다. 서버가 여럿인데 문맥이 없으면
+    None 을 준다 — 아무 서버나 골라 조작하는 것이 가장 나쁜 실패다.
+    """
+    target = str(guild_id) or current_guild_id()
+    if not is_running() or not target.isdigit():
         return None
-    assert _S.client is not None  # is_running()이 곧 client 존재 검사다(236~237행)
-    return _S.client.get_guild(int(_S.guild_id))
+    assert _S.client is not None  # is_running()이 곧 client 존재 검사다
+    return _S.client.get_guild(int(target))
 
 
-def command_channel_id() -> str:
-    return _S.channel_id
+def command_channel_id(guild_id: str = "") -> str:
+    target = str(guild_id) or current_guild_id()
+    return _S.guilds[target].channel_id if target in _S.guilds else ""
 
 
 # ── 동적 상태 영속(guild·channel·allowlist) ─────────────────────────────
@@ -286,9 +353,26 @@ def _load_state() -> None:
         return
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
-        _S.guild_id = str(d.get("guild_id") or "")
-        _S.channel_id = str(d.get("channel_id") or "")
-        _S.allowlist = {str(x) for x in (d.get("allowlist") or [])}
+        raw = d.get("guilds")
+        if isinstance(raw, dict):
+            _S.guilds = {
+                str(gid): GuildState(
+                    name=str((entry or {}).get("name") or ""),
+                    channel_id=str((entry or {}).get("channel_id") or ""),
+                    allowlist={str(x) for x in ((entry or {}).get("allowlist") or [])},
+                )
+                for gid, entry in raw.items()
+                if str(gid).isdigit()
+            }
+            return
+        # 옛 단일 서버 파일을 옮겨 온다. 그냥 무시하면 사용자가 이미 만들어 둔 명령 채널과
+        # 허용목록을 잃고, 봇이 채널을 새로 만들어 예전 대화 통로가 끊긴다.
+        legacy_guild = str(d.get("guild_id") or "")
+        if legacy_guild.isdigit():
+            _S.guilds = {legacy_guild: GuildState(
+                channel_id=str(d.get("channel_id") or ""),
+                allowlist={str(x) for x in (d.get("allowlist") or [])},
+            )}
     except (ValueError, OSError):
         pass
 
@@ -301,7 +385,7 @@ def _save_state() -> None:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(
             json.dumps(
-                {"guild_id": _S.guild_id, "channel_id": _S.channel_id, "allowlist": sorted(_S.allowlist)},
+                {"guilds": {gid: g.to_json() for gid, g in _S.guilds.items()}},
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -354,19 +438,23 @@ async def _lock_overwrites(guild: "discord.Guild") -> dict:
     guild_owner = guild.owner or await _resolve_member(guild, str(guild.owner_id or ""))
     if guild_owner is not None:
         ow[guild_owner] = view_send
-    for uid in list(_S.allowlist):
+    # 그 서버의 허용목록만 쓴다. 전체를 쓰면 A 서버에서 허용한 사람이 B 서버의 명령
+    # 채널까지 볼 수 있다 — 서버는 서로 남이다.
+    for uid in list(guild_state(str(guild.id)).allowlist):
         m = await _resolve_member(guild, uid)
         if m is not None:
             ow[m] = view_send
     return ow
 
 
-async def _refresh_command_overwrites() -> None:
+async def _refresh_command_overwrites(guild_id: str = "") -> None:
     """허용목록이 바뀌면 명령 채널 권한을 다시 적용해 새 허용자가 채널을 볼 수 있게 한다."""
-    guild = bound_guild()
-    if guild is None or not _S.channel_id.isdigit():
+    target = str(guild_id) or current_guild_id()
+    guild = bound_guild(target)
+    state = _S.guilds.get(target)
+    if guild is None or state is None or not state.channel_id.isdigit():
         return
-    ch = guild.get_channel(int(_S.channel_id))
+    ch = guild.get_channel(int(state.channel_id))
     if ch is None:
         return
     try:
@@ -376,10 +464,11 @@ async def _refresh_command_overwrites() -> None:
 
 
 async def _ensure_command_channel(guild: "discord.Guild") -> None:
-    """소유자+봇만 보이는 잠금 명령 채널을 확보한다(있으면 재사용, 없으면 생성)."""
+    """소유자+봇만 보이는 잠금 명령 채널을 서버마다 확보한다(있으면 재사용, 없으면 생성)."""
+    state = guild_state(str(guild.id))
     # 저장된 채널이 아직 유효하면 그대로 사용(우리가 만든 잠금 채널로 신뢰)
-    if _S.channel_id:
-        existing = guild.get_channel(int(_S.channel_id)) if _S.channel_id.isdigit() else None
+    if state.channel_id:
+        existing = guild.get_channel(int(state.channel_id)) if state.channel_id.isdigit() else None
         if existing is not None:
             return
     # 같은 이름의 채널이 이미 있으면 채택 — 단, 남이 만든 공개 채널일 수 있으므로 반드시 잠금을
@@ -394,7 +483,7 @@ async def _ensure_command_channel(guild: "discord.Guild") -> None:
             except Exception as e:  # noqa: BLE001
                 _S.last_error = f"명령 채널 잠금 실패: {e}"
                 return
-            _S.channel_id = str(ch.id)
+            state.channel_id = str(ch.id)
             _save_state()
             return
     # 없으면 잠금 채널 생성 — @everyone 숨김, 봇·소유자·서버주인만 열람
@@ -402,7 +491,7 @@ async def _ensure_command_channel(guild: "discord.Guild") -> None:
         ch = await guild.create_text_channel(
             COMMAND_CHANNEL, overwrites=await _lock_overwrites(guild), reason="Aiso 명령 채널 자동 생성"
         )
-        _S.channel_id = str(ch.id)
+        state.channel_id = str(ch.id)
         _save_state()
         await ch.send(
             "👋 Aiso 봇이 연결되었습니다. 이 채널에서 말을 걸면 로컬 모델이 답합니다. "
@@ -419,22 +508,19 @@ async def _ensure_command_channel(guild: "discord.Guild") -> None:
 
 async def _bind_guild(guild: "discord.Guild") -> None:
     """단일 서버로 고정하고 명령 채널을 확보한 뒤 슬래시 커맨드를 동기화한다."""
-    # 서버를 옮겼으면 옛 서버의 채널 기록은 버린다. 남겨 두면 _ensure_command_channel 이
-    # 그 id 를 먼저 조회하는데, 스노플레이크는 서버를 가리지 않으므로 "있다"고 오판할 여지가
-    # 생기고, 그 순간 새 서버에는 채널이 없는 채로 대화가 영원히 막힌다.
-    if _S.guild_id != str(guild.id):
-        _S.channel_id = ""
-    _S.guild_id = str(guild.id)
+    key = str(guild.id)
+    state = guild_state(key)
+    state.name = str(getattr(guild, "name", "") or "")
     _save_state()
     await _ensure_command_channel(guild)
-    if _S.tree is not None and _S.synced_guild_id != str(guild.id):
+    if _S.tree is not None and key not in _S.synced_guilds:
         try:
             # 명령은 전역(guild 인자 없이)으로 등록돼 있다. 길드 sync에 포함되려면 먼저 전역 명령을
             # 이 길드로 복사해야 한다 — 안 하면 빈 배열이 올라가 /allow가 하나도 안 뜬다.
             guild_obj = discord.Object(id=guild.id)
             _S.tree.copy_global_to(guild=guild_obj)
             await _S.tree.sync(guild=guild_obj)
-            _S.synced_guild_id = str(guild.id)
+            _S.synced_guilds.add(key)
         except Exception as e:  # noqa: BLE001
             print(f"[discord] 슬래시 동기화 실패: {e}")
 
@@ -511,7 +597,7 @@ async def _apply_with_approval(channel, ops) -> str:
     guild = bound_guild()
     if guild is None:
         return "[불가] 서버 정보를 찾을 수 없습니다(봇 재연결 필요)."
-    snap = discordops.snapshot_guild(guild, _S.channel_id)
+    snap = discordops.snapshot_guild(guild, command_channel_id(str(guild.id)))
     clean, skipped, error_msg = discordops.prepare_ops(ops, snap)  # 보호대상 분리 + 검증(server_apply와 공유)
     if error_msg:
         return error_msg
@@ -599,6 +685,56 @@ async def _channel_report_add_with_approval(channel, args: dict) -> str:
     return discordsched.render_channel_report_registered(discordsched.commit_job(draft), meta)
 
 
+async def _repo_report_add_with_approval(channel, args: dict) -> str:
+    """저장소 보고 등록 — 선검증 → 미리보기 → 소유자 승인 → 등록.
+
+    저장소가 실제로 열리는지, 어느 커밋을 기준으로 삼을지까지 **승인 전에** 확인한다.
+    승인 화면에 경로와 브랜치와 기준 커밋이 그대로 보이므로, 사용자는 무엇을 허락하는지
+    알고 누른다. 등록 후에는 그 경로가 고정되어 모델이 바꿀 수 없다.
+    """
+    import discordops  # noqa: PLC0415
+    import discordsched  # noqa: PLC0415
+    import gitreport  # noqa: PLC0415
+
+    got, err = discordops.resolve_text_channel(str(args.get("report_channel") or ""))
+    if err:
+        return f"[거부] {err}"
+    assert got is not None
+    ch_id, ch_name = got
+    repo_path = str(args.get("repo_path") or "")
+    branch = str(args.get("branch") or "HEAD")
+    try:
+        baseline = await gitreport.collect(repo_path, branch, "", fetch=False)
+    except gitreport.GitReportError as error:
+        return f"[거부] {error}"
+    draft, derr = discordsched.build_repo_report_job(
+        repo_path=repo_path,
+        branch=branch,
+        report_channel_id=ch_id,
+        report_channel_name=ch_name,
+        interval_hours=args.get("interval_hours"),
+        instruction=str(args.get("instruction") or ""),
+        head=baseline.head,
+    )
+    if derr:
+        return f"[거부] {derr}"
+    assert draft is not None
+    preview = (
+        "저장소 변경 보고를 등록합니다.\n"
+        f"· 저장소: {draft['repo_path']}\n"
+        f"· 브랜치: {draft['branch']} (현재 {baseline.head})\n"
+        f"· 보고 채널: #{ch_name}\n"
+        f"· 주기: {draft['interval_hours']}시간마다\n"
+        f"· 첫 보고: {draft['next_run']}\n"
+        + (f"· 지시: {draft['text']}\n" if draft["text"] else "")
+        + "\n등록 이후의 새 커밋만 보고합니다. 커밋 메시지와 파일·줄 수를 보내며 "
+        "코드 본문은 보내지 않습니다."
+    )
+    if not await _ask_owner_approval(channel, preview):
+        return _REJECTED
+    return "저장소 보고가 등록되었습니다.\n" + discordsched.render_job(discordsched.commit_job(draft))
+
+
 async def _run_bot_tool(channel, author_id: str, name: str, args: dict) -> str:
     import discordops  # noqa: PLC0415
     import discordsched  # noqa: PLC0415
@@ -613,6 +749,8 @@ async def _run_bot_tool(channel, author_id: str, name: str, args: dict) -> str:
         return await _schedule_add_with_approval(channel, args)
     if name == "discord_channel_report_add":
         return await _channel_report_add_with_approval(channel, args)
+    if name == "discord_repo_report_add":
+        return await _repo_report_add_with_approval(channel, args)
     if name == "discord_schedule_list":
         return await discordsched.schedule_list()
     if name == "discord_schedule_remove":
@@ -661,6 +799,7 @@ async def _tool_chat(channel, author_id: str, convo: list) -> str:
         discordops.MAP_SCHEMA, discordops.APPLY_SCHEMA, discordops.SEND_SCHEMA,
         discordsched.SCHEDULE_ADD_SCHEMA, discordsched.SCHEDULE_LIST_SCHEMA,
         discordsched.SCHEDULE_REMOVE_SCHEMA, discordsched.CHANNEL_REPORT_ADD_SCHEMA,
+        discordsched.REPO_REPORT_ADD_SCHEMA,
     ]
     if _S.image is not None:
         from comfy_generation import GENERATE_IMAGE_SCHEMA  # noqa: PLC0415
@@ -747,16 +886,28 @@ def _build_client(generate: GenerateFn) -> "discord.Client":
     def _owner_only(interaction: "discord.Interaction") -> bool:
         return bool(_S.owner_id) and str(interaction.user.id) == _S.owner_id
 
+    def _interaction_guild(interaction: "discord.Interaction") -> str:
+        """슬래시 명령이 실행된 서버. DM 에서는 빈 문자열이라 아래에서 거절한다."""
+        guild = getattr(interaction, "guild", None)
+        return str(guild.id) if guild is not None else ""
+
     @allow.command(name="add", description="허용 사용자를 추가합니다")
     @app_commands.describe(user="추가할 사용자")
     async def allow_add(interaction: "discord.Interaction", user: "discord.User") -> None:
         if not _owner_only(interaction):
             await interaction.response.send_message("소유자만 사용할 수 있습니다.", ephemeral=True)
             return
-        _S.allowlist.add(str(user.id))
+        gid = _interaction_guild(interaction)
+        if not gid:
+            await interaction.response.send_message("서버 안에서 사용해 주세요.", ephemeral=True)
+            return
+        # 이 서버에만 허용한다. 전체에 더하면 여기서 허용한 사람이 다른 서버까지 조작한다.
+        guild_state(gid).allowlist.add(str(user.id))
         _save_state()
-        await _refresh_command_overwrites()  # 새 허용자가 #aiso 채널을 볼 수 있게 권한 갱신
-        await interaction.response.send_message(f"✅ 허용 추가: {user} (`{user.id}`)", ephemeral=True)
+        await _refresh_command_overwrites(gid)  # 새 허용자가 #aiso 채널을 볼 수 있게 권한 갱신
+        await interaction.response.send_message(
+            f"✅ 이 서버에 허용 추가: {user} (`{user.id}`)", ephemeral=True
+        )
 
     @allow.command(name="remove", description="허용 사용자를 제거합니다")
     @app_commands.describe(user="제거할 사용자")
@@ -764,19 +915,29 @@ def _build_client(generate: GenerateFn) -> "discord.Client":
         if not _owner_only(interaction):
             await interaction.response.send_message("소유자만 사용할 수 있습니다.", ephemeral=True)
             return
-        _S.allowlist.discard(str(user.id))
+        gid = _interaction_guild(interaction)
+        if not gid:
+            await interaction.response.send_message("서버 안에서 사용해 주세요.", ephemeral=True)
+            return
+        guild_state(gid).allowlist.discard(str(user.id))
         _save_state()
-        await _refresh_command_overwrites()  # 제거된 사용자의 채널 접근 회수
-        await interaction.response.send_message(f"🗑 허용 제거: {user} (`{user.id}`)", ephemeral=True)
+        await _refresh_command_overwrites(gid)  # 제거된 사용자의 채널 접근 회수
+        await interaction.response.send_message(
+            f"🗑 이 서버에서 허용 제거: {user} (`{user.id}`)", ephemeral=True
+        )
 
     @allow.command(name="list", description="허용 사용자 목록을 봅니다")
     async def allow_list(interaction: "discord.Interaction") -> None:
         if not _owner_only(interaction):
             await interaction.response.send_message("소유자만 사용할 수 있습니다.", ephemeral=True)
             return
-        ids = sorted(_S.allowlist)
+        gid = _interaction_guild(interaction)
+        if not gid:
+            await interaction.response.send_message("서버 안에서 사용해 주세요.", ephemeral=True)
+            return
+        ids = sorted(guild_state(gid).allowlist)
         body = "\n".join(f"• <@{i}> (`{i}`)" for i in ids) if ids else "(없음)"
-        await interaction.response.send_message(f"허용 사용자:\n{body}", ephemeral=True)
+        await interaction.response.send_message(f"이 서버의 허용 사용자:\n{body}", ephemeral=True)
 
     tree.add_command(allow)
 
@@ -794,40 +955,36 @@ def _build_client(generate: GenerateFn) -> "discord.Client":
         if client.user is not None:
             _S.app_id = str(client.user.id)  # 봇 user id = 애플리케이션 id (초대 링크용)
         print(f"[discord] 로그인: {client.user} · 소유자 {_S.owner_id}")
-        # 이미 서버에 들어가 있으면(재시작 등) 첫 서버로 고정·명령채널 확보
+        # 들어가 있는 **모든** 서버에 붙는다. 예전에는 하나만 남기고 나머지를 퇴장시켰다.
         guilds = list(client.guilds)
-        if guilds:
-            keep = None
-            if _S.guild_id:
-                keep = discord.utils.get(guilds, id=int(_S.guild_id)) if _S.guild_id.isdigit() else None
-            keep = keep or guilds[0]
-            for g in guilds:
-                if g.id != keep.id:
-                    try:
-                        await g.leave()  # 단일 서버 초과분 퇴장
-                    except Exception:  # noqa: BLE001
-                        pass
-            await _bind_guild(keep)
+        # 더는 속하지 않는 서버의 기록은 버린다 — 남겨 두면 화면이 없는 서버를 보여 준다.
+        live = {str(g.id) for g in guilds}
+        for gone in [gid for gid in _S.guilds if gid not in live]:
+            _S.guilds.pop(gone, None)
+            _S.synced_guilds.discard(gone)
+        if len(guilds) > MAX_GUILDS:
+            _S.last_error = (
+                f"서버 {len(guilds)}개에 초대되어 있습니다. 앞의 {MAX_GUILDS}개만 사용합니다."
+            )
+            guilds = guilds[:MAX_GUILDS]
+        for guild in guilds:
+            try:
+                await _bind_guild(guild)
+            except Exception as error:  # noqa: BLE001 — 한 서버의 실패가 나머지를 막지 않는다
+                print(f"[discord] 서버 연결 실패({guild.id}): {error}")
+        _save_state()
 
     @client.event
     async def on_guild_join(guild: "discord.Guild") -> None:
-        # 최대 1개 서버 — 다만 **아직 그 서버에 남아 있을 때만** 새 초대를 거절한다.
-        #
-        # 예전에는 기록된 guild_id 가 다르기만 하면 무조건 퇴장했다. 그래서 봇을 옛 서버에서
-        # 내보낸 뒤 새 서버로 초대하면, 기록이 그대로 남아 있어 새 서버에서도 곧바로 나가
-        # 버렸다 — 다시 초대해도 같은 일이 반복되니 "초대했는데 아무 반응이 없다"가 된다.
-        # 살아 있는 길드 목록으로 확인해, 없는 서버를 가리키는 기록은 낡은 것으로 보고 버린다.
-        if _S.guild_id and _S.guild_id.isdigit() and int(_S.guild_id) != guild.id:
-            still_there = client.get_guild(int(_S.guild_id)) is not None
-            if not still_there:
-                _S.guild_id = ""
-                _S.channel_id = ""
-                _save_state()
-        if _S.guild_id and _S.guild_id.isdigit() and int(_S.guild_id) != guild.id:
+        # 이제 여러 서버에 동시에 붙는다. 서버마다 명령 채널·허용목록을 따로 두므로
+        # 한 서버의 사용자가 다른 서버를 조작할 수 없다.
+        if len(_S.guilds) >= MAX_GUILDS and str(guild.id) not in _S.guilds:
             try:
                 sys_ch = guild.system_channel
                 if sys_ch is not None:
-                    await sys_ch.send("이미 다른 서버에 연결되어 있어 이 서버에서는 나갑니다 (봇당 1개 서버).")
+                    await sys_ch.send(
+                        f"이미 서버 {MAX_GUILDS}개에 연결되어 있어 이 서버에서는 나갑니다."
+                    )
             except Exception:  # noqa: BLE001
                 pass
             try:
@@ -838,13 +995,33 @@ def _build_client(generate: GenerateFn) -> "discord.Client":
         await _bind_guild(guild)
 
     @client.event
+    async def on_guild_remove(guild: "discord.Guild") -> None:
+        """서버에서 쫓겨나거나 나갔으면 그 기록을 버린다. 남으면 화면이 거짓을 보여 준다."""
+        _S.guilds.pop(str(guild.id), None)
+        _S.synced_guilds.discard(str(guild.id))
+        _save_state()
+
+    @client.event
     async def on_message(message: "discord.Message") -> None:
         if client.user is not None and message.author.id == client.user.id:
             return
         if message.author.bot:
             return
-        if not is_authorized(_S.owner_id, _S.channel_id, _S.allowlist, message.author.id, message.channel.id):
+        # 메시지가 온 **그 서버**의 명령 채널·허용목록으로만 인가한다. 전역 값으로 판단하면
+        # A 서버에서 허용한 사용자가 B 서버의 채널에서도 통과한다.
+        guild = getattr(message, "guild", None)
+        if guild is None:
+            return  # DM 은 명령 채널이 아니다
+        gid = str(guild.id)
+        state = _S.guilds.get(gid)
+        if state is None:
+            return
+        if not is_authorized(_S.owner_id, state.channel_id, state.allowlist,
+                             message.author.id, message.channel.id):
             return  # 비인가·비지정채널 → 무응답
+        # 이후 도구 실행이 어느 서버를 대상으로 하는지 여기서 정한다. contextvar 라
+        # 서버별 처리가 동시에 돌아도 서로 섞이지 않는다.
+        _CURRENT_GUILD.set(gid)
         text = (message.content or "").strip()
         raw_attachments = list(getattr(message, "attachments", ()) or ())
         if not text and raw_attachments:
@@ -946,6 +1123,33 @@ def briefing_system(response_language: str | None = "ko") -> str:
     )
 
 
+def repo_report_system(response_language: str | None = "ko") -> str:
+    """저장소 보고 정책. 사용자가 고른 '분류형' 양식을 모델에게 그대로 요구한다.
+
+    수치는 이미 사실로 주어지므로 모델이 다시 계산하지 않는다. 모델이 하는 일은
+    커밋 메시지를 읽고 **추가된 것 / 수정된 것 / 설정 변경**으로 나눠 서술하는 것뿐이다.
+    커밋 메시지에 없는 이유를 지어내면 보고서 전체를 믿을 수 없게 되므로 금지한다.
+    """
+    language = normalize_response_language(response_language)
+    return (
+        "You are Aiso. Write a git repository change report for a Discord channel.\n"
+        "You are given verified facts collected from `git log`. Every number is already correct: "
+        "never recompute, never estimate, never invent a number that is not given.\n\n"
+        "Structure the report exactly like this, omitting any section that has no items:\n"
+        "  header line: repository name, branch, period, commit count, author count\n"
+        "  section '추가된 것' — new features, files, or capabilities\n"
+        "  section '수정된 것' — bug fixes and corrections to existing behaviour\n"
+        "  section '설정 변경' — build config, ignore rules, tooling\n"
+        "  section '상태' — branch position and anything the facts warn about\n\n"
+        "For each item give a short title, then the date, author, and the file/line numbers "
+        "taken from the facts. Describe WHY only when the commit message says why; when the "
+        "message is only a subject line, describe what changed and stop. Never guess intent.\n"
+        "Plain text for Discord: no markdown tables (they do not render), no code fences. "
+        "Use simple bullets and indentation. Keep it under 1800 characters when possible.\n\n"
+        + final_response_language_prompt(language)
+    )
+
+
 def channel_report_system(response_language: str | None = "ko") -> str:
     """Model-only policy for a recurring, new-message-only channel report."""
     language = normalize_response_language(response_language)
@@ -1037,6 +1241,72 @@ async def _collect_channel_report_messages(guild, job: dict) -> tuple[list[str],
     return [line for _created, line in collected], updated_sources, errors
 
 
+async def _run_repo_report(job: dict) -> None:
+    """저장소 보고 1건 — 성공적으로 보낸 뒤에만 커서를 옮긴다.
+
+    커서를 먼저 옮기면 전송 실패한 회차의 커밋이 영영 보고되지 않는다. 반대로 나중에
+    옮기면 최악의 경우 같은 내용을 한 번 더 보내는데, 보고서는 중복이 누락보다 낫다.
+    """
+    import discordsched  # noqa: PLC0415
+    import gitreport  # noqa: PLC0415
+
+    guild = bound_guild()
+    if guild is None:
+        return
+    channel = guild.get_channel(int(job["channel_id"])) if str(job.get("channel_id", "")).isdigit() else None
+    if channel is None:
+        return
+    try:
+        report = await gitreport.collect(
+            str(job.get("repo_path") or ""),
+            str(job.get("branch") or "HEAD"),
+            str(job.get("last_commit") or ""),
+        )
+    except gitreport.GitReportError as error:
+        await channel.send(f"⚠ 저장소 보고를 만들지 못했습니다 — {error}")
+        return
+    if not report.commits:
+        # 새 커밋이 없으면 아무 말도 하지 않는다. 조용한 것이 정상이다.
+        if report.head and report.head != str(job.get("last_commit") or ""):
+            discordsched.update_job(job.get("id", ""), {"last_commit": report.head})
+        return
+
+    facts = gitreport.build_facts(report)
+    response_language = _job_response_language(job)
+    instruction = str(job.get("text") or "").strip()
+    messages = [
+        {"role": "system", "content": repo_report_system(response_language)},
+        {
+            "role": "user",
+            "content": (
+                (f"Additional user instruction: {instruction}\n\n" if instruction else "")
+                + "[Verified facts from git]\n" + facts
+            ),
+        },
+    ]
+    try:
+        async with _S.gen_lock:
+            if _S.generate is None:
+                return
+            body = await asyncio.wait_for(_S.generate(messages), timeout=CHANNEL_REPORT_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        body = "(보고서 생성이 시간을 초과해 중단되었습니다)"
+    except Exception as error:  # noqa: BLE001
+        body = f"(보고서 생성 실패: {error})"
+
+    name = Path(str(job.get("repo_path") or "")).name or "저장소"
+    header = f"📦 **{name}** — {len(report.commits)}개 커밋"
+    sent = False
+    try:
+        for part in chunk_message(f"{header}\n\n{body}"):
+            await channel.send(part)
+        sent = True
+    except Exception as error:  # noqa: BLE001
+        print(f"[discord] 저장소 보고 전송 실패: {error}")
+    if sent:
+        discordsched.update_job(job.get("id", ""), {"last_commit": report.commits[-1].sha})
+
+
 async def _run_channel_report(job: dict) -> None:
     """Generate and send one report, committing cursors only after success."""
     import discordsched  # noqa: PLC0415
@@ -1105,9 +1375,13 @@ async def _run_job(job: dict) -> None:
     if job.get("kind") == "channel_report":
         await _run_channel_report(job)
         return
+    if job.get("kind") == "repo_report":
+        await _run_repo_report(job)
+        return
     if job.get("missed"):
-        # 앱이 꺼져 있어 놓친 예약 → 명령 채널에 안내(일회성은 소진됨, 매일은 다음 회차 예정)
-        cmd = guild.get_channel(int(_S.channel_id)) if _S.channel_id.isdigit() else None
+        # 앱이 꺼져 있어 놓친 예약 → 그 서버의 명령 채널에 안내
+        channel_id = command_channel_id(str(guild.id))
+        cmd = guild.get_channel(int(channel_id)) if channel_id.isdigit() else None
         if cmd is not None:
             tail = "다음 회차에 다시 발화합니다." if job.get("repeat") == "daily" else "이 예약은 소진되어 삭제되었습니다."
             try:
@@ -1154,13 +1428,19 @@ async def _retry_command_channel() -> None:
     채널이 없으면 is_authorized 가 모든 메시지를 거부하므로 봇은 어디서도 대답하지 못한다.
     그런데 채널 확보는 서버에 고정되는 순간 딱 한 번만 시도했다 — 그때 권한이 아직 반영되지
     않았거나 일시적으로 실패하면, 앱을 다시 켜기 전까지 영영 침묵한다. 사용자가 채널을
-    지운 경우도 같다. 러너가 주기적으로 확인해 스스로 복구한다."""
-    if _S.channel_id:
-        return
-    guild = bound_guild()
-    if guild is None:
-        return
-    await _ensure_command_channel(guild)
+    지운 경우도 같다. 러너가 주기적으로 확인해 스스로 복구한다.
+
+    서버마다 따로 확인한다 — 한 서버에서 실패했다고 다른 서버의 복구를 멈추지 않는다."""
+    for gid, state in list(_S.guilds.items()):
+        if state.channel_id:
+            continue
+        guild = bound_guild(gid)
+        if guild is None:
+            continue
+        try:
+            await _ensure_command_channel(guild)
+        except Exception as error:  # noqa: BLE001
+            print(f"[discord] 명령 채널 재확보 실패({gid}): {error}")
 
 
 async def _sched_runner(client: "discord.Client") -> None:
@@ -1205,7 +1485,7 @@ async def apply_config(
     # 않도록, 위의 조기 반환(비활성·토큰 없음)을 지난 뒤에만 기록한다.
     _S.provider = str(config.get("provider") or "")
     _S.model = str(config.get("model") or "")
-    _S.synced_guild_id = ""
+    _S.synced_guilds.clear()
     client = _build_client(generate)
     _S.client = client
     _S.last_error = None
@@ -1253,7 +1533,8 @@ async def stop() -> None:
     _S.client = None
     _S.task = None
     _S.tree = None
-    _S.synced_guild_id = ""
-    # 멈춘 봇이 공급자를 계속 표시하면 "무엇으로 돌고 있나"에 거짓말을 하게 된다.
+    _S.synced_guilds.clear()
+    # 멈춘 봇이 공급자·서버를 계속 표시하면 "무엇으로 어디서 돌고 있나"에 거짓말을 하게 된다.
     _S.provider = ""
     _S.model = ""
+    _S.guilds.clear()

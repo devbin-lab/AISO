@@ -102,17 +102,39 @@ function rangeFill(pct: number): React.CSSProperties {
  * 아니라 봇에 주입된 값이라, 둘이 어긋나 있으면 여기서 바로 드러난다 — 예전에는 확인할
  * 길이 없어 "로컬로 도는 건지 NVIDIA로 도는 건지" 알 수 없었다.
  */
+/**
+ * 붙어 있는 서버들을 한 줄로. 서버마다 명령 채널이 따로라, 어떤 서버는 준비되고 어떤
+ * 서버는 아직 아닐 수 있다 — 그 차이가 보여야 어디를 손봐야 하는지 알 수 있다.
+ */
+export function describeDiscordGuilds(status: DiscordStatus | null): string {
+  const guilds = status?.guilds ?? []
+  if (guilds.length === 0) return ''
+  return guilds
+    .map((guild) => `${guild.guild_name || guild.guild_id}${guild.channel_id ? '' : ' (채널 없음)'}`)
+    .join(', ')
+}
+
 export function describeDiscordStatus(status: DiscordStatus | null): string {
   if (!status) return '미확인'
   if (status.running) {
-    const chan = status.channel_id
-      ? '#aiso 채널 준비됨'
-      : '⚠ 명령 채널 미생성 — 연결/적용을 다시 눌러 재시도하세요'
+    // 서버마다 채널을 따로 만든다. 하나라도 빠져 있으면 그 서버는 전면 무응답이므로
+    // "전부 준비됨"으로 뭉뚱그리지 않는다.
+    const guilds = status.guilds ?? []
+    const missing = guilds.filter((guild) => !guild.channel_id).length
+    const chan = guilds.length === 0
+      ? (status.channel_id ? '#aiso 채널 준비됨' : '⚠ 명령 채널 미생성 — 연결/적용을 다시 눌러 재시도하세요')
+      : missing === 0
+        ? '#aiso 채널 준비됨'
+        : `⚠ ${missing}개 서버에 명령 채널 없음`
     const engine = status.provider
       ? ` · ${status.provider === 'nvidia' ? 'NVIDIA' : 'Ollama'}${status.model ? ` ${status.model}` : ''}`
       : ''
+    // 어느 서버에 붙어 있는지 밝힌다. 여러 서버를 오가며 초대해 본 뒤에 "지금 어디에
+    // 있나"를 확인할 수 있는 곳이 여기뿐이다.
+    const names = describeDiscordGuilds(status)
+    const where = names ? ` · 서버 ${names}` : status.guild_name ? ` · 서버 ${status.guild_name}` : ''
     const err = status.last_error ? ` · ${status.last_error}` : ''
-    return `연결됨${status.user ? ` (${status.user})` : ''}${engine} · ${chan}${err}`
+    return `연결됨${status.user ? ` (${status.user})` : ''}${engine}${where} · ${chan}${err}`
   }
   // 중지 상태의 사유: last_error(봇 오류) 또는 detail(백엔드 미준비 등)을 함께 노출한다.
   const reason = status.last_error || status.detail

@@ -23,6 +23,8 @@ TEXT_MAX = 2000        # 메시지 본문/브리핑 지시 길이 상한
 MISSED_GRACE_S = 600   # 이보다 오래 지난 발화는 '놓침'으로 처리(실행 대신 안내)
 MAX_REPORT_CHANNELS = 10
 MAX_REPORT_INSTRUCTION = 1000
+MAX_REPO_PATH = 400
+MAX_REPO_BRANCH = 200
 MIN_REPORT_INTERVAL_HOURS = 1
 MAX_REPORT_INTERVAL_HOURS = 168
 
@@ -182,7 +184,7 @@ def pop_due(*, now: "datetime | None" = None) -> list[dict]:
             changed = True  # 깨진(비문자열·형식오류) next_run → 잡을 버린다
             continue
         interval_hours: int | None = None
-        if j.get("repeat") == "interval" or j.get("kind") == "channel_report":
+        if j.get("repeat") == "interval" or j.get("kind") in ("channel_report", "repo_report"):
             try:
                 # 필드가 없으면(None) int()가 TypeError를 내고 바로 아래 except가 잡아 잡을 버린다 —
                 # 그 경로가 설계이므로 값을 Any로 받아 둔다(저장 파일에서 온 값이라 타입 보장이 없다).
@@ -204,7 +206,7 @@ def pop_due(*, now: "datetime | None" = None) -> list[dict]:
             j2 = dict(j)
             j2["next_run"] = advance_daily(nr, now).isoformat(timespec="minutes")
             keep.append(j2)
-        elif j.get("repeat") == "interval" and j.get("kind") == "channel_report":
+        elif j.get("repeat") == "interval" and j.get("kind") in ("channel_report", "repo_report"):
             j2 = dict(j)
             j2["next_run"] = advance_interval(
                 nr, now, interval_hours or MIN_REPORT_INTERVAL_HOURS
@@ -374,6 +376,53 @@ def build_channel_report_job(
     }, None
 
 
+def build_repo_report_job(
+    *, repo_path: str, branch: str, report_channel_id: str, report_channel_name: str,
+    interval_hours, instruction: str = "", head: str = "", now: "datetime | None" = None,
+) -> "tuple[dict | None, str | None]":
+    """저장소 보고 예약 1건을 만든다. 등록은 하지 않는다.
+
+    승인 전에 모든 거부 사유를 확인할 수 있도록 커밋과 분리한다 — 채널 보고와 같은 이유다.
+    저장소 경로는 **여기서 한 번 고정**하고 이후 모델이 바꿀 수 없다. 예약은 사람이 보지
+    않는 동안 돌기 때문에, 실행 시점에 경로를 정하게 두면 승인의 의미가 사라진다.
+    """
+    if len(jobs()) >= MAX_JOBS:
+        return None, f"예약은 최대 {MAX_JOBS}개까지 등록할 수 있습니다."
+    path = str(repo_path or "").strip()
+    if not path:
+        return None, "저장소 경로를 입력해 주세요."
+    if len(path) > MAX_REPO_PATH:
+        return None, f"저장소 경로는 최대 {MAX_REPO_PATH}자까지 입력할 수 있습니다."
+    ref = str(branch or "").strip() or "HEAD"
+    if len(ref) > MAX_REPO_BRANCH:
+        return None, f"브랜치 이름은 최대 {MAX_REPO_BRANCH}자까지 입력할 수 있습니다."
+    try:
+        hours = int(interval_hours)
+    except (TypeError, ValueError):
+        return None, "interval_hours는 시간 단위 정수여야 합니다."
+    if not MIN_REPORT_INTERVAL_HOURS <= hours <= MAX_REPORT_INTERVAL_HOURS:
+        return None, (
+            f"interval_hours는 {MIN_REPORT_INTERVAL_HOURS}~{MAX_REPORT_INTERVAL_HOURS} 사이여야 합니다."
+        )
+    note = str(instruction or "").strip()
+    if len(note) > MAX_REPORT_INSTRUCTION:
+        return None, f"보고서 지시는 최대 {MAX_REPORT_INSTRUCTION}자까지 입력할 수 있습니다."
+    current = now or datetime.now()
+    return {
+        "kind": "repo_report",
+        "channel_id": str(report_channel_id),
+        "channel_name": str(report_channel_name),
+        "repo_path": path,
+        "branch": ref,
+        # 등록 시점의 HEAD 를 기준으로 삼는다. 첫 보고가 저장소 전체 역사를 쏟아내지 않게 한다.
+        "last_commit": str(head or "").strip(),
+        "text": note,
+        "repeat": "interval",
+        "interval_hours": hours,
+        "next_run": (current + timedelta(hours=hours)).isoformat(timespec="minutes"),
+    }, None
+
+
 async def _latest_message_id(channel) -> str:
     try:
         async for message in channel.history(limit=1):
@@ -509,6 +558,13 @@ def _fmt_dt(iso: str) -> str:
 
 
 def render_job(j: dict) -> str:
+    if j.get("kind") == "repo_report":
+        return (
+            f"[{j.get('id', '')[:8]}] 저장소 보고 · {j.get('interval_hours')}시간마다"
+            f" · #{j.get('channel_name')}"
+            f" · {j.get('repo_path')} ({j.get('branch')})"
+            f" · 다음 {j.get('next_run')}"
+        )
     if j.get("kind") == "channel_report":
         sources = ", ".join(f"#{item.get('name')}" for item in j.get("source_channels", []))
         return (
@@ -564,6 +620,51 @@ SCHEDULE_ADD_SCHEMA = {
         },
     },
 }
+
+REPO_REPORT_ADD_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "discord_repo_report_add",
+        "description": (
+            "로컬 git 저장소의 새 커밋을 시간 단위로 모아 요약해 디스코드 채널에 보고하는 반복 예약을 "
+            "등록한다. 마지막으로 보고한 커밋을 기억하므로 같은 커밋을 두 번 보고하지 않는다. "
+            "등록 이후의 새 커밋부터 보고한다. 커밋 메시지와 변경 파일·줄 수만 보내며 코드 본문은 보내지 않는다. "
+            "repo_path 는 사용자가 알려 준 경로를 그대로 쓴다 — 짐작해서 만들어 넣지 않는다."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo_path": {
+                    "type": "string",
+                    "description": "저장소 폴더의 전체 경로. 사용자가 말한 그대로.",
+                    "maxLength": MAX_REPO_PATH,
+                },
+                "branch": {
+                    "type": "string",
+                    "description": "추적할 브랜치. 생략하면 현재 체크아웃된 브랜치.",
+                    "maxLength": MAX_REPO_BRANCH,
+                },
+                "report_channel": {
+                    "type": "string",
+                    "description": "보고서를 보낼 텍스트 채널 이름 또는 ID",
+                },
+                "interval_hours": {
+                    "type": "integer",
+                    "minimum": MIN_REPORT_INTERVAL_HOURS,
+                    "maximum": MAX_REPORT_INTERVAL_HOURS,
+                    "description": "보고 주기(시간 단위). 예: 24=하루에 한 번",
+                },
+                "instruction": {
+                    "type": "string",
+                    "description": "선택 사항. 보고서가 특히 짚어야 할 것",
+                    "maxLength": MAX_REPORT_INSTRUCTION,
+                },
+            },
+            "required": ["repo_path", "report_channel", "interval_hours"],
+        },
+    },
+}
+
 
 SCHEDULE_LIST_SCHEMA = {
     "type": "function",
