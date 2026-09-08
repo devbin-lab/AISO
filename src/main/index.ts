@@ -27,6 +27,7 @@ import {
 } from './backend'
 import { buildRendererCsp } from './renderer-csp'
 import { sanitizeSettingsPatch } from './settings-patch'
+import { NvidiaDiscordConsentStore, consentMatchesTarget } from './nvidia-discord-consent'
 import { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
 import {
   clearAttachmentStore,
@@ -152,6 +153,7 @@ import { capabilityBoundGrantTtlSeconds } from './nvidia-grant-ttl'
 import {
   NvidiaDiscordApplyCoordinator,
   assertNvidiaDiscordConsentCurrent,
+  nvidiaDiscordTargetFromSettings,
   type ExactNvidiaDiscordTarget
 } from './nvidia-discord-apply'
 import { chromiumStoragePaths } from './chromium-storage-paths'
@@ -198,6 +200,33 @@ const startedHidden = process.argv.includes('--hidden') || app.getLoginItemSetti
 
 function capabilityCache(): NvidiaCapabilityCache {
   return new NvidiaCapabilityCache(join(app.getPath('userData'), 'nvidia-capabilities.json'))
+}
+
+function discordConsentStore(): NvidiaDiscordConsentStore {
+  return new NvidiaDiscordConsentStore(join(app.getPath('userData'), 'nvidia-discord-consent.json'))
+}
+
+/**
+ * 저장된 승인으로 Discord NVIDIA 실행 신뢰를 되살린다.
+ *
+ * 예전에는 이 신뢰가 프로세스 메모리에만 있어서 앱을 껐다 켤 때마다 Discord 가 죽은 채
+ * 시작하고 사용자가 승인 버튼을 다시 눌러야 했다. 재시작은 무엇이 어디로 가는지를 바꾸지
+ * 않으므로, 지켜야 할 성질은 "이 프로세스에서 승인했다"가 아니라 "지금 이 대상에 대해
+ * 승인했다"이다. 대상·기능 검사 근거가 조금이라도 어긋나면 되살리지 않는다.
+ */
+function restoreTrustedDiscordNvidiaRuntime(settings: AppSettings = loadSettings()): void {
+  if (trustedDiscordNvidiaRuntime) return
+  if (settings.discordLlmProvider !== 'nvidia') return
+  const target = nvidiaDiscordTargetFromSettings(settings)
+  if (!target) return
+  const capability = capabilityCache().get(target)
+  if (!consentMatchesTarget(discordConsentStore().read(), target, capability)) return
+  trustedDiscordNvidiaRuntime = {
+    provider: 'nvidia',
+    deploymentMode: target.deploymentMode,
+    endpoint: target.endpoint,
+    model: target.model
+  }
 }
 
 function invalidateAllNvidiaCapabilities(): void {
@@ -286,6 +315,9 @@ async function saveNvidiaCredentialWithTrustReset(
 ): Promise<void> {
   nvidiaAgentDataApprovals.clearAll()
   await invalidateDiscordNvidiaRuntime()
+  // 키가 바뀌면 예전 승인은 다른 자격으로 받은 것이다. 기능 검사 캐시가 비어 어차피
+  // 무효가 되지만, 기록까지 지워 "다시 물어본다"를 분명히 한다.
+  discordConsentStore().clear()
   await commitNvidiaCapabilityMutation(
     nvidiaCapabilityRevision,
     async () => {
@@ -385,6 +417,9 @@ function discordNvidiaFenceDeps() {
 }
 
 async function applyTrustedDiscordConfig() {
+  // 저장된 승인이 지금 대상과 맞으면 되살린다. 맞지 않으면 아무 일도 하지 않으므로
+  // 이 호출이 신뢰를 새로 만들어 내지는 않는다.
+  restoreTrustedDiscordNvidiaRuntime()
   return nvidiaDiscordApplyCoordinator.apply({
     ...discordNvidiaFenceDeps(),
     revisionSnapshot: () => nvidiaCapabilityRevision.snapshot(),
@@ -1234,6 +1269,7 @@ app.whenReady().then(() => {
   ipcMain.handle('nvidia:credential:delete', async (e) => {
     requireMainRenderer(e.sender)
     nvidiaAgentDataApprovals.clearAll()
+    discordConsentStore().clear()
     await invalidateDiscordNvidiaRuntime()
     nvidiaCapabilityRevision.beginMutation()
     try {
@@ -1431,6 +1467,7 @@ app.whenReady().then(() => {
     }
     if (provider === 'ollama') {
       trustedDiscordNvidiaRuntime = null
+      discordConsentStore().clear()
       await revokeBackendNvidiaDiscordTrust()
       const next = saveSettings({ discordLlmProvider: 'ollama' })
       await applyTrustedDiscordConfig()
@@ -1462,7 +1499,7 @@ app.whenReady().then(() => {
         `대상: ${binding.deploymentMode === 'build' ? 'NVIDIA Build' : binding.endpoint} / ${model}`,
         '전송: Discord 사용자의 메시지, 최근 대화 문맥, 도구 호출 결과, 웹 조사 결과',
         '로컬 전용: NVIDIA API 키, Discord 봇 토큰, 승인 토큰',
-        '이 기능은 실험적이며 앱 재시작·모델/대상/키/기능 변경 후 다시 확인해야 합니다.'
+        '이 기능은 실험적입니다. 모델·대상·API 키를 바꾸거나 기능 검사를 다시 하면 이 확인을 다시 받습니다.'
       ].join('\n'),
       buttons: ['확인하고 활성화', '취소'],
       defaultId: 1,
@@ -1495,11 +1532,16 @@ app.whenReady().then(() => {
         endpoint: binding.endpoint,
         model
       }
+      // 다음 실행에서 같은 대상이면 다시 묻지 않도록 승인을 남긴다. 기능 검사 시각까지
+      // 함께 적어 두므로, 검사를 다시 하거나 키를 바꾸면 이 기록은 저절로 맞지 않게 된다.
+      const consentCapability = capabilityCache().get(consentTarget)
+      if (consentCapability) discordConsentStore().record(consentTarget, consentCapability)
       const applied = await applyTrustedDiscordConfig()
       if (!applied.ok) throw new Error(applied.detail ?? 'Discord NVIDIA 적용에 실패했습니다.')
       return loadSettings()
     } catch (error) {
       trustedDiscordNvidiaRuntime = null
+      discordConsentStore().clear()
       await revokeBackendNvidiaDiscordTrust().catch(() => {})
       if (before.discordLlmProvider !== 'nvidia') saveSettings({ discordLlmProvider: 'ollama' })
       await applyTrustedDiscordConfig().catch(() => stopBackend())

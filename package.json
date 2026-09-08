@@ -1,6 +1,6 @@
 {
   "name": "aiso",
-  "version": "1.4.5",
+  "version": "1.4.6",
   "description": "로컬 작업·조사·자동화·검증 에이전트",
   "main": "./out/main/index.js",
   "author": "devbin-lab",
@@ -21,7 +21,7 @@
     "test:gate3": "node --experimental-strip-types --test src/main/nvidia-execution.test.ts",
     "test:gate4": "node --experimental-strip-types --test src/main/nvidia-capability-cache.test.ts",
     "test:gate5": "node --experimental-strip-types --test src/main/nvidia-agent-authorization.test.ts",
-    "test:gate6": "node --experimental-strip-types --test src/main/nvidia-agent-data-approval.test.ts src/main/nvidia-runtime-demand.test.ts src/main/nvidia-grant-ttl.test.ts src/main/nvidia-discord-apply.test.ts",
+    "test:gate6": "node --experimental-strip-types --test src/main/nvidia-agent-data-approval.test.ts src/main/nvidia-discord-consent.test.ts src/main/nvidia-runtime-demand.test.ts src/main/nvidia-grant-ttl.test.ts src/main/nvidia-discord-apply.test.ts",
     "test:mydb": "node --experimental-strip-types --test src/main/mydb.test.ts src/main/mydb-agent-bridge.test.ts src/main/midnight-schedule.test.ts",
     "test:attachments": "node --experimental-strip-types --test src/main/attachment-gc.test.ts src/main/renderer-csp.test.ts",
     "test:renderer": "vitest run --config vitest.config.ts",
