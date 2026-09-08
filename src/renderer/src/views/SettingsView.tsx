@@ -95,6 +95,30 @@ function rangeFill(pct: number): React.CSSProperties {
   return { background: `linear-gradient(to right, var(--accent) ${p}%, var(--track) ${p}%)` }
 }
 
+/**
+ * 디스코드 봇 상태 한 줄.
+ *
+ * 실행 중이면 **지금 무엇으로 답하고 있는지**(공급자·모델)를 함께 밝힌다. 저장된 설정이
+ * 아니라 봇에 주입된 값이라, 둘이 어긋나 있으면 여기서 바로 드러난다 — 예전에는 확인할
+ * 길이 없어 "로컬로 도는 건지 NVIDIA로 도는 건지" 알 수 없었다.
+ */
+export function describeDiscordStatus(status: DiscordStatus | null): string {
+  if (!status) return '미확인'
+  if (status.running) {
+    const chan = status.channel_id
+      ? '#aiso 채널 준비됨'
+      : '⚠ 명령 채널 미생성 — 연결/적용을 다시 눌러 재시도하세요'
+    const engine = status.provider
+      ? ` · ${status.provider === 'nvidia' ? 'NVIDIA' : 'Ollama'}${status.model ? ` ${status.model}` : ''}`
+      : ''
+    const err = status.last_error ? ` · ${status.last_error}` : ''
+    return `연결됨${status.user ? ` (${status.user})` : ''}${engine} · ${chan}${err}`
+  }
+  // 중지 상태의 사유: last_error(봇 오류) 또는 detail(백엔드 미준비 등)을 함께 노출한다.
+  const reason = status.last_error || status.detail
+  return reason ? `중지 · ${reason}` : '중지됨'
+}
+
 function capabilityLabel(state: LlmCapabilityState): string {
   if (state === 'supported') return '지원 확인'
   if (state === 'unsupported') return '지원하지 않음'
@@ -649,20 +673,7 @@ function SettingsView({
       setDiscordApplying(false)
     }
   }
-  const discordStatusText = ((): string => {
-    const s = discordStat
-    if (!s) return '미확인'
-    if (s.running) {
-      const chan = s.channel_id
-        ? '#aiso 채널 준비됨'
-        : '⚠ 명령 채널 미생성 — 연결/적용을 다시 눌러 재시도하세요'
-      const err = s.last_error ? ` · ${s.last_error}` : ''
-      return `연결됨${s.user ? ` (${s.user})` : ''} · ${chan}${err}`
-    }
-    // 중지 상태의 사유: last_error(봇 오류) 또는 detail(백엔드 미준비 등)을 함께 노출한다.
-    const reason = s.last_error || s.detail
-    return reason ? `중지 · ${reason}` : '중지됨'
-  })()
+  const discordStatusText = describeDiscordStatus(discordStat)
 
   // ── 디스코드 봇 만들기 안내 (설정탭 내 단계별 가이드) ──
   const [showDcGuide, setShowDcGuide] = useState(false)

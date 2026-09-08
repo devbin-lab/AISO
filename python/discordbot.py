@@ -213,6 +213,11 @@ class _State:
         self.research: ResearchFn | None = None  # 웹 조사 생성(브리핑 예약용)
         self.image: ImageFn | None = None
         self.allow_attachment_images: bool = False
+        # 실제로 봇에 주입된 공급자·모델. 저장된 설정이 아니라 **지금 돌고 있는 값**이다.
+        # 둘이 어긋날 수 있어서(설정 저장 실패·전용 동의 흐름 등) 저장 파일만 봐서는
+        # "로컬로 도는 건지 NVIDIA로 도는 건지" 확인할 길이 없었다.
+        self.provider: str = ""
+        self.model: str = ""
         self.sched_task: "asyncio.Task | None" = None  # 예약 러너
         self.tree: "app_commands.CommandTree | None" = None
         self.data_dir: str = ""
@@ -248,6 +253,8 @@ def status() -> dict:
         "guild_id": _S.guild_id,
         "channel_id": _S.channel_id,
         "allowlist": sorted(_S.allowlist),
+        "provider": _S.provider,
+        "model": _S.model,
         "attachment_images": _S.allow_attachment_images,
         "comfy_image_generation": _S.image is not None,
         "last_error": _S.last_error,
@@ -1194,6 +1201,10 @@ async def apply_config(
     if not config.get("enabled") or not str(config.get("token") or "").strip():
         return
     token = str(config["token"]).strip()
+    # 여기까지 왔다는 것은 실제로 봇을 띄운다는 뜻이다. 꺼진 봇이 공급자를 표시하지
+    # 않도록, 위의 조기 반환(비활성·토큰 없음)을 지난 뒤에만 기록한다.
+    _S.provider = str(config.get("provider") or "")
+    _S.model = str(config.get("model") or "")
     _S.synced_guild_id = ""
     client = _build_client(generate)
     _S.client = client
@@ -1243,3 +1254,6 @@ async def stop() -> None:
     _S.task = None
     _S.tree = None
     _S.synced_guild_id = ""
+    # 멈춘 봇이 공급자를 계속 표시하면 "무엇으로 돌고 있나"에 거짓말을 하게 된다.
+    _S.provider = ""
+    _S.model = ""

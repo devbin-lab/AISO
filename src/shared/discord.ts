@@ -8,6 +8,15 @@ export interface DiscordStatus {
   guild_id?: string
   channel_id?: string
   allowlist?: string[]
+  /**
+   * 봇에 **실제로 주입된** 대화 모델 공급자와 모델. 저장된 설정이 아니라 지금 돌고 있는 값이다.
+   *
+   * 둘은 어긋날 수 있다(설정 저장 실패, 전용 동의 흐름으로만 바뀌는 공급자 등). 그때
+   * 저장 파일만 봐서는 "로컬로 도는 건지 NVIDIA로 도는 건지" 확인할 길이 없었다.
+   * 봇이 꺼져 있으면 비어 있다 — 멈춘 봇이 공급자를 표시하면 그 자체가 거짓말이다.
+   */
+  provider?: string
+  model?: string
   last_error?: string | null
   detail?: string
 }
