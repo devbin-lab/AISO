@@ -75,6 +75,9 @@ import {
   discordStatus,
   discordSchedules,
   discordScheduleRemove,
+  discordChannels,
+  discordRepoBranches,
+  discordRepoReportAdd,
   clearDiscordData,
   type NvidiaDiscordRuntime
 } from './discord'
@@ -1553,6 +1556,35 @@ app.whenReady().then(() => {
   ipcMain.handle('discord:status', () => discordStatus())
   ipcMain.handle('discord:schedules', () => discordSchedules())
   ipcMain.handle('discord:schedule-remove', (_e, id: string) => discordScheduleRemove(id))
+  ipcMain.handle('discord:channels', () => discordChannels())
+  // 저장소 폴더는 사람이 탐색기에서 고른다. 경로를 손으로 적게 두면 오타 하나로 등록이
+  // 거부되고, 모델에게 받아 적게 하면 없는 경로를 지어낸다.
+  ipcMain.handle('discord:pick-repo', async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    const res = await dialog.showOpenDialog(win!, {
+      title: '보고할 git 저장소 폴더 선택',
+      properties: ['openDirectory']
+    })
+    if (res.canceled || res.filePaths.length === 0) return null
+    return res.filePaths[0]
+  })
+  ipcMain.handle('discord:repo-branches', (_e, repoPath: string, refresh: boolean) =>
+    discordRepoBranches(repoPath, refresh !== false)
+  )
+  ipcMain.handle(
+    'discord:repo-report-add',
+    (
+      _e,
+      input: {
+        repoPath: string
+        branch: string
+        guildId: string
+        channelId: string
+        intervalHours: number
+        instruction: string
+      }
+    ) => discordRepoReportAdd(input)
+  )
 
   // ---- IPC: 대화방 (userData/conversations.json) ----
   ipcMain.handle('conv:list', (_e, kind: ConversationKind) => listConversations(kind))

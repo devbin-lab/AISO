@@ -21,7 +21,12 @@ import type { LlmCapabilityState } from '../../../shared/llm'
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import type { UpdateStatus } from '../../../shared/update'
 import type { SkillMeta } from '../../../shared/skill'
-import type { DiscordStatus, DiscordSchedule } from '../../../shared/discord'
+import type {
+  DiscordStatus,
+  DiscordSchedule,
+  DiscordGuildChannels,
+  RepoBranches
+} from '../../../shared/discord'
 import Select from '../components/Select'
 import Segmented from '../components/Segmented'
 import { MAX_AUTO_CONTINUES } from '../lib/agent'
@@ -139,6 +144,58 @@ export function describeDiscordStatus(status: DiscordStatus | null): string {
   // 중지 상태의 사유: last_error(봇 오류) 또는 detail(백엔드 미준비 등)을 함께 노출한다.
   const reason = status.last_error || status.detail
   return reason ? `중지 · ${reason}` : '중지됨'
+}
+
+/** 예약 종류의 사람 이름. 모르는 종류는 '메시지'로 떨어진다(옛 저장 파일 대비). */
+export function describeScheduleKind(kind: DiscordSchedule['kind']): string {
+  if (kind === 'briefing') return '브리핑'
+  if (kind === 'channel_report') return '채널 보고'
+  if (kind === 'repo_report') return '저장소 보고'
+  return '메시지'
+}
+
+/** 경로에서 폴더 이름만. 윈도우(\\)와 POSIX(/) 구분자를 함께 받는다. */
+export function repoFolderName(repoPath: string | undefined): string {
+  const trimmed = String(repoPath ?? '').replace(/[\\/]+$/, '')
+  if (!trimmed) return ''
+  const parts = trimmed.split(/[\\/]/)
+  return parts[parts.length - 1] || trimmed
+}
+
+/** 예약 1건이 무엇을 모아 어디로 내보내는지 한 줄로. */
+export function describeScheduleDetail(job: DiscordSchedule): string {
+  if (job.kind === 'channel_report') {
+    const sources = (job.source_channels ?? []).map((source) => `#${source.name}`).join(', ')
+    return `${sources} → #${job.channel_name}${job.text ? ` · ${job.text}` : ''}`
+  }
+  if (job.kind === 'repo_report') {
+    // 브랜치를 반드시 보여준다. main 과 origin/main 을 잘못 고르면 fetch 는 성공하는데
+    // 보고는 영영 비어 있고, 침묵이 정상 동작이라 아무도 눈치채지 못한다.
+    const where = `${repoFolderName(job.repo_path) || job.repo_path || '저장소'} · ${job.branch || 'HEAD'}`
+    return job.text ? `${where} · ${job.text}` : where
+  }
+  return job.text
+}
+
+/**
+ * 저장소 보고가 지금 어디까지 봤는지.
+ *
+ * 이 기능은 새 커밋이 없으면 아무 말도 하지 않는 것이 정상이다. 그래서 이 값이 화면에
+ * 없으면 '조용해서 정상'과 '고장나서 조용함'이 똑같아 보인다 — 그 둘을 가르는 값이다.
+ */
+export function describeRepoFailure(job: DiscordSchedule): string {
+  if (job.kind !== 'repo_report') return ''
+  const reason = String(job.last_failure ?? '').trim()
+  return reason ? `⚠ 마지막 시도 실패 — ${reason}` : ''
+}
+
+export function describeRepoProgress(job: DiscordSchedule): string {
+  if (job.kind !== 'repo_report') return ''
+  const commit = String(job.last_commit ?? '').slice(0, 7)
+  if (job.last_reported_at) {
+    return `마지막 보고 ${String(job.last_reported_at).replace('T', ' ')}${commit ? ` · ${commit}` : ''}`
+  }
+  return commit ? `아직 보고 없음 · 기준 커밋 ${commit}` : '아직 보고 없음'
 }
 
 function capabilityLabel(state: LlmCapabilityState): string {
@@ -611,10 +668,106 @@ function SettingsView({
     window.api.discord.hasToken().then(setDiscordHasToken).catch(() => {})
     window.api.discord.status().then(setDiscordStat).catch(() => {})
     window.api.discord.schedules().then((r) => setSchedules(r.jobs ?? [])).catch(() => {})
+    window.api.discord.channels().then((r) => setRepoGuilds(r.guilds ?? [])).catch(() => {})
   }
   const removeSchedule = async (id: string): Promise<void> => {
     await window.api.discord.scheduleRemove(id)
     refreshDiscord()
+  }
+
+  // ── 저장소 보고 등록 ──
+  // 자연어 등록(#aiso 채널)은 그대로 두고 이 창에서도 등록할 수 있게 한다. 자연어로는
+  // 사람이 경로를 문장 안에 손으로 적어야 하고, 브랜치도 직접 타이핑해야 한다 —
+  // `main` 과 `origin/main` 을 잘못 고르면 fetch 는 성공하는데 보고는 영원히 비어 있고,
+  // 새 커밋이 없을 때 침묵하는 것이 정상 동작이라 그 실수가 끝내 드러나지 않는다.
+  const [repoGuilds, setRepoGuilds] = useState<DiscordGuildChannels[]>([])
+  const [repoPath, setRepoPath] = useState('')
+  const [repoRefs, setRepoRefs] = useState<RepoBranches | null>(null)
+  const [repoBranch, setRepoBranch] = useState('')
+  const [repoTarget, setRepoTarget] = useState('')
+  const [repoHours, setRepoHours] = useState('6')
+  const [repoInstruction, setRepoInstruction] = useState('')
+  const [repoBusy, setRepoBusy] = useState(false)
+  const [repoNotice, setRepoNotice] = useState('')
+
+  /** 보고 채널 선택지 — 라벨 하나가 서버 하나의 채널 하나를 가리킨다. */
+  const repoTargets = useMemo(() => {
+    const byLabel = new Map<string, { guildId: string; channelId: string }>()
+    const labels: string[] = []
+    for (const guild of repoGuilds) {
+      for (const channel of guild.channels) {
+        // 같은 서버 안에서도 채널 이름은 겹칠 수 있다(카테고리가 다르면). 겹치면 id 를
+        // 붙여 라벨을 갈라 둔다 — 라벨이 겹치면 엉뚱한 채널로 등록된다.
+        const base = `${guild.guild_name} · #${channel.name}`
+        const label = byLabel.has(base) ? `${base} (${channel.id})` : base
+        byLabel.set(label, { guildId: guild.guild_id, channelId: channel.id })
+        labels.push(label)
+      }
+    }
+    return { labels, byLabel }
+  }, [repoGuilds])
+
+  /** 원격 추적 ref 를 먼저 보여 준다 — 거의 언제나 그쪽이 정답이다. */
+  const repoBranchOptions = useMemo(
+    () => [...(repoRefs?.remote ?? []), ...(repoRefs?.local ?? [])],
+    [repoRefs]
+  )
+
+  const pickRepoFolder = async (): Promise<void> => {
+    const picked = await window.api.discord.pickRepo()
+    if (!picked) return
+    setRepoPath(picked)
+    setRepoRefs(null)
+    setRepoBranch('')
+    setRepoNotice('')
+    setRepoBusy(true)
+    try {
+      const refs = await window.api.discord.repoBranches(picked)
+      if (!refs.ok) {
+        setRepoNotice(refs.detail || '브랜치 목록을 읽지 못했습니다.')
+        return
+      }
+      setRepoRefs(refs)
+      setRepoBranch(refs.recommended || '')
+      if (refs.warning) setRepoNotice(refs.warning)
+    } finally {
+      setRepoBusy(false)
+    }
+  }
+
+  const addRepoReport = async (): Promise<void> => {
+    const target = repoTargets.byLabel.get(repoTarget)
+    const hours = Number(repoHours)
+    if (!repoPath) return setRepoNotice('보고할 저장소 폴더를 고르세요.')
+    if (!repoBranch) return setRepoNotice('보고할 브랜치를 고르세요.')
+    if (!target) return setRepoNotice('보고를 보낼 채널을 고르세요.')
+    if (!Number.isInteger(hours) || hours < 1 || hours > 168) {
+      return setRepoNotice('주기는 1~168 사이의 시간 수여야 합니다.')
+    }
+    setRepoBusy(true)
+    setRepoNotice('')
+    try {
+      const result = await window.api.discord.repoReportAdd({
+        repoPath,
+        branch: repoBranch,
+        guildId: target.guildId,
+        channelId: target.channelId,
+        intervalHours: hours,
+        instruction: repoInstruction
+      })
+      if (!result.ok) {
+        setRepoNotice(result.detail || '등록하지 못했습니다.')
+        return
+      }
+      setRepoPath('')
+      setRepoRefs(null)
+      setRepoBranch('')
+      setRepoInstruction('')
+      setRepoNotice('')
+      refreshDiscord()
+    } finally {
+      setRepoBusy(false)
+    }
   }
   const setDiscordLlmProvider = async (
     provider: 'ollama' | 'nvidia',
@@ -1729,6 +1882,82 @@ function SettingsView({
             </div>
             <div className="row">
               <div style={{ width: '100%' }}>
+                <div className="row__label">저장소 보고 추가</div>
+                <div className="row__hint">
+                  이미 받아 둔 git 클론을 주기마다 훑어, 지난 보고 이후의 새 커밋을 정리해 채널에
+                  보냅니다. 새 커밋이 없으면 아무 말도 하지 않습니다.
+                </div>
+                <div className="repo-form">
+                  <div className="repo-form__line">
+                    <button className="btn btn--sm" disabled={repoBusy} onClick={() => void pickRepoFolder()}>
+                      폴더 선택
+                    </button>
+                    <span className="repo-form__path" title={repoPath}>
+                      {repoPath || '선택된 저장소 없음'}
+                    </span>
+                  </div>
+                  {repoRefs ? (
+                    <>
+                      <label className="repo-form__field">
+                        <span className="repo-form__key">브랜치</span>
+                        <Select
+                          value={repoBranch}
+                          options={repoBranchOptions}
+                          onChange={setRepoBranch}
+                          ariaLabel="보고할 브랜치"
+                          placeholder="브랜치 선택"
+                        />
+                      </label>
+                      {/* 왜 원격이 기본인지 말해 준다. 이 한 줄이 없으면 사람은 익숙한
+                          `main` 을 고르고, 다른 사람 커밋이 하나도 안 잡히는 채로 몇 주를 보낸다. */}
+                      <div className="row__hint">
+                        다른 사람이 올린 커밋은 <span className="mono">origin/</span> 으로 시작하는 원격
+                        브랜치에만 들어옵니다. 로컬 브랜치를 고르면 내 커밋만 보고됩니다.
+                      </div>
+                    </>
+                  ) : null}
+                  <label className="repo-form__field">
+                    <span className="repo-form__key">보고 채널</span>
+                    <Select
+                      value={repoTarget}
+                      options={repoTargets.labels}
+                      onChange={setRepoTarget}
+                      ariaLabel="보고를 보낼 채널"
+                      placeholder={repoTargets.labels.length ? '채널 선택' : '봇을 먼저 연결하세요'}
+                      disabled={repoTargets.labels.length === 0}
+                    />
+                  </label>
+                  <label className="repo-form__field">
+                    <span className="repo-form__key">주기</span>
+                    <input
+                      className="input repo-form__hours"
+                      value={repoHours}
+                      inputMode="numeric"
+                      onChange={(e) => setRepoHours(e.target.value)}
+                      aria-label="보고 주기(시간)"
+                    />
+                    <span className="repo-form__unit">시간마다</span>
+                  </label>
+                  <label className="repo-form__field">
+                    <span className="repo-form__key">지시</span>
+                    <input
+                      className="input"
+                      value={repoInstruction}
+                      onChange={(e) => setRepoInstruction(e.target.value)}
+                      placeholder="선택 — 보고서에 덧붙일 요청"
+                    />
+                  </label>
+                  <div className="repo-form__line">
+                    <button className="btn" disabled={repoBusy} onClick={() => void addRepoReport()}>
+                      {repoBusy ? '확인 중…' : '등록'}
+                    </button>
+                    {repoNotice ? <span className="repo-form__notice">{repoNotice}</span> : null}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="row">
+              <div style={{ width: '100%' }}>
                 <div className="row__label">예약</div>
                 <div className="row__hint">
                   디스코드 #aiso 채널에서 &quot;오후 8시에 공지방에 회의 알림 보내&quot; 또는 &quot;매일 아침 8시에
@@ -1742,17 +1971,23 @@ function SettingsView({
                       <li key={j.id} className="sched-item">
                         <div className="sched-item__main">
                           <span className={`sched-item__tag${j.kind !== 'message' ? ' sched-item__tag--brief' : ''}`}>
-                            {j.kind === 'briefing' ? '브리핑' : j.kind === 'channel_report' ? '채널 보고' : '메시지'}
+                            {describeScheduleKind(j.kind)}
                           </span>
                           <span className="sched-item__when">
                             {j.repeat === 'daily' ? '매일 ' : j.repeat === 'interval' ? `${j.interval_hours ?? 1}시간마다 ` : ''}
                             {String(j.next_run ?? '').replace('T', ' ')} → #{j.channel_name}
                           </span>
-                          <div className="sched-item__text">
-                            {j.kind === 'channel_report'
-                              ? `${(j.source_channels ?? []).map((source) => `#${source.name}`).join(', ')} → #${j.channel_name}${j.text ? ` · ${j.text}` : ''}`
-                              : j.text}
+                          <div className="sched-item__text" title={j.repo_path || undefined}>
+                            {describeScheduleDetail(j)}
                           </div>
+                          {j.kind === 'repo_report' && (
+                            <div className="sched-item__progress">{describeRepoProgress(j)}</div>
+                          )}
+                          {describeRepoFailure(j) ? (
+                            <div className="sched-item__progress sched-item__progress--warn">
+                              {describeRepoFailure(j)}
+                            </div>
+                          ) : null}
                         </div>
                         <button className="btn btn--sm btn--stop" onClick={() => void removeSchedule(j.id)}>
                           삭제

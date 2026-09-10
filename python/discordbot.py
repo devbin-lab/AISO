@@ -297,6 +297,85 @@ def status() -> dict:
     }
 
 
+def text_channels() -> list[dict]:
+    """붙어 있는 서버마다 글 채널 목록 — 설정 탭의 보고 채널 선택을 채운다.
+
+    봇이 실제로 볼 수 있는 채널만 담는다. 목록에 없는 채널을 고를 수 없게 만드는 것이
+    목적이다 — 예약은 사람이 보지 않는 동안 돌기 때문에, 보낼 수 없는 채널로 등록되면
+    발화 시각마다 조용히 실패하고 아무도 그 사실을 모른다.
+    """
+    client = _S.client
+    if not is_running() or client is None:
+        return []
+    out: list[dict] = []
+    for gid, state in _S.guilds.items():
+        guild = client.get_guild(int(gid)) if str(gid).isdigit() else None
+        if guild is None:
+            continue
+        out.append({
+            "guild_id": str(gid),
+            "guild_name": guild.name,
+            "channels": [
+                {"id": str(ch.id), "name": ch.name}
+                for ch in guild.channels
+                if isinstance(ch, discord.TextChannel)
+            ],
+            "command_channel_id": state.channel_id,
+        })
+    return out
+
+
+async def register_repo_report(
+    *, repo_path: str, branch: str, guild_id: str, channel_id: str,
+    interval_hours, instruction: str = "",
+) -> "tuple[dict | None, str | None]":
+    """설정 탭에서 저장소 보고를 등록한다. 반환 (등록된 잡, 오류).
+
+    디스코드 채널로 들어오는 등록은 소유자에게 승인 버튼을 물어본다 — 말을 건 사람이
+    앱 주인인지 알 수 없기 때문이다. 여기서는 앱 창 앞의 사람이 직접 폴더와 브랜치와
+    채널을 고르고 등록을 눌렀으므로 그 행위 자체가 승인이다. 대신 검증은 똑같이 거친다:
+    저장소가 열리는지, **브랜치가 실제로 있는지**, 채널이 봇에게 보이는지.
+
+    브랜치 확인이 특히 중요하다. 없는 ref 로 등록되면 발화할 때마다 실패하는데, 이
+    기능은 새 커밋이 없을 때 침묵하는 것이 정상이라 밖에서는 구분이 되지 않는다.
+    """
+    import discordsched  # noqa: PLC0415
+    import gitreport  # noqa: PLC0415
+
+    if not is_running():
+        return None, "디스코드 봇을 먼저 연결해 주세요."
+    guild = bound_guild(str(guild_id or ""))
+    if guild is None:
+        return None, "보고를 보낼 서버를 찾지 못했습니다."
+    channel = guild.get_channel(int(channel_id)) if str(channel_id or "").isdigit() else None
+    if not isinstance(channel, discord.TextChannel):
+        return None, "보고를 보낼 글 채널을 찾지 못했습니다."
+
+    try:
+        # fetch 하지 않는다 — 브랜치 목록을 뽑을 때 이미 받아 왔고, 등록 버튼을 누른
+        # 사람을 네트워크 대기로 붙잡아 둘 이유가 없다.
+        baseline = await gitreport.collect(repo_path, branch, "", fetch=False)
+    except gitreport.GitReportError as error:
+        return None, str(error)
+
+    # 이름을 error 로 두지 않는다 — 위 except 절이 쓴 이름이라 파이썬이 절을 벗어나며
+    # 지운다. 같은 이름을 다시 쓰면 사람 눈에는 멀쩡해도 삭제된 변수를 읽는 코드가 된다.
+    draft, refusal = discordsched.build_repo_report_job(
+        repo_path=repo_path,
+        branch=branch,
+        report_channel_id=str(channel.id),
+        report_channel_name=channel.name,
+        interval_hours=interval_hours,
+        instruction=instruction,
+        head=baseline.head,
+        guild_id=str(guild.id),
+    )
+    if refusal:
+        return None, refusal
+    assert draft is not None
+    return discordsched.commit_job(draft), None
+
+
 # 지금 처리 중인 요청이 어느 서버에서 왔는지. 도구 실행 경로가 여기서 대상을 읽는다.
 #
 # contextvar 를 쓰는 이유: 메시지 처리는 서버마다 동시에 돌 수 있어서, 전역 변수 하나에
@@ -715,6 +794,7 @@ async def _repo_report_add_with_approval(channel, args: dict) -> str:
         interval_hours=args.get("interval_hours"),
         instruction=str(args.get("instruction") or ""),
         head=baseline.head,
+        guild_id=current_guild_id(),
     )
     if derr:
         return f"[거부] {derr}"
@@ -1241,6 +1321,39 @@ async def _collect_channel_report_messages(guild, job: dict) -> tuple[list[str],
     return [line for _created, line in collected], updated_sources, errors
 
 
+async def _report_repo_failure(guild, job: dict, reason: str, *, pending: int = 0) -> None:
+    """저장소 보고가 실패했음을 명령 채널(#aiso)에 알린다. 커서는 옮기지 않는다.
+
+    보고 채널이 아니라 **명령 채널**로 보낸다. 보고 채널은 사람이 결과만 읽는 곳이라
+    실패 문구가 섞이면 보고서 이력이 지저분해지고, 무엇보다 전송 자체가 실패한 경우에는
+    그 채널로는 애초에 아무 말도 할 수 없다.
+
+    같은 사유가 이어지면 한 번만 알린다. 모델이 며칠 멈춰 있으면 주기마다 같은 문장이
+    쌓여 명령 채널이 못 쓰게 된다. 사유가 바뀌거나 한 번 성공한 뒤에는 다시 알린다.
+    """
+    import discordsched  # noqa: PLC0415
+
+    repeated = str(job.get("last_failure") or "") == reason
+    discordsched.update_job(job.get("id", ""), {"last_failure": reason})
+    if repeated:
+        return
+    channel_id = command_channel_id(str(guild.id))
+    channel = guild.get_channel(int(channel_id)) if str(channel_id).isdigit() else None
+    if channel is None:
+        return
+    name = Path(str(job.get("repo_path") or "")).name or "저장소"
+    hours = job.get("interval_hours")
+    lines = [f"⚠ **{name}** 저장소 보고를 만들지 못했습니다 — {reason}"]
+    if pending:
+        # 몇 개가 밀려 있는지 밝힌다. 커서를 옮기지 않았으니 다음 회차에 함께 나간다.
+        lines.append(f"커밋 {pending}개는 아직 보고되지 않았습니다.")
+    lines.append(f"다음 회차{f'({hours}시간 뒤)' if hours else ''}에 다시 시도합니다.")
+    try:
+        await channel.send("\n".join(lines))
+    except Exception as error:  # noqa: BLE001 — 알림 실패가 러너를 죽이면 안 된다
+        print(f"[discord] 저장소 보고 실패 알림 전송 실패: {error}")
+
+
 async def _run_repo_report(job: dict) -> None:
     """저장소 보고 1건 — 성공적으로 보낸 뒤에만 커서를 옮긴다.
 
@@ -1250,7 +1363,9 @@ async def _run_repo_report(job: dict) -> None:
     import discordsched  # noqa: PLC0415
     import gitreport  # noqa: PLC0415
 
-    guild = bound_guild()
+    # 등록 때 적어 둔 서버로 간다. 인자 없이 부르면 '지금 처리 중인 서버'를 찾는데,
+    # 예약 러너에는 그 문맥이 없어 서버가 둘 이상이면 None 이 되어 조용히 끝난다.
+    guild = bound_guild(str(job.get("guild_id") or ""))
     if guild is None:
         return
     channel = guild.get_channel(int(job["channel_id"])) if str(job.get("channel_id", "")).isdigit() else None
@@ -1263,7 +1378,7 @@ async def _run_repo_report(job: dict) -> None:
             str(job.get("last_commit") or ""),
         )
     except gitreport.GitReportError as error:
-        await channel.send(f"⚠ 저장소 보고를 만들지 못했습니다 — {error}")
+        await _report_repo_failure(guild, job, str(error))
         return
     if not report.commits:
         # 새 커밋이 없으면 아무 말도 하지 않는다. 조용한 것이 정상이다.
@@ -1284,15 +1399,29 @@ async def _run_repo_report(job: dict) -> None:
             ),
         },
     ]
+    # 생성이 실패하면 **보내지 않고 커서도 옮기지 않는다.**
+    #
+    # 예전에는 실패 문구를 본문 삼아 그대로 보내고 커서를 전진시켰다. 전송에는 성공하니
+    # 커밋이 소모되어, 그 회차의 커밋들은 영영 다시 보고되지 않았다 — 12B 로 커밋 수십
+    # 개를 요약하다 타임아웃이 나는 것은 드문 일이 아니다. 보고서는 누락이 가장 나쁘므로
+    # 실패한 회차는 통째로 다음으로 미룬다.
+    body = ""
+    failure = ""
     try:
         async with _S.gen_lock:
             if _S.generate is None:
                 return
             body = await asyncio.wait_for(_S.generate(messages), timeout=CHANNEL_REPORT_TIMEOUT_S)
     except asyncio.TimeoutError:
-        body = "(보고서 생성이 시간을 초과해 중단되었습니다)"
+        failure = f"보고서 생성이 {CHANNEL_REPORT_TIMEOUT_S}초를 넘겨 중단되었습니다."
     except Exception as error:  # noqa: BLE001
-        body = f"(보고서 생성 실패: {error})"
+        failure = f"보고서 생성 실패: {error}"
+    if not failure and not str(body or "").strip():
+        # 빈 응답도 실패다. 헤더만 있는 보고서를 보내고 커밋을 소모하면 같은 손실이 난다.
+        failure = "모델이 빈 보고서를 내놓았습니다."
+    if failure:
+        await _report_repo_failure(guild, job, failure, pending=len(report.commits))
+        return
 
     name = Path(str(job.get("repo_path") or "")).name or "저장소"
     header = f"📦 **{name}** — {len(report.commits)}개 커밋"
@@ -1302,9 +1431,18 @@ async def _run_repo_report(job: dict) -> None:
             await channel.send(part)
         sent = True
     except Exception as error:  # noqa: BLE001
-        print(f"[discord] 저장소 보고 전송 실패: {error}")
+        await _report_repo_failure(
+            guild, job, f"보고를 채널에 보내지 못했습니다: {error}", pending=len(report.commits)
+        )
     if sent:
-        discordsched.update_job(job.get("id", ""), {"last_commit": report.commits[-1].sha})
+        # 커서와 함께 '언제 보고했는지'도 남긴다. 새 커밋이 없으면 침묵하는 것이 정상인
+        # 기능이라, 이 값이 없으면 설정 탭에서 정상적인 침묵과 고장난 침묵이 똑같아 보인다.
+        # 실패 기록도 함께 지운다 — 지우지 않으면 다음 실패가 '같은 사유'로 묵살된다.
+        discordsched.update_job(job.get("id", ""), {
+            "last_commit": report.commits[-1].sha,
+            "last_reported_at": datetime.now().isoformat(timespec="minutes"),
+            "last_failure": "",
+        })
 
 
 async def _run_channel_report(job: dict) -> None:

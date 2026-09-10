@@ -4935,6 +4935,62 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.sched-item__progress--warn {
+  color: var(--warn, #f0b429);
+  opacity: 1;
+}
+.repo-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.repo-form__line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.repo-form__field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.repo-form__key {
+  flex: 0 0 64px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.repo-form__path {
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.repo-form__hours {
+  width: 72px;
+  flex: 0 0 auto;
+}
+.repo-form__unit {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.repo-form__notice {
+  font-size: 12px;
+  color: var(--warn, #f0b429);
+}
+/* 저장소 보고가 어디까지 봤는지 — 상세보다 한 단계 더 옅게 둔다. */
+.sched-item__progress {
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.75;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .row__control {
   display: flex;
   flex-direction: column;

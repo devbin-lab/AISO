@@ -1493,6 +1493,70 @@ async def discord_schedules_ep():
         return {"jobs": [], "detail": str(e)}
 
 
+@app.get("/discord/channels")
+async def discord_channels_ep():
+    """서버별 글 채널 목록 — 설정 탭의 보고 채널 선택을 채운다.
+
+    봇이 실제로 보는 채널만 담긴다. 목록에 없는 채널은 고를 수 없어야 한다 — 보낼 수
+    없는 채널로 등록되면 발화 시각마다 조용히 실패한다.
+    """
+    if discordbot is None:
+        return {"guilds": [], "detail": "discord.py 미설치"}
+    try:
+        return {"guilds": discordbot.text_channels()}
+    except Exception as e:  # noqa: BLE001
+        return {"guilds": [], "detail": str(e)}
+
+
+class RepoBranchesRequest(BaseModel):
+    repo_path: str
+    refresh: bool = True
+
+
+@app.post("/discord/repo/branches")
+async def discord_repo_branches_ep(req: RepoBranchesRequest):
+    """저장소의 브랜치 목록 — 등록 화면의 드롭다운.
+
+    사람이 브랜치를 손으로 적으면 `main` 과 `origin/main` 을 혼동하고, 그 실수는
+    '영원히 빈 보고서'로만 드러난다. 목록에서 고르게 해 그 실수를 없앤다.
+    """
+    try:
+        import gitreport
+        return {"ok": True, **await gitreport.list_refs(req.repo_path, refresh=req.refresh)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "detail": str(e)}
+
+
+class RepoReportAddRequest(BaseModel):
+    repo_path: str
+    branch: str = ""
+    guild_id: str = ""
+    channel_id: str
+    interval_hours: int = 6
+    instruction: str = ""
+
+
+@app.post("/discord/schedules/repo_report")
+async def discord_repo_report_add_ep(req: RepoReportAddRequest):
+    """설정 탭에서 저장소 보고를 등록한다(앱 창의 등록 버튼이 곧 승인)."""
+    if discordbot is None:
+        return {"ok": False, "detail": "discord.py 미설치"}
+    try:
+        job, error = await discordbot.register_repo_report(
+            repo_path=req.repo_path,
+            branch=req.branch,
+            guild_id=req.guild_id,
+            channel_id=req.channel_id,
+            interval_hours=req.interval_hours,
+            instruction=req.instruction,
+        )
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "detail": str(e)}
+    if error:
+        return {"ok": False, "detail": error}
+    return {"ok": True, "job": job}
+
+
 class ScheduleRemoveRequest(BaseModel):
     id: str
 

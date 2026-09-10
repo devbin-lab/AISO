@@ -24,7 +24,13 @@ import type {
   AgentProject
 } from '../shared/conversation'
 import type { SkillMeta } from '../shared/skill'
-import type { DiscordStatus, DiscordSchedule } from '../shared/discord'
+import type {
+  DiscordStatus,
+  DiscordSchedule,
+  DiscordGuildChannels,
+  RepoBranches,
+  RepoReportInput
+} from '../shared/discord'
 import type { ComfyLaunchResult, ComfySurfaceRequest } from '../shared/comfy'
 import type { AttachmentDropEvent, AttachmentRef } from '../shared/attachments'
 import type { MyDbBridge } from '../shared/mydb'
@@ -132,6 +138,12 @@ export interface AisoAPI {
     status: () => Promise<DiscordStatus>
     schedules: () => Promise<{ jobs: DiscordSchedule[] }>
     scheduleRemove: (id: string) => Promise<{ ok: boolean }>
+    channels: () => Promise<{ guilds: DiscordGuildChannels[]; detail?: string }>
+    pickRepo: () => Promise<string | null>
+    repoBranches: (repoPath: string, refresh?: boolean) => Promise<RepoBranches>
+    repoReportAdd: (
+      input: RepoReportInput
+    ) => Promise<{ ok: boolean; detail?: string; job?: DiscordSchedule }>
   }
   updates: {
     version: () => Promise<string>

@@ -5,6 +5,7 @@
 틀린 수를 말하고, 사람은 그걸 확인할 방법이 없다. 그래서 실제로 겪은 두 결함을
 회귀로 못박는다 — 본문에 파일이 섞여 들어간 것, 상한을 넘긴 파일의 줄 수가 사라진 것.
 """
+import asyncio
 import sys
 from pathlib import Path
 
@@ -223,3 +224,97 @@ def test_a_folder_without_git_is_refused(tmp_path):
 def test_a_real_repository_is_accepted(tmp_path):
     (tmp_path / ".git").mkdir()
     assert gitreport.assert_repository(str(tmp_path)) == tmp_path
+
+
+# ── 브랜치 목록 ─────────────────────────────────────────────────────────
+# 등록 화면의 드롭다운을 채우는 값이다. 사람이 브랜치를 손으로 적으면 `main` 과
+# `origin/main` 을 혼동하는데, 그 실수는 "fetch 는 성공하는데 보고는 영원히 비어 있음"
+# 으로만 드러난다 — 새 커밋이 없을 때 침묵하는 것이 정상 동작이라 아무도 눈치채지 못한다.
+
+def _repo(tmp_path):
+    (tmp_path / ".git").mkdir()
+    return str(tmp_path)
+
+
+def _fake_git(monkeypatch, refs: str, *, current: str = "main", fetch_error: str = ""):
+    async def fake(_repo, args, _timeout):
+        if args[0] == "fetch":
+            if fetch_error:
+                raise gitreport.GitReportError(fetch_error)
+            return ""
+        if args[0] == "rev-parse":
+            return current + "\n"
+        if args[0] == "for-each-ref":
+            return refs
+        raise AssertionError(f"예상하지 못한 git 호출: {args}")
+
+    monkeypatch.setattr(gitreport, "_git", fake)
+
+
+REFS = """refs/heads/main
+refs/heads/feature/login
+refs/remotes/origin/HEAD
+refs/remotes/origin/main
+refs/remotes/origin/feature/login
+"""
+
+
+def test_local_and_remote_branches_are_told_apart(tmp_path, monkeypatch):
+    """슬래시가 든 로컬 브랜치를 원격으로 오분류하면 목록이 거짓말을 한다."""
+    _fake_git(monkeypatch, REFS)
+    refs = asyncio.run(gitreport.list_refs(_repo(tmp_path)))
+    assert refs["local"] == ["main", "feature/login"]
+    assert refs["remote"] == ["origin/main", "origin/feature/login"]
+
+
+def test_the_default_branch_alias_is_not_offered(tmp_path, monkeypatch):
+    """origin/HEAD 는 별칭이라, 고르면 원격 기본 브랜치가 바뀔 때 보는 대상이 조용히 바뀐다."""
+    _fake_git(monkeypatch, REFS)
+    refs = asyncio.run(gitreport.list_refs(_repo(tmp_path)))
+    assert all(not name.endswith("/HEAD") for name in refs["remote"])
+
+
+def test_the_remote_counterpart_of_the_checked_out_branch_is_recommended(tmp_path, monkeypatch):
+    _fake_git(monkeypatch, REFS, current="feature/login")
+    refs = asyncio.run(gitreport.list_refs(_repo(tmp_path)))
+    assert refs["recommended"] == "origin/feature/login"
+
+
+def test_a_local_branch_is_never_recommended_when_a_remote_exists(tmp_path, monkeypatch):
+    """fetch 가 움직이는 것은 origin/* 다. 로컬을 권하면 남의 커밋이 하나도 안 잡힌다."""
+    _fake_git(monkeypatch, REFS, current="지역전용")
+    refs = asyncio.run(gitreport.list_refs(_repo(tmp_path)))
+    assert refs["recommended"] == "origin/main"
+
+
+def test_without_any_remote_the_checked_out_branch_is_recommended(tmp_path, monkeypatch):
+    _fake_git(monkeypatch, "refs/heads/main\n", current="main")
+    refs = asyncio.run(gitreport.list_refs(_repo(tmp_path)))
+    assert refs["recommended"] == "main"
+    assert refs["remote"] == []
+
+
+def test_a_detached_head_is_not_treated_as_a_branch_name(tmp_path, monkeypatch):
+    _fake_git(monkeypatch, REFS, current="HEAD")
+    refs = asyncio.run(gitreport.list_refs(_repo(tmp_path)))
+    assert refs["current"] == ""
+    assert refs["recommended"] == "origin/main"
+
+
+def test_a_failed_refresh_still_returns_the_list_and_says_so(tmp_path, monkeypatch):
+    """네트워크가 없다고 등록을 막을 이유는 없다. 다만 목록이 오래됐다는 사실은 밝힌다."""
+    _fake_git(monkeypatch, REFS, fetch_error="원격에 접근할 수 없습니다")
+    refs = asyncio.run(gitreport.list_refs(_repo(tmp_path)))
+    assert refs["remote"] == ["origin/main", "origin/feature/login"]
+    assert "오래된" in refs["warning"]
+
+
+def test_skipping_the_refresh_never_touches_the_network(tmp_path, monkeypatch):
+    _fake_git(monkeypatch, REFS, fetch_error="불러선 안 되는 fetch")
+    refs = asyncio.run(gitreport.list_refs(_repo(tmp_path), refresh=False))
+    assert refs["warning"] == ""
+
+
+def test_a_folder_that_is_not_a_repository_is_refused_before_any_git_call(tmp_path):
+    with pytest.raises(gitreport.GitReportError):
+        asyncio.run(gitreport.list_refs(str(tmp_path)))

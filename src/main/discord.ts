@@ -227,6 +227,69 @@ export async function discordSchedules(): Promise<unknown> {
   }
 }
 
+/** 봇이 보는 서버·글 채널 목록 — 보고 채널 선택을 채운다. */
+export async function discordChannels(): Promise<unknown> {
+  const info = backendInfo()
+  if (info.state !== 'ready' || !info.port) return { guilds: [], detail: '백엔드 준비 안 됨' }
+  try {
+    const r = await fetch(`http://127.0.0.1:${info.port}/discord/channels`, {
+      headers: { 'X-Aiso-Token': backendToken() }
+    })
+    return await r.json()
+  } catch {
+    return { guilds: [] }
+  }
+}
+
+/** 저장소의 브랜치 목록 — 사람이 main 과 origin/main 을 손으로 적지 않게 한다. */
+export async function discordRepoBranches(
+  repoPath: string,
+  refresh = true
+): Promise<unknown> {
+  const info = backendInfo()
+  if (info.state !== 'ready' || !info.port) return { ok: false, detail: '백엔드 준비 안 됨' }
+  try {
+    const r = await fetch(`http://127.0.0.1:${info.port}/discord/repo/branches`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Aiso-Token': backendToken() },
+      body: JSON.stringify({ repo_path: repoPath, refresh })
+    })
+    return await r.json()
+  } catch (error) {
+    return { ok: false, detail: String(error) }
+  }
+}
+
+/** 저장소 보고 등록 — 이 창에서 사람이 고르고 누른 것이 곧 승인이다. */
+export async function discordRepoReportAdd(input: {
+  repoPath: string
+  branch: string
+  guildId: string
+  channelId: string
+  intervalHours: number
+  instruction: string
+}): Promise<unknown> {
+  const info = backendInfo()
+  if (info.state !== 'ready' || !info.port) return { ok: false, detail: '백엔드 준비 안 됨' }
+  try {
+    const r = await fetch(`http://127.0.0.1:${info.port}/discord/schedules/repo_report`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Aiso-Token': backendToken() },
+      body: JSON.stringify({
+        repo_path: input.repoPath,
+        branch: input.branch,
+        guild_id: input.guildId,
+        channel_id: input.channelId,
+        interval_hours: input.intervalHours,
+        instruction: input.instruction
+      })
+    })
+    return await r.json()
+  } catch (error) {
+    return { ok: false, detail: String(error) }
+  }
+}
+
 /** 예약 삭제(설정 탭 목록의 삭제 버튼). */
 export async function discordScheduleRemove(id: string): Promise<{ ok: boolean }> {
   const info = backendInfo()

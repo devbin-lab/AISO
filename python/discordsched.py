@@ -378,7 +378,8 @@ def build_channel_report_job(
 
 def build_repo_report_job(
     *, repo_path: str, branch: str, report_channel_id: str, report_channel_name: str,
-    interval_hours, instruction: str = "", head: str = "", now: "datetime | None" = None,
+    interval_hours, instruction: str = "", head: str = "", guild_id: str = "",
+    now: "datetime | None" = None,
 ) -> "tuple[dict | None, str | None]":
     """저장소 보고 예약 1건을 만든다. 등록은 하지 않는다.
 
@@ -410,6 +411,10 @@ def build_repo_report_job(
     current = now or datetime.now()
     return {
         "kind": "repo_report",
+        # 어느 서버의 채널인지 함께 적는다. 봇이 여러 서버에 붙어 있으면 실행 시점에는
+        # '지금 처리 중인 서버'라는 문맥이 없어서, 이 값이 없으면 대상 서버를 정하지
+        # 못해 보고가 조용히 사라진다(예약은 사람이 보지 않는 동안 돈다).
+        "guild_id": str(guild_id or ""),
         "channel_id": str(report_channel_id),
         "channel_name": str(report_channel_name),
         "repo_path": path,

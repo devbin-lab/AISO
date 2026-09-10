@@ -5,81 +5,9 @@ import type { BackendInfo } from '../../../shared/backend'
 import { DEFAULT_SETTINGS } from '../../../shared/settings'
 import SettingsView from './SettingsView'
 import { ConfirmHost } from '../components/ConfirmDialog'
+import { installSettingsApiStub as installApiStub } from '../test/settings-api-stub'
 
 const READY_BACKEND: BackendInfo = { state: 'ready', port: 8123 }
-
-function installApiStub(): void {
-  Object.defineProperty(window, 'api', {
-    configurable: true,
-    value: {
-      settings: {
-        recoveryStatus: vi.fn().mockResolvedValue({ kind: 'none' })
-      },
-      nvidia: {
-        credential: {
-          status: vi.fn().mockResolvedValue({
-            encryptionAvailable: true,
-            hasStoredCredential: false,
-            matchesCurrentBinding: false,
-            usableForCurrentBinding: false
-          }),
-          save: vi.fn().mockResolvedValue(undefined),
-          replace: vi.fn().mockResolvedValue(undefined),
-          delete: vi.fn().mockResolvedValue(undefined)
-        },
-        models: {
-          refresh: vi.fn().mockResolvedValue({
-            models: ['model/a', 'model/b'],
-            refreshedAt: '2026-08-02T05:00:00.000Z'
-          })
-        },
-        capabilities: {
-          status: vi.fn().mockResolvedValue(null),
-          probe: vi.fn().mockResolvedValue({
-            schemaVersion: 1,
-            binding: {
-              deploymentMode: 'build',
-              endpoint: 'https://integrate.api.nvidia.com/v1'
-            },
-            model: 'model/a',
-            capabilities: { chat: 'supported', stream: 'supported', tools: 'supported' },
-            checkedAt: '2026-08-02T05:01:00.000Z'
-          }),
-          clear: vi.fn().mockResolvedValue(undefined)
-        }
-      },
-      backend: {
-        token: vi.fn(() => 'test-token')
-      },
-      updates: {
-        version: vi.fn().mockResolvedValue('0.3.0'),
-        onStatus: vi.fn(() => () => {})
-      },
-      comfy: {
-        pickInstall: vi.fn().mockResolvedValue(null),
-        models: {
-          list: vi.fn().mockResolvedValue({ profiles: [] }),
-          onImportProgress: vi.fn(() => () => {})
-        }
-      },
-      myDb: {
-        storageRoot: vi.fn().mockResolvedValue('C:\\Users\\tester\\Documents\\Aiso My DB'),
-        pickStorageRoot: vi.fn().mockResolvedValue(null)
-      },
-      skills: {
-        list: vi.fn().mockResolvedValue([]),
-        remove: vi.fn().mockResolvedValue(undefined)
-      },
-      discord: {
-        hasToken: vi.fn().mockResolvedValue(false),
-        status: vi.fn().mockResolvedValue(null),
-        schedules: vi.fn().mockResolvedValue({ jobs: [] }),
-        scheduleRemove: vi.fn().mockResolvedValue(undefined),
-        setLlmProvider: vi.fn()
-      }
-    }
-  })
-}
 
 function openLlmTab(): void {
   fireEvent.click(screen.getByRole('button', { name: 'LLM' }))

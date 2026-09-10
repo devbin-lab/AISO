@@ -22,6 +22,10 @@ MAX_FILES_PER_COMMIT = 40
 MAX_SUBJECT = 200
 MAX_BODY = 4000
 FETCH_TIMEOUT_S = 90
+# 브랜치 목록은 사람이 등록 화면에서 기다리는 동안 뽑는다. 보고 회차의 fetch 와 같은
+# 90초를 쓰면 폴더를 고른 뒤 화면이 멈춘 것처럼 보인다 — 짧게 끊고 경고로 알린다.
+REFS_FETCH_TIMEOUT_S = 20
+MAX_REFS = 200
 LOG_TIMEOUT_S = 30
 # 실제로 사람이 쓴 코드와 도구가 만들어 낸 산출물을 가른다. 유니티에서는 줄 수의 90%가
 # 후자라, 구분하지 않으면 "무엇을 했는가"가 에셋 줄 수에 묻힌다.
@@ -322,3 +326,74 @@ def build_facts(report: RepoReport) -> str:
                      f'+{commit.added}/-{commit.removed}')
         lines.append('')
     return '\n'.join(lines)
+
+
+def _pick_recommended(current: str, remotes: list[str]) -> str:
+    """어느 ref 를 먼저 권할지.
+
+    거의 언제나 원격 추적 ref 가 정답이다. 보고는 매번 fetch 한 뒤 읽는데, fetch 가
+    움직이는 것은 `origin/main` 이지 로컬 `main` 이 아니다. 로컬 브랜치를 고르면
+    다른 사람이 올린 커밋이 하나도 잡히지 않고, 새 커밋이 없으면 침묵하는 것이 정상
+    동작이라 잘못 골랐다는 사실조차 드러나지 않는다.
+    """
+    if current and f'origin/{current}' in remotes:
+        return f'origin/{current}'
+    for name in ('origin/main', 'origin/master'):
+        if name in remotes:
+            return name
+    return remotes[0] if remotes else (current or 'HEAD')
+
+
+async def list_refs(repo_path: str, *, refresh: bool = True) -> dict:
+    """저장소의 브랜치 목록 — 등록 화면의 드롭다운을 채운다.
+
+    사람이 브랜치 이름을 손으로 적게 두지 않으려는 것이다. `main` 과 `origin/main` 은
+    한 글자 차이지만 결과는 '전부 보고됨'과 '영원히 빈 보고서'로 갈린다.
+
+    refresh 면 먼저 fetch 한다 — 다른 사람이 새로 만든 브랜치는 fetch 전에는 목록에
+    없다. 실패해도 목록은 돌려주고 사실만 warning 에 남긴다(네트워크가 없다고 등록을
+    막을 이유는 없다).
+    """
+    repo = assert_repository(repo_path)
+    warning = ''
+    if refresh:
+        try:
+            await _git(repo, ['fetch', '--quiet'], REFS_FETCH_TIMEOUT_S)
+        except GitReportError as error:
+            warning = f'원격을 새로 받지 못했습니다 — 목록이 오래된 것일 수 있습니다. ({error})'
+
+    try:
+        current = (await _git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'], LOG_TIMEOUT_S)).strip()
+    except GitReportError:
+        current = ''  # 커밋이 하나도 없는 저장소 등 — 목록 자체는 계속 만든다
+    if current == 'HEAD':
+        current = ''  # 분리된 HEAD 는 브랜치 이름이 아니다
+
+    # 짧은 이름이 아니라 전체 ref 로 받는다. `feature/login` 같은 로컬 브랜치도 이름에
+    # 슬래시가 있어서, 짧은 이름만 보고 원격 여부를 가르면 로컬을 원격으로 오분류한다.
+    raw = await _git(repo, [
+        'for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/remotes',
+    ], LOG_TIMEOUT_S)
+    local: list[str] = []
+    remote: list[str] = []
+    for line in raw.splitlines():
+        ref = line.strip()
+        if ref.startswith('refs/heads/'):
+            local.append(ref[len('refs/heads/'):])
+        elif ref.startswith('refs/remotes/'):
+            name = ref[len('refs/remotes/'):]
+            # origin/HEAD 는 브랜치가 아니라 기본 브랜치를 가리키는 별칭이다. 목록에 두면
+            # 사람이 고를 수 있고, 원격의 기본 브랜치가 바뀌면 보는 대상이 조용히 바뀐다.
+            if not name.endswith('/HEAD'):
+                remote.append(name)
+    local = local[:MAX_REFS]
+    remote = remote[:MAX_REFS]
+
+    return {
+        'repo_path': str(repo),
+        'current': current,
+        'local': local,
+        'remote': remote,
+        'recommended': _pick_recommended(current, remote),
+        'warning': warning,
+    }

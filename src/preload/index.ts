@@ -24,7 +24,13 @@ import type {
   AgentProject
 } from '../shared/conversation'
 import type { SkillMeta } from '../shared/skill'
-import type { DiscordStatus, DiscordSchedule } from '../shared/discord'
+import type {
+  DiscordStatus,
+  DiscordSchedule,
+  DiscordGuildChannels,
+  RepoBranches,
+  RepoReportInput
+} from '../shared/discord'
 import type { ComfyLaunchResult, ComfySurfaceRequest } from '../shared/comfy'
 import type { AttachmentDropEvent, AttachmentRef } from '../shared/attachments'
 import type {
@@ -349,7 +355,16 @@ const api = {
     status: (): Promise<DiscordStatus> => ipcRenderer.invoke('discord:status'),
     schedules: (): Promise<{ jobs: DiscordSchedule[] }> => ipcRenderer.invoke('discord:schedules'),
     scheduleRemove: (id: string): Promise<{ ok: boolean }> =>
-      ipcRenderer.invoke('discord:schedule-remove', id)
+      ipcRenderer.invoke('discord:schedule-remove', id),
+    channels: (): Promise<{ guilds: DiscordGuildChannels[]; detail?: string }> =>
+      ipcRenderer.invoke('discord:channels'),
+    pickRepo: (): Promise<string | null> => ipcRenderer.invoke('discord:pick-repo'),
+    repoBranches: (repoPath: string, refresh = true): Promise<RepoBranches> =>
+      ipcRenderer.invoke('discord:repo-branches', repoPath, refresh),
+    repoReportAdd: (
+      input: RepoReportInput
+    ): Promise<{ ok: boolean; detail?: string; job?: DiscordSchedule }> =>
+      ipcRenderer.invoke('discord:repo-report-add', input)
   },
   updates: {
     version: (): Promise<string> => ipcRenderer.invoke('app:version'),
