@@ -82,6 +82,8 @@ export interface DiscordSchedule {
    * 며칠 뒤에 화면을 보는 사람에게는 이 값이 유일한 단서다.
    */
   last_failure?: string
+  /** 같은 저장소·브랜치의 이전 예약이 본 지점을 이어받았으면 그 시각. 등록 응답에만 의미가 있다. */
+  resumed_from?: string
   next_run: string // ISO(YYYY-MM-DDTHH:MM)
   created?: string
 }

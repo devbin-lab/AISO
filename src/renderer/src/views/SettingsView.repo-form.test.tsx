@@ -392,3 +392,23 @@ describe('예약 목록 자동 갱신', () => {
     await waitFor(() => expect(discord.schedules.mock.calls.length).toBeGreaterThan(before))
   })
 })
+
+describe('재등록', () => {
+  it('이전 보고 지점을 이어받았으면 그 사실을 말한다', async () => {
+    stubApi({
+      repoReportAdd: vi.fn().mockResolvedValue({
+        ok: true,
+        job: { id: 'j', kind: 'repo_report', resumed_from: '2026-09-10T23:43' }
+      })
+    })
+    openDiscordSection()
+
+    fireEvent.click(screen.getByRole('button', { name: '폴더 선택' }))
+    await waitFor(() => expect(screen.getByText('D:/My_Git/AISO')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: '보고를 보낼 채널' }))
+    fireEvent.click(screen.getByRole('option', { name: '학기작 개발 · #dev-log' }))
+    fireEvent.click(screen.getByRole('button', { name: '등록' }))
+
+    await waitFor(() => expect(screen.getByText(/이전 보고 지점\(2026-09-10 23:43\)부터/)).toBeTruthy())
+  })
+})

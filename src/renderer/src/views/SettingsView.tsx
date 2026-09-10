@@ -827,7 +827,13 @@ function SettingsView({
       setRepoRefs(null)
       setRepoBranch('')
       setRepoInstruction('')
-      setRepoNotice('')
+      // 이전 예약이 본 지점을 이어받았으면 말해 준다. 등록 시점부터 새로 보는 줄 알고
+      // 지운 사이의 커밋을 따로 챙기려는 사람이 있다.
+      setRepoNotice(
+        result.job?.resumed_from
+          ? `등록했습니다. 이전 보고 지점(${result.job.resumed_from.replace('T', ' ')})부터 이어서 봅니다.`
+          : ''
+      )
       refreshDiscord()
     } finally {
       setRepoBusy(false)

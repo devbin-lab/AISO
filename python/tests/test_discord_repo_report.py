@@ -916,3 +916,107 @@ def test_the_failure_notice_names_the_time_for_daily_jobs(monkeypatch):
     asyncio.run(discordbot._run_repo_report(job))
 
     assert "매일 09:00" in command.sent[0]
+
+
+# ── 서버가 둘 이상일 때의 러너 관문 ────────────────────────────────────
+def test_the_runner_reaches_a_repo_report_even_with_several_servers(monkeypatch):
+    """두 번째 서버에 초대한 뒤로 예약 시각만 흘러가고 보고는 한 번도 나가지 않았다.
+
+    러너가 종류를 보기 전에 '지금 처리 중인 서버'를 먼저 찾았고, 예약에는 그 문맥이
+    없어 서버가 둘이면 None 이었다. 저장소 보고는 잡에 적힌 서버로 스스로 찾아간다."""
+    right = FakeChannel(123)
+    job = _run_job(guild_id="222")
+    _arrange(monkeypatch, [_commit("aaaa1111")], right,
+             guilds={"111": FakeGuild(FakeChannel(123)), "222": FakeGuild(right)})
+    # 인자 없이 부르면 문맥이 없다 — 서버가 둘인 상태 그대로.
+    table = {"111": FakeGuild(FakeChannel(123)), "222": FakeGuild(right)}
+    monkeypatch.setattr(discordbot, "bound_guild",
+                        lambda guild_id="": table.get(str(guild_id)) if guild_id else None)
+
+    asyncio.run(discordbot._run_job(job))
+
+    assert len(right.sent) == 1
+
+
+# ── 재등록이 이전 보고 지점을 잇는다 ────────────────────────────────────
+# 주기를 바꾸는 길은 지우고 다시 만드는 것뿐이다. 새 예약이 등록 시점의 HEAD 를 기준으로
+# 삼으면 그 사이의 커밋은 영영 보고되지 않는다.
+
+def test_a_fresh_repository_starts_from_head():
+    job, _e = build(head="head0000")
+    assert job["last_commit"] == "head0000"
+    assert job["resumed_from"] == ""
+
+
+def test_advancing_the_cursor_is_remembered_outside_the_job():
+    job = discordsched.commit_job(build(head="head0000")[0])
+    discordsched.update_job(job["id"], {"last_commit": "seen1111"})
+    remembered = discordsched.recall_repo_cursor(job["repo_path"], job["branch"])
+    assert remembered is not None and remembered["last_commit"] == "seen1111"
+
+
+def test_re_registering_resumes_from_the_remembered_point():
+    first = discordsched.commit_job(build(head="head0000")[0])
+    discordsched.update_job(first["id"], {"last_commit": "seen1111"})
+    discordsched.remove(first["id"])
+
+    second, _e = build(head="head9999")
+    assert second["last_commit"] == "seen1111", "지운 사이의 커밋을 잃지 않는다"
+    assert second["resumed_from"]
+
+
+def test_removing_a_job_remembers_where_it_was():
+    """전진한 적이 없어도(등록만 하고 지움) 등록 시점의 기준을 남긴다."""
+    job = discordsched.commit_job(build(head="head0000")[0])
+    discordsched.remove(job["id"])
+    assert discordsched.recall_repo_cursor(job["repo_path"], job["branch"])["last_commit"] == "head0000"
+
+
+def test_all_branches_resume_per_ref():
+    first = discordsched.commit_job(build(branch=ALL, head="", cursors={"origin/main": "a1"})[0])
+    discordsched.update_job(first["id"], {"branch_cursors": {"origin/main": "a2", "origin/dev": "d1"}})
+    discordsched.remove(first["id"])
+
+    second, _e = build(branch=ALL, head="", cursors={"origin/main": "a3", "origin/dev": "d2"})
+    assert second["branch_cursors"] == {"origin/main": "a2", "origin/dev": "d1"}
+    assert second["resumed_from"]
+
+
+def test_memory_is_per_branch_not_per_repository():
+    first = discordsched.commit_job(build(branch="origin/main", head="m0")[0])
+    discordsched.update_job(first["id"], {"last_commit": "m1"})
+    discordsched.remove(first["id"])
+
+    other, _e = build(branch="origin/dev", head="d0")
+    assert other["last_commit"] == "d0"
+    assert other["resumed_from"] == ""
+
+
+def test_the_path_key_ignores_case_and_separators():
+    first = discordsched.commit_job(build(repo_path=r"D:\GitHub\CK_SemesterProject", head="h0")[0])
+    discordsched.update_job(first["id"], {"last_commit": "h1"})
+    discordsched.remove(first["id"])
+
+    again, _e = build(repo_path="d:/github/ck_semesterproject/", head="h9")
+    assert again["last_commit"] == "h1"
+
+
+def test_switching_modes_does_not_borrow_the_other_modes_cursor():
+    """한 브랜치 커서(sha 하나)를 모든 브랜치 모드에 쓸 수는 없다 — 다른 자료다."""
+    first = discordsched.commit_job(build(branch="origin/main", head="m0")[0])
+    discordsched.update_job(first["id"], {"last_commit": "m1"})
+    discordsched.remove(first["id"])
+
+    all_job, _e = build(branch=ALL, head="", cursors={"origin/main": "m9"})
+    assert all_job["branch_cursors"] == {"origin/main": "m9"}
+    assert all_job["resumed_from"] == ""
+
+
+def test_registering_from_the_app_resumes_too(monkeypatch):
+    first = discordsched.commit_job(build(branch="origin/main", head="m0")[0])
+    discordsched.update_job(first["id"], {"last_commit": "m1"})
+    discordsched.remove(first["id"])
+
+    job, error = _register(monkeypatch, branch="origin/main")
+    assert error is None and job is not None
+    assert job["last_commit"] == "m1"

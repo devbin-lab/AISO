@@ -811,6 +811,7 @@ async def _repo_report_add_with_approval(channel, args: dict) -> str:
         f"· 브랜치: {draft['branch']} (현재 {baseline.head})\n"
         f"· 보고 채널: #{ch_name}\n"
         f"· 발화: {discordsched.describe_cadence(draft)}\n"
+        + (f"· 이전 보고 지점({draft['resumed_from']})부터 이어서 봅니다.\n" if draft.get("resumed_from") else "") +
         f"· 첫 보고: {draft['next_run']}\n"
         + (f"· 지시: {draft['text']}\n" if draft["text"] else "")
         + "\n등록 이후의 새 커밋만 보고합니다. 커밋 메시지와 파일·줄 수를 보내며 "
@@ -1651,14 +1652,17 @@ async def _run_job(job: dict) -> None:
     import discordops  # noqa: PLC0415
     import discordsched  # noqa: PLC0415
 
+    # 저장소 보고는 잡에 적힌 서버로 스스로 찾아간다. 여기서 먼저 '지금 처리 중인 서버'를
+    # 찾으면 봇이 두 서버 이상에 붙은 순간부터 None 이 되어 보고가 한 번도 돌지 않는다 —
+    # 실제로 두 번째 서버에 초대한 뒤로 예약 시각만 흘러가고 보고는 나가지 않았다.
+    if job.get("kind") == "repo_report":
+        await _run_repo_report(job)
+        return
     guild = bound_guild()
     if guild is None:
         return
     if job.get("kind") == "channel_report":
         await _run_channel_report(job)
-        return
-    if job.get("kind") == "repo_report":
-        await _run_repo_report(job)
         return
     if job.get("missed"):
         # 앱이 꺼져 있어 놓친 예약 → 그 서버의 명령 채널에 안내

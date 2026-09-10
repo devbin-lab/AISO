@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any  # 타입 표기 전용(런타임 의존 없음)
 
 SCHEDULES_FILE = "schedules.json"
+# 저장소 보고가 어디까지 보고했는지를 예약과 별도로 기억한다. 예약을 지우고 다시 만들어도
+# (주기를 바꾸려면 그 길뿐이다) 그 사이의 커밋을 잃지 않기 위해서다.
+REPO_CURSORS_FILE = "repo_cursors.json"
 MAX_JOBS = 20          # 등록 가능한 예약 수 상한(폭주 방지)
 TEXT_MAX = 2000        # 메시지 본문/브리핑 지시 길이 상한
 MISSED_GRACE_S = 600   # 이보다 오래 지난 발화는 '놓침'으로 처리(실행 대신 안내)
@@ -79,10 +82,71 @@ def jobs() -> list[dict]:
     return [dict(j) for j in _JOBS]
 
 
+# ── 저장소 커서 기억 ─────────────────────────────────────────────────────
+def _cursor_key(repo_path: str, branch: str) -> str:
+    """같은 저장소·같은 브랜치면 같은 열쇠. 윈도우 경로는 대소문자와 구분자를 가리지 않는다."""
+    return f"{os.path.normcase(os.path.normpath(str(repo_path or '').strip()))}|{str(branch or '').strip()}"
+
+
+def _cursors_path() -> "Path | None":
+    return (_DIR / REPO_CURSORS_FILE) if _DIR else None
+
+
+def _load_cursors() -> dict:
+    p = _cursors_path()
+    if not p or not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def remember_repo_cursor(job: dict) -> None:
+    """저장소 보고 잡의 '어디까지 봤는가'를 예약 밖에 적어 둔다.
+
+    커서가 전진할 때마다, 그리고 예약이 지워질 때 부른다. 예약을 지우고 다시 만드는 것이
+    주기를 바꾸는 유일한 길이라, 여기 적어 두지 않으면 재등록 사이의 커밋이 영영 보고되지
+    않는다 — 새 예약은 등록 시점의 HEAD 를 기준으로 삼기 때문이다.
+    """
+    if job.get("kind") != "repo_report":
+        return
+    p = _cursors_path()
+    if not p:
+        return
+    memory = _load_cursors()
+    memory[_cursor_key(str(job.get("repo_path") or ""), str(job.get("branch") or ""))] = {
+        "last_commit": str(job.get("last_commit") or ""),
+        "branch_cursors": dict(job.get("branch_cursors") or {}),
+        "updated": datetime.now().isoformat(timespec="minutes"),
+    }
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(memory, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError:
+        pass
+
+
+def recall_repo_cursor(repo_path: str, branch: str) -> "dict | None":
+    """같은 저장소·브랜치로 보고한 적이 있으면 그때의 커서. 없으면 None."""
+    found = _load_cursors().get(_cursor_key(repo_path, branch))
+    if not isinstance(found, dict):
+        return None
+    if not (found.get("last_commit") or found.get("branch_cursors")):
+        return None
+    return found
+
+
 def remove(job_id: str) -> bool:
     global _JOBS
     jid = str(job_id or "").strip()
     before = len(_JOBS)
+    for j in _JOBS:
+        if j.get("id") == jid:
+            remember_repo_cursor(j)  # 지우기 전에 어디까지 봤는지 남긴다
     _JOBS = [j for j in _JOBS if j.get("id") != jid]
     if len(_JOBS) != before:
         _save()
@@ -102,6 +166,8 @@ def update_job(job_id: str, changes: dict) -> bool:
         updated.update(changes)
         _JOBS[index] = updated
         _save()
+        if "last_commit" in changes or "branch_cursors" in changes:
+            remember_repo_cursor(updated)
         return True
     return False
 
@@ -456,6 +522,20 @@ def build_repo_report_job(
     note = str(instruction or "").strip()
     if len(note) > MAX_REPORT_INSTRUCTION:
         return None, f"보고서 지시는 최대 {MAX_REPORT_INSTRUCTION}자까지 입력할 수 있습니다."
+    # 같은 저장소·브랜치로 보고한 적이 있으면 그때 본 지점부터 잇는다. 등록 시점의 HEAD 를
+    # 기준으로 삼으면 지우고 다시 만든 사이의 커밋이 영영 보고되지 않는다. 기준 커밋이
+    # 그새 사라졌으면(강제 푸시) 수집기가 최신 1건으로 되돌리며 그 사실을 적는다.
+    baseline_commit = str(head or "").strip()
+    baseline_cursors = dict(cursors or {}) if ref == ALL_BRANCHES else {}
+    resumed_from = ""
+    remembered = recall_repo_cursor(path, ref)
+    if remembered:
+        if ref == ALL_BRANCHES and remembered.get("branch_cursors"):
+            baseline_cursors = dict(remembered["branch_cursors"])
+            resumed_from = str(remembered.get("updated") or "")
+        elif ref != ALL_BRANCHES and remembered.get("last_commit"):
+            baseline_commit = str(remembered["last_commit"])
+            resumed_from = str(remembered.get("updated") or "")
     return {
         "kind": "repo_report",
         # 어느 서버의 채널인지 함께 적는다. 봇이 여러 서버에 붙어 있으면 실행 시점에는
@@ -467,10 +547,12 @@ def build_repo_report_job(
         "repo_path": path,
         "branch": ref,
         # 등록 시점의 HEAD 를 기준으로 삼는다. 첫 보고가 저장소 전체 역사를 쏟아내지 않게 한다.
-        "last_commit": str(head or "").strip(),
+        "last_commit": baseline_commit,
         # 모든 브랜치 모드는 기준이 하나가 아니라 ref 마다 하나다. 브랜치가 각자 다른
         # 속도로 움직이므로 sha 하나로는 "어디까지 봤는가"를 적을 수 없다.
-        "branch_cursors": dict(cursors or {}) if ref == ALL_BRANCHES else {},
+        "branch_cursors": baseline_cursors,
+        # 이전 보고 지점을 이어받았으면 언제 것인지. 화면과 미리보기가 그 사실을 말한다.
+        "resumed_from": resumed_from,
         "text": note,
         **schedule,
     }, None
