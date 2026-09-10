@@ -1378,8 +1378,11 @@ async def _report_repo_failure(guild, job: dict, reason: str, *, pending: int = 
         print(f"[discord] 저장소 보고 실패 알림 전송 실패: {error}")
 
 
-async def _run_repo_report(job: dict) -> str:
+async def _run_repo_report(job: dict, *, preview: bool = False) -> str:
     """저장소 보고 1건 — 성공적으로 보낸 뒤에만 커서를 옮긴다. 결과 상태를 돌려준다.
+
+    preview 면 커서를 읽지도 쓰지도 않고 최근 커밋 몇 개로 보고서를 만든다. 등록 직후에는
+    정의상 새 커밋이 0개라, 확인하려고 누른 '지금 보고'가 언제나 빈손이었다.
 
     커서를 먼저 옮기면 전송 실패한 회차의 커밋이 영영 보고되지 않는다. 반대로 나중에
     옮기면 최악의 경우 같은 내용을 한 번 더 보내는데, 보고서는 중복이 누락보다 낫다.
@@ -1401,12 +1404,12 @@ async def _run_repo_report(job: dict) -> str:
     if job_id:
         _RUNNING_REPORTS.add(job_id)
     try:
-        return await _run_repo_report_body(guild, channel, job)
+        return await _run_repo_report_body(guild, channel, job, preview=preview)
     finally:
         _RUNNING_REPORTS.discard(job_id)
 
 
-async def _run_repo_report_body(guild, channel, job: dict) -> str:
+async def _run_repo_report_body(guild, channel, job: dict, *, preview: bool = False) -> str:
     """수집 → 생성 → 전송. 동시 실행 가드 안에서만 불린다."""
     import discordsched  # noqa: PLC0415
     import gitreport  # noqa: PLC0415
@@ -1414,7 +1417,9 @@ async def _run_repo_report_body(guild, channel, job: dict) -> str:
     branch = str(job.get("branch") or "HEAD")
     all_branches = branch == gitreport.ALL_BRANCHES
     try:
-        if all_branches:
+        if preview:
+            report = await gitreport.collect_recent(str(job.get("repo_path") or ""), branch)
+        elif all_branches:
             report = await gitreport.collect_all_branches(
                 str(job.get("repo_path") or ""),
                 dict(job.get("branch_cursors") or {}),
@@ -1429,6 +1434,8 @@ async def _run_repo_report_body(guild, channel, job: dict) -> str:
         await _report_repo_failure(guild, job, str(error))
         return REPORT_FAILED
     if not report.commits:
+        if preview:
+            return REPORT_QUIET  # 커밋이 하나도 없는 저장소 — 미리보기는 커서를 건드리지 않는다
         # 새 커밋이 없으면 아무 말도 하지 않는다. 조용한 것이 정상이다.
         # 다만 기준점은 지금 상태로 당겨 둔다 — 등록 직후 첫 회차나, 기준이 사라져
         # 다시 잡아야 하는 경우가 여기로 온다.
@@ -1478,7 +1485,14 @@ async def _run_repo_report_body(guild, channel, job: dict) -> str:
 
     name = Path(str(job.get("repo_path") or "")).name or "저장소"
     header = f"📦 **{name}** — {len(report.commits)}개 커밋"
-    if all_branches and report.branch != gitreport.ALL_BRANCHES:
+    if preview:
+        # 정기 보고와 눈으로 구별되어야 한다. 이 커밋들은 '아직 보고되지 않은 것'이 아니다.
+        header = (
+            f"👀 **{name}** 미리보기 — 최근 {len(report.commits)}개 커밋"
+            + chr(10)
+            + "(등록 이전 커밋입니다. 정기 보고의 순서는 그대로입니다.)"
+        )
+    elif all_branches and report.branch != gitreport.ALL_BRANCHES:
         # 어느 브랜치가 움직였는지 제목에 적는다. 여러 브랜치를 한꺼번에 보는 모드에서는
         # 이 줄이 없으면 어디서 벌어진 일인지 보고서를 다 읽어야 알 수 있다.
         header += f" · {report.branch}"
@@ -1491,6 +1505,8 @@ async def _run_repo_report_body(guild, channel, job: dict) -> str:
         await _report_repo_failure(
             guild, job, f"보고를 채널에 보내지 못했습니다: {error}", pending=len(report.commits)
         )
+    if sent and preview:
+        return REPORT_SENT  # 미리보기는 커서에도 마지막 보고 시각에도 남지 않는다
     if sent:
         # 커서와 함께 '언제 보고했는지'도 남긴다. 새 커밋이 없으면 침묵하는 것이 정상인
         # 기능이라, 이 값이 없으면 설정 탭에서 정상적인 침묵과 고장난 침묵이 똑같아 보인다.
@@ -1545,10 +1561,21 @@ async def report_repo_now(job_id: str = "") -> str:
 
     status = await _run_repo_report(job)
     name = Path(str(job.get("repo_path") or "")).name or "저장소"
+    if status == REPORT_QUIET:
+        # 새 커밋이 없다고 빈손으로 돌아가지 않는다. 사람이 이 버튼을 누르는 이유는 거의
+        # 언제나 "되는지, 어떤 모양인지 보고 싶다"인데, 등록 직후에는 정의상 새 커밋이
+        # 0개라 그 확인이 영영 불가능했다. 최근 커밋으로 미리보기를 만든다.
+        preview_status = await _run_repo_report(job, preview=True)
+        if preview_status == REPORT_SENT:
+            return (
+                f"{name} 에 마지막 보고 이후 새 커밋이 없어, 최근 커밋으로 미리보기를 "
+                f"#{job.get('channel_name')} 에 보냈습니다. 정기 보고의 순서는 그대로입니다."
+            )
+        if preview_status == REPORT_QUIET:
+            return f"{name} 에는 커밋이 하나도 없습니다."
+        status = preview_status
     if status == REPORT_SENT:
         return f"{name} 보고를 #{job.get('channel_name')} 에 보냈습니다."
-    if status == REPORT_QUIET:
-        return f"{name} 에 마지막 보고 이후 새 커밋이 없습니다. 보낼 것이 없습니다."
     if status == REPORT_BUSY:
         return f"{name} 보고가 이미 만들어지는 중입니다."
     if status == REPORT_UNAVAILABLE:

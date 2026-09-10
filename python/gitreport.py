@@ -29,6 +29,8 @@ MAX_REFS = 200
 # branch 필드가 이 값이면 '한 브랜치'가 아니라 '움직이는 모든 브랜치'를 본다.
 # git 이 브랜치 이름으로 절대 허용하지 않는 문자라 실제 ref 와 헷갈릴 일이 없다.
 ALL_BRANCHES = '*'
+# 미리보기 한 번에 담을 커밋 수. 보고서 하나로 읽히면서 "어떤 모양인지" 보이면 충분하다.
+PREVIEW_COMMITS = 10
 LOG_TIMEOUT_S = 30
 # 실제로 사람이 쓴 코드와 도구가 만들어 낸 산출물을 가른다. 유니티에서는 줄 수의 90%가
 # 후자라, 구분하지 않으면 "무엇을 했는가"가 에셋 줄 수에 묻힌다.
@@ -398,6 +400,59 @@ async def collect_all_branches(
         truncated=truncated,
         fetch_warning=warning,
         ref_heads=ref_heads,
+    )
+
+
+async def collect_recent(
+    repo_path: str,
+    branch: str,
+    *,
+    limit: int = PREVIEW_COMMITS,
+    fetch: bool = True,
+) -> RepoReport:
+    """커서를 무시하고 **가장 최근** 커밋 몇 개를 모은다 — 미리보기 전용.
+
+    등록 직후에는 정의상 새 커밋이 0개다. 그래서 '지금 보고'가 언제나 빈손이었고,
+    되는지 확인하려고 만든 버튼으로 확인이 되지 않았다. 이 함수는 커서를 읽지도
+    쓰지도 않는다 — 미리보기가 정기 보고의 순서를 건드리면 안 된다.
+    """
+    repo = assert_repository(repo_path)
+    warning = ''
+    if fetch:
+        try:
+            await _git(repo, ['fetch', '--quiet'], FETCH_TIMEOUT_S)
+        except GitReportError as error:
+            warning = str(error)
+
+    count = max(1, min(int(limit), MAX_COMMITS))
+    if str(branch or '').strip() == ALL_BRANCHES:
+        remote, local = await _ref_shas(repo)
+        heads = remote or local
+        if not heads:
+            raise GitReportError('브랜치가 하나도 없습니다.')
+        targets = sorted(set(heads.values()))
+        label = ALL_BRANCHES
+    else:
+        target = str(branch or '').strip() or 'HEAD'
+        # 있는 ref 인지 여기서 확인한다. 없으면 log 가 알 수 없는 오류를 내뱉는다.
+        await _git(repo, ['rev-parse', target], LOG_TIMEOUT_S)
+        targets = [target]
+        label = target
+
+    fmt = f'%H{_FIELD}%an{_FIELD}%ae{_FIELD}%ad{_FIELD}%s{_FIELD}%b{_BODY_END}'
+    raw = await _git(repo, [
+        # --max-count 는 최신부터 세고 --reverse 는 출력만 뒤집는다. 그래서 '최근 N개를
+        # 시간순으로'가 된다.
+        'log', *targets, '--reverse', f'--max-count={count}',
+        '--numstat', '-z', '--date=format:%Y-%m-%d %H:%M',
+        f'--pretty=format:{_RECORD}{fmt}',
+    ], LOG_TIMEOUT_S)
+    return RepoReport(
+        repo_path=str(repo),
+        branch=label,
+        head='',
+        commits=parse_log(raw),
+        fetch_warning=warning,
     )
 
 

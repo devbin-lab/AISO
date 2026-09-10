@@ -342,6 +342,8 @@ def _recording_git(monkeypatch, refs: str, log: str = "", *, missing=(), fetch_e
             return ""
         if args[0] == "for-each-ref":
             return refs
+        if args[0] == "rev-parse":
+            return "aaaa11112222" + chr(10)
         if args[0] == "cat-file":
             target = args[2].split("^")[0]
             if target in missing:
@@ -460,3 +462,43 @@ def test_a_failed_fetch_still_reports_what_is_already_local(tmp_path, monkeypatc
     ))
     assert len(report.commits) == 1
     assert "원격에 접근할 수 없습니다" in report.fetch_warning
+
+
+# ── 미리보기 수집 ────────────────────────────────────────────────────────
+
+def test_a_preview_reads_the_newest_commits_and_ignores_cursors(tmp_path, monkeypatch):
+    calls = _recording_git(monkeypatch, REFS, ONE_COMMIT)
+    report = asyncio.run(gitreport.collect_recent(_repo(tmp_path), "origin/main", limit=5, fetch=False))
+    args = _log_call(calls)
+    assert "--not" not in args, "미리보기는 커서를 읽지 않는다"
+    assert "--max-count=5" in args
+    assert "origin/main" in args
+    assert report.branch == "origin/main"
+
+
+def test_a_preview_of_all_branches_covers_every_ref(tmp_path, monkeypatch):
+    calls = _recording_git(monkeypatch, REFS, ONE_COMMIT)
+    report = asyncio.run(
+        gitreport.collect_recent(_repo(tmp_path), gitreport.ALL_BRANCHES, fetch=False)
+    )
+    args = _log_call(calls)
+    assert "aaaa11112222" in args and "bbbb11112222" in args
+    assert report.branch == gitreport.ALL_BRANCHES
+
+
+def test_a_preview_of_a_branch_that_does_not_exist_is_refused(tmp_path, monkeypatch):
+    """log 에 그대로 넘기면 알아보기 어려운 오류가 나온다 — ref 부터 확인한다."""
+    async def fake(_repo, args, _timeout):
+        if args[0] == "rev-parse":
+            raise gitreport.GitReportError("unknown revision")
+        return REFS if args[0] == "for-each-ref" else ""
+
+    monkeypatch.setattr(gitreport, "_git", fake)
+    with pytest.raises(gitreport.GitReportError):
+        asyncio.run(gitreport.collect_recent(_repo(tmp_path), "oigin/main", fetch=False))
+
+
+def test_a_preview_never_asks_for_more_than_the_report_cap(tmp_path, monkeypatch):
+    calls = _recording_git(monkeypatch, REFS, ONE_COMMIT)
+    asyncio.run(gitreport.collect_recent(_repo(tmp_path), "origin/main", limit=10_000, fetch=False))
+    assert f"--max-count={gitreport.MAX_COMMITS}" in _log_call(calls)

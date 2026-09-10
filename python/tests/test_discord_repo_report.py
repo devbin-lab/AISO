@@ -182,7 +182,7 @@ def _run_job(head: str = "cafe1234", **overrides) -> dict:
 
 
 def _arrange(monkeypatch, commits, channel, *, guilds=None, generate=None, command=None,
-             collect_error="", ref_heads=None, moved_branches=""):
+             collect_error="", ref_heads=None, moved_branches="", recent=None):
     """저장소 읽기와 모델 생성을 대역으로 바꾼다 — 남는 것은 커서·시각 기록뿐이다."""
     async def collect(_path, branch, _cursor, **_kw):
         if collect_error:
@@ -214,8 +214,16 @@ def _arrange(monkeypatch, commits, channel, *, guilds=None, generate=None, comma
             ref_heads=dict(ref_heads or {}),
         )
 
+    async def collect_recent(_path, branch, **_kw):
+        if collect_error:
+            raise gitreport.GitReportError(collect_error)
+        return gitreport.RepoReport(
+            repo_path="/repo", branch=branch, head="", commits=list(recent or []),
+        )
+
     monkeypatch.setattr(gitreport, "collect", collect)
     monkeypatch.setattr(gitreport, "collect_all_branches", collect_all)
+    monkeypatch.setattr(gitreport, "collect_recent", collect_recent)
     monkeypatch.setattr(discordbot, "bound_guild", lambda guild_id="": table.get(str(guild_id)))
     monkeypatch.setattr(discordbot, "command_channel_id", lambda guild_id="": "999")
     monkeypatch.setattr(discordbot._S, "generate", generate or default_generate)
@@ -665,16 +673,64 @@ def test_an_unknown_id_is_not_silently_ignored(monkeypatch):
     assert "찾지 못했습니다" in asyncio.run(discordbot.report_repo_now("nope"))
 
 
-def test_a_quiet_run_says_there_was_nothing_to_send(monkeypatch):
-    """정기 회차의 침묵은 정상이지만, 사람이 누른 자리의 침묵은 고장과 구별되지 않는다."""
+def test_a_quiet_run_falls_back_to_a_preview(monkeypatch):
+    """등록 직후에는 정의상 새 커밋이 0개다. 그래서 '지금 보고'가 언제나 빈손이었다 —
+    되는지 확인하려고 만든 버튼으로 확인이 되지 않았다."""
     channel = FakeChannel(123)
     _run_job()
-    _arrange(monkeypatch, [], channel)
+    _arrange(monkeypatch, [], channel, recent=[_commit("old11111"), _commit("old22222")])
+
+    answer = asyncio.run(discordbot.report_repo_now())
+
+    assert len(channel.sent) == 1
+    assert "미리보기" in channel.sent[0]
+    assert "새 커밋이 없어" in answer and "미리보기" in answer
+
+
+def test_a_preview_leaves_the_schedule_exactly_where_it_was(monkeypatch):
+    """미리보기가 정기 보고의 순서를 건드리면, 확인 한 번에 진짜 보고를 잃는다."""
+    channel = FakeChannel(123)
+    _run_job()
+    _arrange(monkeypatch, [], channel, recent=[_commit("old11111")])
+
+    asyncio.run(discordbot.report_repo_now())
+
+    stored = discordsched.jobs()[0]
+    assert stored["last_commit"] == "cafe1234", "커서는 그대로다"
+    assert "last_reported_at" not in stored, "미리보기는 보고가 아니다"
+
+
+def test_a_preview_is_visibly_not_a_real_report(monkeypatch):
+    """이 커밋들은 '아직 보고되지 않은 것'이 아니다. 정기 보고와 섞여 보이면 안 된다."""
+    channel = FakeChannel(123)
+    _run_job()
+    _arrange(monkeypatch, [], channel, recent=[_commit("old11111")])
+
+    asyncio.run(discordbot.report_repo_now())
+
+    assert "등록 이전 커밋입니다" in channel.sent[0]
+
+
+def test_an_empty_repository_has_nothing_to_preview_either(monkeypatch):
+    channel = FakeChannel(123)
+    _run_job()
+    _arrange(monkeypatch, [], channel, recent=[])
 
     answer = asyncio.run(discordbot.report_repo_now())
 
     assert channel.sent == []
-    assert "새 커밋이 없습니다" in answer
+    assert "커밋이 하나도 없습니다" in answer
+
+
+def test_the_scheduled_run_never_falls_back_to_a_preview(monkeypatch):
+    """예약 회차의 침묵은 정상이다. 여기서 미리보기를 보내면 매 주기 잡담이 된다."""
+    channel = FakeChannel(123)
+    job = _run_job()
+    _arrange(monkeypatch, [], channel, recent=[_commit("old11111")])
+
+    asyncio.run(discordbot._run_repo_report(job))
+
+    assert channel.sent == []
 
 
 def test_a_failed_run_points_at_the_command_channel(monkeypatch):
@@ -730,6 +786,7 @@ def test_the_now_tool_tells_the_model_it_is_not_a_registration():
     assert schema["name"] == "discord_repo_report_now"
     assert schema["parameters"]["required"] == []
     assert "새 예약을 만들지 않으므로" in schema["description"]
+    assert "미리보기" in schema["description"], "빈손으로 끝나지 않는다는 것도 알려 준다"
 
 
 def test_only_the_owner_can_fire_a_report_on_demand(monkeypatch):
