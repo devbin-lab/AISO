@@ -127,3 +127,11 @@ export interface RepoReportInput {
   dailyAt?: string
   instruction: string
 }
+
+/** 살아 있는 저장소 보고의 제자리 편집. 비운 항목은 그대로 둔다. 커서는 절대 건드리지 않는다. */
+export interface RepoReportEdit {
+  id: string
+  intervalHours?: number
+  dailyAt?: string
+  channelId?: string
+}

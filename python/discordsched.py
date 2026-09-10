@@ -130,6 +130,24 @@ def remember_repo_cursor(job: dict) -> None:
         pass
 
 
+def _live_repo_cursor(repo_path: str, branch: str) -> "dict | None":
+    """같은 저장소·브랜치를 보는 **살아 있는** 예약의 커서. 여럿이면 가장 먼저 만든 것."""
+    key = _cursor_key(repo_path, branch)
+    for j in _JOBS:
+        if j.get("kind") != "repo_report":
+            continue
+        if _cursor_key(str(j.get("repo_path") or ""), str(j.get("branch") or "")) != key:
+            continue
+        if not (j.get("last_commit") or j.get("branch_cursors")):
+            continue
+        return {
+            "last_commit": str(j.get("last_commit") or ""),
+            "branch_cursors": dict(j.get("branch_cursors") or {}),
+            "updated": str(j.get("last_reported_at") or j.get("created") or ""),
+        }
+    return None
+
+
 def recall_repo_cursor(repo_path: str, branch: str) -> "dict | None":
     """같은 저장소·브랜치로 보고한 적이 있으면 그때의 커서. 없으면 None."""
     found = _load_cursors().get(_cursor_key(repo_path, branch))
@@ -146,7 +164,13 @@ def remove(job_id: str) -> bool:
     before = len(_JOBS)
     for j in _JOBS:
         if j.get("id") == jid:
-            remember_repo_cursor(j)  # 지우기 전에 어디까지 봤는지 남긴다
+            # 지우기 전에 어디까지 봤는지 남긴다. 다만 한 번도 보고하지 않은 예약의 커서는
+            # 등록 시점의 기준일 뿐이라 기존 기억보다 나을 수 없다 — 그것으로 덮으면
+            # 옛 예약을 나중에 지우는 순서만으로 더 이른 기억이 사라진다.
+            if j.get("last_reported_at") or not recall_repo_cursor(
+                str(j.get("repo_path") or ""), str(j.get("branch") or "")
+            ):
+                remember_repo_cursor(j)
     _JOBS = [j for j in _JOBS if j.get("id") != jid]
     if len(_JOBS) != before:
         _save()
@@ -285,6 +309,66 @@ def pop_due(*, now: "datetime | None" = None) -> list[dict]:
         _JOBS = keep
         _save()
     return fired
+
+
+def edit_repo_report_job(
+    job_id: str, *, interval_hours=None, daily_at: str = "",
+    channel_id: str = "", channel_name: str = "", now: "datetime | None" = None,
+) -> "tuple[dict | None, str | None]":
+    """살아 있는 저장소 보고의 발화 방식·채널을 제자리에서 바꾼다. 커서는 건드리지 않는다.
+
+    주기를 바꾸는 길이 '지우고 다시 만들기'뿐이면 그때마다 기준점이 리셋될 계기가 생긴다.
+    바꾸는 것은 언제·어디로뿐이고, 무엇을·어디까지 봤는가는 그대로다.
+    """
+    jid = str(job_id or "").strip()
+    job = next((j for j in _JOBS if j.get("id") == jid), None)
+    if job is None or job.get("kind") != "repo_report":
+        return None, "그런 저장소 보고 예약을 찾지 못했습니다."
+    current = now or datetime.now()
+    changes: dict = {}
+    at = str(daily_at or "").strip()
+    if at:
+        if not _TIME_RE.match(at):
+            return None, "daily_at 은 'HH:MM' 형식이어야 합니다(예: 09:00)."
+        first, when_error = parse_when(at, "daily", now=current)
+        if when_error or first is None:
+            return None, when_error or f"시각이 올바르지 않습니다: {at}"
+        changes.update({
+            "repeat": "daily",
+            "daily_at": f"{first.hour:02d}:{first.minute:02d}",
+            "next_run": first.isoformat(timespec="minutes"),
+        })
+    elif interval_hours is not None:
+        try:
+            hours = int(interval_hours)
+        except (TypeError, ValueError):
+            return None, "interval_hours는 시간 단위 정수여야 합니다."
+        if not MIN_REPORT_INTERVAL_HOURS <= hours <= MAX_REPORT_INTERVAL_HOURS:
+            return None, (
+                f"interval_hours는 {MIN_REPORT_INTERVAL_HOURS}~{MAX_REPORT_INTERVAL_HOURS} 사이여야 합니다."
+            )
+        changes.update({
+            "repeat": "interval",
+            "interval_hours": hours,
+            "next_run": (current + timedelta(hours=hours)).isoformat(timespec="minutes"),
+        })
+    if channel_id:
+        changes.update({"channel_id": str(channel_id), "channel_name": str(channel_name or channel_id)})
+    if not changes:
+        return None, "바꿀 것이 없습니다."
+    updated = dict(job)
+    updated.update(changes)
+    # 다른 방식의 흔적을 지운다 — 매일로 바꿨는데 interval_hours 가 남아 있으면 화면과
+    # 러너가 서로 다른 것을 믿는다.
+    if updated.get("repeat") == "daily":
+        updated.pop("interval_hours", None)
+    else:
+        updated.pop("daily_at", None)
+    for index, j in enumerate(_JOBS):
+        if j.get("id") == jid:
+            _JOBS[index] = updated
+    _save()
+    return dict(updated), None
 
 
 # ── 등록(검증 포함) ─────────────────────────────────────────────────────
@@ -528,7 +612,9 @@ def build_repo_report_job(
     baseline_commit = str(head or "").strip()
     baseline_cursors = dict(cursors or {}) if ref == ALL_BRANCHES else {}
     resumed_from = ""
-    remembered = recall_repo_cursor(path, ref)
+    # 살아 있는 예약이 먼저다. 사람이 새 예약을 먼저 만들고 옛 예약을 나중에 지우면
+    # 기억 파일에는 아직 아무것도 없다 — 등록과 삭제의 순서에 결과가 달려서는 안 된다.
+    remembered = _live_repo_cursor(path, ref) or recall_repo_cursor(path, ref)
     if remembered:
         if ref == ALL_BRANCHES and remembered.get("branch_cursors"):
             baseline_cursors = dict(remembered["branch_cursors"])

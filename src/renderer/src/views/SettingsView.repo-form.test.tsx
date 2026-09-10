@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BackendInfo } from '../../../shared/backend'
 import { DEFAULT_SETTINGS } from '../../../shared/settings'
@@ -46,6 +46,7 @@ function stubApi(overrides: Record<string, unknown> = {}): Record<string, Return
     repoBranches: vi.fn().mockResolvedValue(REFS),
     repoReportAdd: vi.fn().mockResolvedValue({ ok: true }),
     repoReportNow: vi.fn().mockResolvedValue({ ok: true, detail: '보고를 보냈습니다.' }),
+    repoReportEdit: vi.fn().mockResolvedValue({ ok: true, job: {} }),
     setLlmProvider: vi.fn(),
     saveToken: vi.fn().mockResolvedValue(undefined),
     apply: vi.fn().mockResolvedValue({ ok: true }),
@@ -410,5 +411,115 @@ describe('재등록', () => {
     fireEvent.click(screen.getByRole('button', { name: '등록' }))
 
     await waitFor(() => expect(screen.getByText(/이전 보고 지점\(2026-09-10 23:43\)부터/)).toBeTruthy())
+  })
+})
+
+describe('제자리 편집', () => {
+  // 등록 폼에도 같은 이름의 버튼('매일 정해진 시각'·'저장'류)이 있다. 편집기 안만 본다.
+  const editor = (): ReturnType<typeof within> => {
+    const el = document.querySelector('.repo-form--inline')
+    if (!el) throw new Error('편집기가 열려 있지 않다')
+    return within(el as HTMLElement)
+  }
+
+  const JOB = {
+    id: 'job-e',
+    kind: 'repo_report',
+    channel_id: '123',
+    channel_name: 'dev-log',
+    text: '',
+    repeat: 'interval',
+    interval_hours: 6,
+    repo_path: 'D:/GitHub/CK_SemesterProject',
+    branch: '*',
+    branch_cursors: { 'origin/main': 'aaaa1111' },
+    next_run: '2026-09-11T18:00'
+  }
+
+  it('편집을 누르면 지금 값이 채워진 편집기가 그 자리에 열린다', async () => {
+    stubApi({ schedules: vi.fn().mockResolvedValue({ jobs: [JOB] }) })
+    openDiscordSection()
+
+    fireEvent.click(await screen.findByRole('button', { name: '편집' }))
+
+    expect((screen.getByLabelText('바꿀 보고 주기(시간)') as HTMLInputElement).value).toBe('6')
+    expect(screen.getByText(/어디까지 봤는지는 그대로입니다/)).toBeTruthy()
+  })
+
+  it('주기를 시각으로 바꿔 저장하면 시각만 보낸다 — 채널은 안 바꿨으니 보내지 않는다', async () => {
+    const discord = stubApi({ schedules: vi.fn().mockResolvedValue({ jobs: [JOB] }) })
+    openDiscordSection()
+
+    fireEvent.click(await screen.findByRole('button', { name: '편집' }))
+    fireEvent.click(editor().getByRole('button', { name: '매일 정해진 시각' }))
+    fireEvent.change(editor().getByLabelText('바꿀 보고 시각'), { target: { value: '08:00' } })
+    fireEvent.click(editor().getByRole('button', { name: '저장' }))
+
+    await waitFor(() =>
+      expect(discord.repoReportEdit).toHaveBeenCalledWith({ id: 'job-e', dailyAt: '08:00' })
+    )
+  })
+
+  it('채널을 바꾸면 그 채널도 함께 보낸다', async () => {
+    const discord = stubApi({
+      schedules: vi.fn().mockResolvedValue({ jobs: [JOB] }),
+      channels: vi.fn().mockResolvedValue({
+        guilds: [{
+          guild_id: '777', guild_name: '학기작 개발', command_channel_id: '999',
+          channels: [{ id: '123', name: 'dev-log' }, { id: '456', name: 'reports' }]
+        }]
+      })
+    })
+    openDiscordSection()
+
+    fireEvent.click(await screen.findByRole('button', { name: '편집' }))
+    fireEvent.click(screen.getByRole('button', { name: '바꿀 보고 채널' }))
+    fireEvent.click(screen.getByRole('option', { name: '학기작 개발 · #reports' }))
+    fireEvent.click(editor().getByRole('button', { name: '저장' }))
+
+    await waitFor(() =>
+      expect(discord.repoReportEdit).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'job-e', channelId: '456' })
+      )
+    )
+  })
+
+  it('잘못된 시각은 보내기 전에 막는다', async () => {
+    const discord = stubApi({ schedules: vi.fn().mockResolvedValue({ jobs: [JOB] }) })
+    openDiscordSection()
+
+    fireEvent.click(await screen.findByRole('button', { name: '편집' }))
+    fireEvent.click(editor().getByRole('button', { name: '매일 정해진 시각' }))
+    fireEvent.change(editor().getByLabelText('바꿀 보고 시각'), { target: { value: '8시' } })
+    fireEvent.click(editor().getByRole('button', { name: '저장' }))
+
+    await waitFor(() => expect(screen.getByText(/HH:MM/)).toBeTruthy())
+    expect(discord.repoReportEdit).not.toHaveBeenCalled()
+  })
+
+  it('사이드카가 거부하면 사유를 보여 주고 편집기를 닫지 않는다', async () => {
+    stubApi({
+      schedules: vi.fn().mockResolvedValue({ jobs: [JOB] }),
+      repoReportEdit: vi.fn().mockResolvedValue({ ok: false, detail: '그런 예약을 찾지 못했습니다.' })
+    })
+    openDiscordSection()
+
+    fireEvent.click(await screen.findByRole('button', { name: '편집' }))
+    fireEvent.click(editor().getByRole('button', { name: '저장' }))
+
+    await waitFor(() => expect(screen.getByText('그런 예약을 찾지 못했습니다.')).toBeTruthy())
+    expect(editor().getByRole('button', { name: '취소' })).toBeTruthy()
+  })
+
+  it('저장하면 편집기가 닫히고 목록을 다시 읽는다', async () => {
+    const discord = stubApi({ schedules: vi.fn().mockResolvedValue({ jobs: [JOB] }) })
+    openDiscordSection()
+    fireEvent.click(await screen.findByRole('button', { name: '편집' }))
+    const before = discord.schedules.mock.calls.length
+
+    fireEvent.click(editor().getByRole('button', { name: '저장' }))
+
+    await waitFor(() => expect(document.querySelector('.repo-form--inline')).toBeNull())
+    expect(discord.schedules.mock.calls.length).toBeGreaterThan(before)
   })
 })

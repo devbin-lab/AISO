@@ -1532,6 +1532,31 @@ async def _run_repo_report_body(guild, channel, job: dict, *, preview: bool = Fa
     return REPORT_FAILED
 
 
+async def edit_repo_report(
+    job_id: str, *, interval_hours=None, daily_at: str = "", channel_id: str = "",
+) -> "tuple[dict | None, str | None]":
+    """설정 탭의 제자리 편집. 채널을 바꿀 때만 봇이 필요하다(이름을 확인해야 한다)."""
+    import discordsched  # noqa: PLC0415
+
+    channel_name = ""
+    if channel_id:
+        job = next((j for j in discordsched.jobs() if j.get("id") == job_id), None)
+        if job is None:
+            return None, "그런 저장소 보고 예약을 찾지 못했습니다."
+        guild = bound_guild(str(job.get("guild_id") or ""))
+        channel = (
+            guild.get_channel(int(channel_id))
+            if guild is not None and str(channel_id).isdigit() else None
+        )
+        if not isinstance(channel, discord.TextChannel):
+            return None, "보고를 보낼 글 채널을 찾지 못했습니다. 봇 연결을 확인해 주세요."
+        channel_name = channel.name
+    return discordsched.edit_repo_report_job(
+        job_id, interval_hours=interval_hours, daily_at=daily_at,
+        channel_id=channel_id, channel_name=channel_name,
+    )
+
+
 async def report_repo_now(job_id: str = "", *, preview: bool = False) -> str:
     """저장소 보고를 지금 한 번 돌린다. 사람에게 그대로 보여 줄 문장을 돌려준다.
 

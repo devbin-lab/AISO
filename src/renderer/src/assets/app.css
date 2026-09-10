@@ -4951,6 +4951,12 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   gap: 8px;
   margin-top: 10px;
 }
+.repo-form--inline {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
 .repo-form__line {
   display: flex;
   align-items: center;

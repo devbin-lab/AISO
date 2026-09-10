@@ -698,6 +698,59 @@ function SettingsView({
     window.api.discord.schedules().then((r) => setSchedules(r.jobs ?? [])).catch(() => {})
     window.api.discord.channels().then((r) => setRepoGuilds(r.guilds ?? [])).catch(() => {})
   }
+  // ── 저장소 보고 제자리 편집 ──
+  // 주기를 바꾸는 길이 '지우고 다시 만들기'뿐이면 그때마다 기준점이 리셋될 계기가 생긴다.
+  // 바꾸는 것은 언제·어디로뿐이고, 어디까지 봤는가는 사이드카가 그대로 지킨다.
+  const [editingId, setEditingId] = useState('')
+  const [editCadence, setEditCadence] = useState<'interval' | 'daily'>('interval')
+  const [editHours, setEditHours] = useState('6')
+  const [editDailyAt, setEditDailyAt] = useState('09:00')
+  const [editTarget, setEditTarget] = useState('')
+  const [editBusy, setEditBusy] = useState(false)
+  const [editNotice, setEditNotice] = useState('')
+  const beginEdit = (job: DiscordSchedule): void => {
+    setEditingId(job.id)
+    setEditCadence(job.repeat === 'daily' ? 'daily' : 'interval')
+    setEditHours(String(job.interval_hours ?? 6))
+    setEditDailyAt(job.daily_at || '09:00')
+    // 지금 채널을 미리 골라 둔다. 채널을 안 바꾸면 보내지 않는다(봇 없이도 되게).
+    const current = [...repoTargets.byLabel.entries()].find(
+      ([, target]) => target.channelId === String((job as { channel_id?: string }).channel_id ?? '')
+    )
+    setEditTarget(current ? current[0] : '')
+    setEditNotice('')
+  }
+  const saveEdit = async (job: DiscordSchedule): Promise<void> => {
+    const hours = Number(editHours)
+    const daily = editCadence === 'daily'
+    if (daily && !/^([01]\d|2[0-3]):[0-5]\d$/.test(editDailyAt)) {
+      return setEditNotice('시각은 09:00 처럼 24시간 HH:MM 으로 적어 주세요.')
+    }
+    if (!daily && (!Number.isInteger(hours) || hours < 1 || hours > 168)) {
+      return setEditNotice('주기는 1~168 사이의 시간 수여야 합니다.')
+    }
+    const target = repoTargets.byLabel.get(editTarget)
+    const channelChanged =
+      target !== undefined && target.channelId !== String((job as { channel_id?: string }).channel_id ?? '')
+    setEditBusy(true)
+    setEditNotice('')
+    try {
+      const result = await window.api.discord.repoReportEdit({
+        id: job.id,
+        ...(daily ? { dailyAt: editDailyAt } : { intervalHours: hours }),
+        ...(channelChanged && target ? { channelId: target.channelId } : {})
+      })
+      if (!result.ok) {
+        setEditNotice(result.detail || '바꾸지 못했습니다.')
+        return
+      }
+      setEditingId('')
+      refreshDiscord()
+    } finally {
+      setEditBusy(false)
+    }
+  }
+
   const removeSchedule = async (id: string): Promise<void> => {
     await window.api.discord.scheduleRemove(id)
     refreshDiscord()
@@ -2104,6 +2157,65 @@ function SettingsView({
                           {repoRunNotice?.id === j.id ? (
                             <div className="sched-item__progress">{repoRunNotice.text}</div>
                           ) : null}
+                          {editingId === j.id ? (
+                            <div className="repo-form repo-form--inline">
+                              <div className="repo-form__field">
+                                <span className="repo-form__key">발화</span>
+                                <Segmented
+                                  value={editCadence}
+                                  options={[
+                                    { v: 'interval', label: '주기마다' },
+                                    { v: 'daily', label: '매일 정해진 시각' }
+                                  ]}
+                                  onChange={setEditCadence}
+                                />
+                              </div>
+                              {editCadence === 'daily' ? (
+                                <label className="repo-form__field">
+                                  <span className="repo-form__key">시각</span>
+                                  <input
+                                    className="input repo-form__hours"
+                                    value={editDailyAt}
+                                    onChange={(e) => setEditDailyAt(e.target.value)}
+                                    aria-label="바꿀 보고 시각"
+                                  />
+                                </label>
+                              ) : (
+                                <label className="repo-form__field">
+                                  <span className="repo-form__key">주기</span>
+                                  <input
+                                    className="input repo-form__hours"
+                                    value={editHours}
+                                    inputMode="numeric"
+                                    onChange={(e) => setEditHours(e.target.value)}
+                                    aria-label="바꿀 보고 주기(시간)"
+                                  />
+                                  <span className="repo-form__unit">시간마다</span>
+                                </label>
+                              )}
+                              <label className="repo-form__field">
+                                <span className="repo-form__key">채널</span>
+                                <Select
+                                  value={editTarget}
+                                  options={repoTargets.labels}
+                                  onChange={setEditTarget}
+                                  ariaLabel="바꿀 보고 채널"
+                                  placeholder={repoTargets.labels.length ? '채널 선택' : '봇을 연결하면 바꿀 수 있습니다'}
+                                  disabled={repoTargets.labels.length === 0}
+                                />
+                              </label>
+                              <div className="repo-form__line">
+                                <button className="btn btn--sm" disabled={editBusy} onClick={() => void saveEdit(j)}>
+                                  {editBusy ? '저장 중…' : '저장'}
+                                </button>
+                                <button className="btn btn--sm" disabled={editBusy} onClick={() => setEditingId('')}>
+                                  취소
+                                </button>
+                                {editNotice ? <span className="repo-form__notice">{editNotice}</span> : null}
+                              </div>
+                              <div className="row__hint">어디까지 봤는지는 그대로입니다. 언제·어디로만 바뀝니다.</div>
+                            </div>
+                          ) : null}
                         </div>
                         <div className="sched-item__actions">
                           {j.kind === 'repo_report' ? (
@@ -2125,6 +2237,13 @@ function SettingsView({
                                 onClick={() => void runRepoReport(j.id, true)}
                               >
                                 테스트 보고
+                              </button>
+                              <button
+                                className="btn btn--sm"
+                                title="주기·시각·채널을 제자리에서 바꿉니다. 지우고 다시 만들 필요가 없습니다."
+                                onClick={() => (editingId === j.id ? setEditingId('') : beginEdit(j))}
+                              >
+                                편집
                               </button>
                             </>
                           ) : null}

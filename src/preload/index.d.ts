@@ -29,7 +29,8 @@ import type {
   DiscordSchedule,
   DiscordGuildChannels,
   RepoBranches,
-  RepoReportInput
+  RepoReportInput,
+  RepoReportEdit
 } from '../shared/discord'
 import type { ComfyLaunchResult, ComfySurfaceRequest } from '../shared/comfy'
 import type { AttachmentDropEvent, AttachmentRef } from '../shared/attachments'
@@ -145,6 +146,9 @@ export interface AisoAPI {
       input: RepoReportInput
     ) => Promise<{ ok: boolean; detail?: string; job?: DiscordSchedule }>
     repoReportNow: (id: string, preview?: boolean) => Promise<{ ok: boolean; detail?: string }>
+    repoReportEdit: (
+      input: RepoReportEdit
+    ) => Promise<{ ok: boolean; detail?: string; job?: DiscordSchedule }>
   }
   updates: {
     version: () => Promise<string>

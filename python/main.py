@@ -1560,6 +1560,30 @@ async def discord_repo_report_add_ep(req: RepoReportAddRequest):
     return {"ok": True, "job": job}
 
 
+class RepoReportEditRequest(BaseModel):
+    id: str
+    interval_hours: int | None = None
+    daily_at: str = ""
+    channel_id: str = ""
+
+
+@app.post("/discord/schedules/repo_report/edit")
+async def discord_repo_report_edit_ep(req: RepoReportEditRequest):
+    """저장소 보고의 발화 방식·채널을 제자리에서 바꾼다 — 커서는 그대로."""
+    if discordbot is None:
+        return {"ok": False, "detail": "discord.py 미설치"}
+    try:
+        job, error = await discordbot.edit_repo_report(
+            req.id, interval_hours=req.interval_hours, daily_at=req.daily_at,
+            channel_id=req.channel_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "detail": str(e)}
+    if error:
+        return {"ok": False, "detail": error}
+    return {"ok": True, "job": job}
+
+
 class RepoReportRunRequest(BaseModel):
     id: str = ""
     # True 면 새 커밋 여부와 상관없이 최근 커밋으로 시험 보고서를 보낸다(커서 불변).

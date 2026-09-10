@@ -79,6 +79,7 @@ import {
   discordRepoBranches,
   discordRepoReportAdd,
   discordRepoReportNow,
+  discordRepoReportEdit,
   clearDiscordData,
   type NvidiaDiscordRuntime
 } from './discord'
@@ -1558,6 +1559,11 @@ app.whenReady().then(() => {
   ipcMain.handle('discord:schedules', () => discordSchedules())
   ipcMain.handle('discord:schedule-remove', (_e, id: string) => discordScheduleRemove(id))
   ipcMain.handle('discord:channels', () => discordChannels())
+  ipcMain.handle(
+    'discord:repo-report-edit',
+    (_e, input: { id: string; intervalHours?: number; dailyAt?: string; channelId?: string }) =>
+      discordRepoReportEdit(input)
+  )
   ipcMain.handle('discord:repo-report-now', (_e, id: string, preview: boolean) =>
     discordRepoReportNow(id, preview === true)
   )

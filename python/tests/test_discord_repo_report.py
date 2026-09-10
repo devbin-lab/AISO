@@ -1020,3 +1020,113 @@ def test_registering_from_the_app_resumes_too(monkeypatch):
     job, error = _register(monkeypatch, branch="origin/main")
     assert error is None and job is not None
     assert job["last_commit"] == "m1"
+
+
+# ── 등록·삭제 순서에 결과가 달리지 않는다 ───────────────────────────────
+# 실제로 겪었다: 새 예약을 02:42 에 먼저 만들고 옛 예약을 02:43 에 지웠더니, 등록 시점엔
+# 이어받을 기억이 없어 새 예약이 그날 커밋을 '본 것'으로 두고 시작했고, 1분 뒤 삭제가
+# 기억을 적었지만 이미 늦었다.
+
+def test_registering_while_the_old_job_is_still_alive_inherits_its_cursor():
+    old = discordsched.commit_job(build(head="seen0000")[0])
+    discordsched.update_job(old["id"], {"last_commit": "seen1111"})
+
+    new, _e = build(head="head9999")  # 옛 예약을 아직 지우지 않았다
+    assert new["last_commit"] == "seen1111"
+    assert new["resumed_from"]
+
+
+def test_deleting_a_never_reported_job_does_not_overwrite_an_earlier_memory():
+    """옛 예약(10일까지 봄)을 나중에 지워도, 새 예약(11일 기준)의 커서가 기억을 덮지 않는다."""
+    old = discordsched.commit_job(build(head="day10")[0])
+    discordsched.update_job(old["id"], {"last_commit": "day10", "last_reported_at": "2026-09-10T23:43"})
+    new = discordsched.commit_job(build(head="day11")[0])
+    discordsched.update_job(new["id"], {"last_commit": "day11x"})  # 커서만 바뀌고 보고는 없었다
+    discordsched.remove(old["id"])   # 기억 = day10 (보고한 적 있음)
+    discordsched.remove(new["id"])   # 보고한 적 없음 → 덮지 않는다
+
+    assert discordsched.recall_repo_cursor(old["repo_path"], old["branch"])["last_commit"] == "day10"
+
+
+def test_deleting_a_reported_job_does_update_the_memory():
+    old = discordsched.commit_job(build(head="a0")[0])
+    discordsched.update_job(old["id"], {"last_commit": "a1", "last_reported_at": "2026-09-10T10:00"})
+    discordsched.remove(old["id"])
+    new = discordsched.commit_job(build(head="zz")[0])
+    discordsched.update_job(new["id"], {"last_commit": "a2", "last_reported_at": "2026-09-11T10:00"})
+    discordsched.remove(new["id"])
+    assert discordsched.recall_repo_cursor(old["repo_path"], old["branch"])["last_commit"] == "a2"
+
+
+def test_a_never_reported_job_still_seeds_memory_when_there_is_none():
+    job = discordsched.commit_job(build(head="only0000")[0])
+    discordsched.remove(job["id"])
+    assert discordsched.recall_repo_cursor(job["repo_path"], job["branch"])["last_commit"] == "only0000"
+
+
+# ── 제자리 편집 ──────────────────────────────────────────────────────────
+# 주기를 바꾸는 길이 '지우고 다시 만들기'뿐이면 그때마다 기준점이 리셋될 계기가 생긴다.
+
+def test_editing_the_cadence_keeps_the_cursor():
+    job = discordsched.commit_job(build(interval_hours=6, head="c0")[0])
+    discordsched.update_job(job["id"], {"last_commit": "c1"})
+
+    edited, err = discordsched.edit_repo_report_job(
+        job["id"], daily_at="09:00", now=datetime(2026, 9, 11, 15, 0)
+    )
+    assert err is None and edited is not None
+    assert edited["repeat"] == "daily" and edited["daily_at"] == "09:00"
+    assert edited["next_run"] == "2026-09-12T09:00"
+    assert edited["last_commit"] == "c1", "언제·어디로만 바뀐다. 어디까지 봤는가는 그대로다"
+    assert "interval_hours" not in edited, "다른 방식의 흔적을 남기지 않는다"
+
+
+def test_editing_back_to_a_period_drops_the_time():
+    job = discordsched.commit_job(build(interval_hours=None, daily_at="09:00")[0])
+    edited, _e = discordsched.edit_repo_report_job(job["id"], interval_hours=12)
+    assert edited["repeat"] == "interval" and edited["interval_hours"] == 12
+    assert "daily_at" not in edited
+
+
+def test_editing_the_channel_keeps_everything_else():
+    job = discordsched.commit_job(build(branch=ALL, head="", cursors={"origin/main": "m1"})[0])
+    edited, _e = discordsched.edit_repo_report_job(job["id"], channel_id="999", channel_name="reports")
+    assert edited["channel_id"] == "999" and edited["channel_name"] == "reports"
+    assert edited["branch_cursors"] == {"origin/main": "m1"}
+    assert edited["next_run"] == job["next_run"]
+
+
+def test_an_edit_is_persisted():
+    job = discordsched.commit_job(build(interval_hours=6, head="c0")[0])
+    discordsched.edit_repo_report_job(job["id"], interval_hours=24)
+    assert discordsched.jobs()[0]["interval_hours"] == 24
+
+
+def test_an_edit_with_nothing_to_change_is_refused():
+    job = discordsched.commit_job(build()[0])
+    edited, err = discordsched.edit_repo_report_job(job["id"])
+    assert edited is None and "바꿀 것이" in err
+
+
+def test_an_edit_validates_like_a_registration():
+    job = discordsched.commit_job(build()[0])
+    assert discordsched.edit_repo_report_job(job["id"], daily_at="9시")[1]
+    assert discordsched.edit_repo_report_job(job["id"], interval_hours=0)[1]
+    assert discordsched.edit_repo_report_job("nope", interval_hours=6)[1]
+
+
+def test_editing_the_channel_through_the_bot_resolves_its_name(monkeypatch):
+    job = _run_job()
+    new_channel = FakeChannel(555, name="reports")
+    monkeypatch.setattr(discordbot, "bound_guild", lambda guild_id="": FakeGuild(new_channel))
+    monkeypatch.setattr(discordbot.discord, "TextChannel", FakeChannel)
+
+    edited, err = asyncio.run(discordbot.edit_repo_report(job["id"], channel_id="555"))
+    assert err is None and edited["channel_name"] == "reports"
+
+
+def test_a_cadence_only_edit_needs_no_bot(monkeypatch):
+    job = _run_job()
+    monkeypatch.setattr(discordbot, "bound_guild", lambda guild_id="": None)
+    edited, err = asyncio.run(discordbot.edit_repo_report(job["id"], interval_hours=12))
+    assert err is None and edited["interval_hours"] == 12

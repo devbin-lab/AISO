@@ -308,6 +308,32 @@ export async function discordRepoReportNow(id: string, preview = false): Promise
   }
 }
 
+/** 저장소 보고의 발화 방식·채널을 제자리에서 — 지우고 다시 만들면 기준점이 리셋된다. */
+export async function discordRepoReportEdit(input: {
+  id: string
+  intervalHours?: number
+  dailyAt?: string
+  channelId?: string
+}): Promise<unknown> {
+  const info = backendInfo()
+  if (info.state !== 'ready' || !info.port) return { ok: false, detail: '백엔드 준비 안 됨' }
+  try {
+    const r = await fetch(`http://127.0.0.1:${info.port}/discord/schedules/repo_report/edit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Aiso-Token': backendToken() },
+      body: JSON.stringify({
+        id: input.id,
+        interval_hours: input.intervalHours ?? null,
+        daily_at: input.dailyAt ?? '',
+        channel_id: input.channelId ?? ''
+      })
+    })
+    return await r.json()
+  } catch (error) {
+    return { ok: false, detail: String(error) }
+  }
+}
+
 /** 예약 삭제(설정 탭 목록의 삭제 버튼). */
 export async function discordScheduleRemove(id: string): Promise<{ ok: boolean }> {
   const info = backendInfo()

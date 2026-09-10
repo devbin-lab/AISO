@@ -29,7 +29,8 @@ import type {
   DiscordSchedule,
   DiscordGuildChannels,
   RepoBranches,
-  RepoReportInput
+  RepoReportInput,
+  RepoReportEdit
 } from '../shared/discord'
 import type { ComfyLaunchResult, ComfySurfaceRequest } from '../shared/comfy'
 import type { AttachmentDropEvent, AttachmentRef } from '../shared/attachments'
@@ -366,7 +367,11 @@ const api = {
     ): Promise<{ ok: boolean; detail?: string; job?: DiscordSchedule }> =>
       ipcRenderer.invoke('discord:repo-report-add', input),
     repoReportNow: (id: string, preview = false): Promise<{ ok: boolean; detail?: string }> =>
-      ipcRenderer.invoke('discord:repo-report-now', id, preview)
+      ipcRenderer.invoke('discord:repo-report-now', id, preview),
+    repoReportEdit: (
+      input: RepoReportEdit
+    ): Promise<{ ok: boolean; detail?: string; job?: DiscordSchedule }> =>
+      ipcRenderer.invoke('discord:repo-report-edit', input)
   },
   updates: {
     version: (): Promise<string> => ipcRenderer.invoke('app:version'),
