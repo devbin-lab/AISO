@@ -52,6 +52,8 @@ export interface DiscordSchedule {
   text: string
   repeat: 'once' | 'daily' | 'interval'
   interval_hours?: number
+  /** 저장소 보고가 매일 고정 시각으로 돌 때의 'HH:MM'. repeat 이 daily 일 때만. */
+  daily_at?: string
   source_channels?: Array<{ id: string; name: string; last_message_id: string }>
   /**
    * 저장소 보고 — 등록 시점에 고정된 클론 경로와 로그 대상 ref(예: origin/main).
@@ -118,6 +120,8 @@ export interface RepoReportInput {
   branch: string
   guildId: string
   channelId: string
-  intervalHours: number
+  /** 둘 중 하나. dailyAt('HH:MM')이 있으면 매일 그 시각, 없으면 intervalHours 마다. */
+  intervalHours?: number
+  dailyAt?: string
   instruction: string
 }

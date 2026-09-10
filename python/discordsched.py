@@ -184,7 +184,9 @@ def pop_due(*, now: "datetime | None" = None) -> list[dict]:
             changed = True  # 깨진(비문자열·형식오류) next_run → 잡을 버린다
             continue
         interval_hours: int | None = None
-        if j.get("repeat") == "interval" or j.get("kind") in ("channel_report", "repo_report"):
+        # 주기 반복만 interval_hours 가 필요하다. 저장소 보고는 매일 고정 시각으로도 돌 수
+        # 있어서, 종류만 보고 시간 수를 요구하면 그 예약이 매 틱 '깨진 잡'으로 버려진다.
+        if j.get("repeat") == "interval":
             try:
                 # 필드가 없으면(None) int()가 TypeError를 내고 바로 아래 except가 잡아 잡을 버린다 —
                 # 그 경로가 설계이므로 값을 Any로 받아 둔다(저장 파일에서 온 값이라 타입 보장이 없다).
@@ -390,16 +392,27 @@ def canonical_branch(branch) -> str:
     return ALL_BRANCHES if value.lower() in _ALL_BRANCH_WORDS else value
 
 
+def describe_cadence(job: dict) -> str:
+    """'매일 09:00' 또는 '6시간마다'. 목록·미리보기·실패 안내가 같은 말을 쓰게 한다."""
+    if job.get("repeat") == "daily":
+        return f"매일 {job.get('daily_at') or str(job.get('next_run') or '')[11:16]}"
+    return f"{job.get('interval_hours')}시간마다"
+
+
 def build_repo_report_job(
     *, repo_path: str, branch: str, report_channel_id: str, report_channel_name: str,
-    interval_hours, instruction: str = "", head: str = "", guild_id: str = "",
-    cursors: "dict | None" = None, now: "datetime | None" = None,
+    interval_hours=None, daily_at: str = "", instruction: str = "", head: str = "",
+    guild_id: str = "", cursors: "dict | None" = None, now: "datetime | None" = None,
 ) -> "tuple[dict | None, str | None]":
     """저장소 보고 예약 1건을 만든다. 등록은 하지 않는다.
 
     승인 전에 모든 거부 사유를 확인할 수 있도록 커밋과 분리한다 — 채널 보고와 같은 이유다.
     저장소 경로는 **여기서 한 번 고정**하고 이후 모델이 바꿀 수 없다. 예약은 사람이 보지
     않는 동안 돌기 때문에, 실행 시점에 경로를 정하게 두면 승인의 의미가 사라진다.
+
+    발화 방식은 둘 중 하나다. daily_at('HH:MM')이 있으면 매일 그 시각에, 없으면
+    interval_hours 마다. "아침에 어제 것을 한 장으로"는 시각이고 "쌓이는 대로"는 주기다 —
+    둘을 한 값으로 표현하려 들면 어느 쪽도 정확히 말할 수 없다.
     """
     if len(jobs()) >= MAX_JOBS:
         return None, f"예약은 최대 {MAX_JOBS}개까지 등록할 수 있습니다."
@@ -411,18 +424,38 @@ def build_repo_report_job(
     ref = canonical_branch(branch) or "HEAD"
     if len(ref) > MAX_REPO_BRANCH:
         return None, f"브랜치 이름은 최대 {MAX_REPO_BRANCH}자까지 입력할 수 있습니다."
-    try:
-        hours = int(interval_hours)
-    except (TypeError, ValueError):
-        return None, "interval_hours는 시간 단위 정수여야 합니다."
-    if not MIN_REPORT_INTERVAL_HOURS <= hours <= MAX_REPORT_INTERVAL_HOURS:
-        return None, (
-            f"interval_hours는 {MIN_REPORT_INTERVAL_HOURS}~{MAX_REPORT_INTERVAL_HOURS} 사이여야 합니다."
-        )
+    current = now or datetime.now()
+    at = str(daily_at or "").strip()
+    schedule: dict
+    if at:
+        if not _TIME_RE.match(at):
+            # 'YYYY-MM-DD HH:MM' 도 parse_when 은 받지만, 매일 반복에 날짜는 뜻이 없다.
+            return None, "daily_at 은 'HH:MM' 형식이어야 합니다(예: 09:00)."
+        first, when_error = parse_when(at, "daily", now=current)
+        if when_error or first is None:
+            return None, when_error or f"시각이 올바르지 않습니다: {at}"
+        schedule = {
+            "repeat": "daily",
+            "daily_at": f"{first.hour:02d}:{first.minute:02d}",
+            "next_run": first.isoformat(timespec="minutes"),
+        }
+    else:
+        try:
+            hours = int(interval_hours)
+        except (TypeError, ValueError):
+            return None, "interval_hours는 시간 단위 정수여야 합니다(또는 daily_at 으로 시각을 지정)."
+        if not MIN_REPORT_INTERVAL_HOURS <= hours <= MAX_REPORT_INTERVAL_HOURS:
+            return None, (
+                f"interval_hours는 {MIN_REPORT_INTERVAL_HOURS}~{MAX_REPORT_INTERVAL_HOURS} 사이여야 합니다."
+            )
+        schedule = {
+            "repeat": "interval",
+            "interval_hours": hours,
+            "next_run": (current + timedelta(hours=hours)).isoformat(timespec="minutes"),
+        }
     note = str(instruction or "").strip()
     if len(note) > MAX_REPORT_INSTRUCTION:
         return None, f"보고서 지시는 최대 {MAX_REPORT_INSTRUCTION}자까지 입력할 수 있습니다."
-    current = now or datetime.now()
     return {
         "kind": "repo_report",
         # 어느 서버의 채널인지 함께 적는다. 봇이 여러 서버에 붙어 있으면 실행 시점에는
@@ -439,9 +472,7 @@ def build_repo_report_job(
         # 속도로 움직이므로 sha 하나로는 "어디까지 봤는가"를 적을 수 없다.
         "branch_cursors": dict(cursors or {}) if ref == ALL_BRANCHES else {},
         "text": note,
-        "repeat": "interval",
-        "interval_hours": hours,
-        "next_run": (current + timedelta(hours=hours)).isoformat(timespec="minutes"),
+        **schedule,
     }, None
 
 
@@ -582,7 +613,7 @@ def _fmt_dt(iso: str) -> str:
 def render_job(j: dict) -> str:
     if j.get("kind") == "repo_report":
         return (
-            f"[{j.get('id', '')[:8]}] 저장소 보고 · {j.get('interval_hours')}시간마다"
+            f"[{j.get('id', '')[:8]}] 저장소 보고 · {describe_cadence(j)}"
             f" · #{j.get('channel_name')}"
             f" · {j.get('repo_path')}"
             f" ({'모든 브랜치' if j.get('branch') == ALL_BRANCHES else j.get('branch')})"
@@ -680,7 +711,14 @@ REPO_REPORT_ADD_SCHEMA = {
                     "type": "integer",
                     "minimum": MIN_REPORT_INTERVAL_HOURS,
                     "maximum": MAX_REPORT_INTERVAL_HOURS,
-                    "description": "보고 주기(시간 단위). 예: 24=하루에 한 번",
+                    "description": "보고 주기(시간 단위). 예: 6=여섯 시간마다. daily_at 과 둘 중 하나만.",
+                },
+                "daily_at": {
+                    "type": "string",
+                    "description": (
+                        "매일 보고할 시각 'HH:MM'(24시간). 예: '09:00'=매일 아침 9시. "
+                        "'아침마다'·'매일 저녁 6시'처럼 시각을 말하면 이것을 쓴다. interval_hours 와 둘 중 하나만."
+                    ),
                 },
                 "instruction": {
                     "type": "string",
@@ -688,7 +726,7 @@ REPO_REPORT_ADD_SCHEMA = {
                     "maxLength": MAX_REPORT_INSTRUCTION,
                 },
             },
-            "required": ["repo_path", "report_channel", "interval_hours"],
+            "required": ["repo_path", "report_channel"],
         },
     },
 }
@@ -700,9 +738,10 @@ REPO_REPORT_NOW_SCHEMA = {
         "name": "discord_repo_report_now",
         "description": (
             "이미 등록된 저장소 보고를 기다리지 않고 지금 한 번 돌린다. 새 예약을 만들지 않으므로 "
-            "저장소 경로나 주기를 되물을 필요가 없다. 마지막 보고 이후의 새 커밋이 없으면 최근 "
-            "커밋으로 미리보기를 대신 보내며, 그 경우에도 정기 보고의 순서는 건드리지 않는다. "
-            "사용자가 '지금 보고해줘'·'바로 만들어줘'처럼 말하면 이것을 쓴다."
+            "저장소 경로나 주기를 되물을 필요가 없다. mode='new'(기본)는 마지막 보고 이후의 새 커밋만 "
+            "보고하고 없으면 아무것도 보내지 않는다. mode='preview'는 새 커밋 여부와 상관없이 최근 "
+            "커밋으로 시험 보고서를 보내며 정기 보고의 순서는 건드리지 않는다 — '테스트로 한 번 보여줘'가 "
+            "이쪽이다. 사용자가 '지금 보고해줘'·'바로 만들어줘'처럼 말하면 이것을 쓴다."
         ),
         "parameters": {
             "type": "object",
@@ -710,6 +749,11 @@ REPO_REPORT_NOW_SCHEMA = {
                 "job_id": {
                     "type": "string",
                     "description": "예약 id. 저장소 보고가 하나뿐이면 생략한다.",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["new", "preview"],
+                    "description": "new=새 커밋만(없으면 침묵), preview=최근 커밋으로 시험 보고",
                 },
             },
             "required": [],

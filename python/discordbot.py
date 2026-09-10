@@ -327,7 +327,7 @@ def text_channels() -> list[dict]:
 
 async def register_repo_report(
     *, repo_path: str, branch: str, guild_id: str, channel_id: str,
-    interval_hours, instruction: str = "",
+    interval_hours=None, daily_at: str = "", instruction: str = "",
 ) -> "tuple[dict | None, str | None]":
     """설정 탭에서 저장소 보고를 등록한다. 반환 (등록된 잡, 오류).
 
@@ -369,6 +369,7 @@ async def register_repo_report(
         report_channel_id=str(channel.id),
         report_channel_name=channel.name,
         interval_hours=interval_hours,
+        daily_at=daily_at,
         instruction=instruction,
         head=baseline.head,
         cursors=baseline.ref_heads,
@@ -796,6 +797,7 @@ async def _repo_report_add_with_approval(channel, args: dict) -> str:
         report_channel_id=ch_id,
         report_channel_name=ch_name,
         interval_hours=args.get("interval_hours"),
+        daily_at=str(args.get("daily_at") or ""),
         instruction=str(args.get("instruction") or ""),
         head=baseline.head,
         guild_id=current_guild_id(),
@@ -808,7 +810,7 @@ async def _repo_report_add_with_approval(channel, args: dict) -> str:
         f"· 저장소: {draft['repo_path']}\n"
         f"· 브랜치: {draft['branch']} (현재 {baseline.head})\n"
         f"· 보고 채널: #{ch_name}\n"
-        f"· 주기: {draft['interval_hours']}시간마다\n"
+        f"· 발화: {discordsched.describe_cadence(draft)}\n"
         f"· 첫 보고: {draft['next_run']}\n"
         + (f"· 지시: {draft['text']}\n" if draft["text"] else "")
         + "\n등록 이후의 새 커밋만 보고합니다. 커밋 메시지와 파일·줄 수를 보내며 "
@@ -840,7 +842,10 @@ async def _run_bot_tool(channel, author_id: str, name: str, args: dict) -> str:
         # 허용목록 사용자가 보고 채널을 마음대로 울릴 수 있게 두지는 않는다.
         if not _S.owner_id or str(author_id) != _S.owner_id:
             return "[거부] 즉시 보고는 소유자만 요청할 수 있습니다."
-        return await report_repo_now(str((args or {}).get("job_id") or ""))
+        return await report_repo_now(
+            str((args or {}).get("job_id") or ""),
+            preview=str((args or {}).get("mode") or "new") == "preview",
+        )
     if name == "discord_schedule_list":
         return await discordsched.schedule_list()
     if name == "discord_schedule_remove":
@@ -1366,12 +1371,11 @@ async def _report_repo_failure(guild, job: dict, reason: str, *, pending: int = 
     if channel is None:
         return
     name = Path(str(job.get("repo_path") or "")).name or "저장소"
-    hours = job.get("interval_hours")
     lines = [f"⚠ **{name}** 저장소 보고를 만들지 못했습니다 — {reason}"]
     if pending:
         # 몇 개가 밀려 있는지 밝힌다. 커서를 옮기지 않았으니 다음 회차에 함께 나간다.
         lines.append(f"커밋 {pending}개는 아직 보고되지 않았습니다.")
-    lines.append(f"다음 회차{f'({hours}시간 뒤)' if hours else ''}에 다시 시도합니다.")
+    lines.append(f"다음 회차({discordsched.describe_cadence(job)})에 다시 시도합니다.")
     try:
         await channel.send("\n".join(lines))
     except Exception as error:  # noqa: BLE001 — 알림 실패가 러너를 죽이면 안 된다
@@ -1488,9 +1492,9 @@ async def _run_repo_report_body(guild, channel, job: dict, *, preview: bool = Fa
     if preview:
         # 정기 보고와 눈으로 구별되어야 한다. 이 커밋들은 '아직 보고되지 않은 것'이 아니다.
         header = (
-            f"👀 **{name}** 미리보기 — 최근 {len(report.commits)}개 커밋"
+            f"🧪 **{name}** 시험 보고 — 최근 {len(report.commits)}개 커밋"
             + chr(10)
-            + "(등록 이전 커밋입니다. 정기 보고의 순서는 그대로입니다.)"
+            + "(새 커밋 여부와 상관없이 만든 보고서입니다. 정기 보고의 순서는 그대로입니다.)"
         )
     elif all_branches and report.branch != gitreport.ALL_BRANCHES:
         # 어느 브랜치가 움직였는지 제목에 적는다. 여러 브랜치를 한꺼번에 보는 모드에서는
@@ -1527,16 +1531,21 @@ async def _run_repo_report_body(guild, channel, job: dict, *, preview: bool = Fa
     return REPORT_FAILED
 
 
-async def report_repo_now(job_id: str = "") -> str:
+async def report_repo_now(job_id: str = "", *, preview: bool = False) -> str:
     """저장소 보고를 지금 한 번 돌린다. 사람에게 그대로 보여 줄 문장을 돌려준다.
 
-    설정 탭의 '지금 보고' 버튼과 디스코드의 `discord_repo_report_now` 가 함께 쓴다.
-    예약과 **같은 경로를 그대로** 탄다 — 커서도 같이 전진하므로, 지금 보고한 커밋이
-    다음 정기 회차에 다시 나가지 않는다. 다른 점은 결과를 말로 돌려준다는 것뿐이다.
+    설정 탭의 두 버튼과 디스코드의 `discord_repo_report_now` 가 함께 쓴다. 두 모드는
+    묻는 것이 다르다.
 
-    새 커밋이 없어 조용히 끝나는 것은 정기 회차에서는 정상이지만, 사람이 버튼을 누른
-    자리에서 아무 일도 일어나지 않으면 고장과 구별되지 않는다. 그래서 조용한 경우에도
-    조용했다고 말한다.
+    - preview=False: "새로 올라온 것이 있나?" 예약과 **같은 경로를 그대로** 탄다 —
+      커서도 같이 전진하므로 지금 보고한 커밋이 다음 정기 회차에 다시 나가지 않는다.
+      없으면 아무것도 보내지 않고 없다고 답한다.
+    - preview=True: "보고서가 어떤 모양이고 채널까지 닿나?" 새 커밋 여부와 상관없이
+      최근 커밋으로 시험 보고서를 보낸다. 커서도 마지막 보고 시각도 건드리지 않는다.
+
+    예전에는 새 커밋이 없으면 알아서 미리보기로 넘어갔다. 그러면 "새 것만 확인하고
+    싶다"는 사람이 원치 않는 시험 보고서를 받는다 — 두 질문을 한 버튼에 섞으면 어느 쪽도
+    믿을 수 없다.
     """
     import discordsched  # noqa: PLC0415
 
@@ -1559,23 +1568,20 @@ async def report_repo_now(job_id: str = "") -> str:
         listing = chr(10).join(discordsched.render_job(j) for j in repo_jobs)
         return "저장소 보고가 여럿입니다. 어느 것인지 알려 주세요." + chr(10) + listing
 
-    status = await _run_repo_report(job)
+    status = await _run_repo_report(job, preview=preview)
     name = Path(str(job.get("repo_path") or "")).name or "저장소"
-    if status == REPORT_QUIET:
-        # 새 커밋이 없다고 빈손으로 돌아가지 않는다. 사람이 이 버튼을 누르는 이유는 거의
-        # 언제나 "되는지, 어떤 모양인지 보고 싶다"인데, 등록 직후에는 정의상 새 커밋이
-        # 0개라 그 확인이 영영 불가능했다. 최근 커밋으로 미리보기를 만든다.
-        preview_status = await _run_repo_report(job, preview=True)
-        if preview_status == REPORT_SENT:
+    if preview:
+        if status == REPORT_SENT:
             return (
-                f"{name} 에 마지막 보고 이후 새 커밋이 없어, 최근 커밋으로 미리보기를 "
-                f"#{job.get('channel_name')} 에 보냈습니다. 정기 보고의 순서는 그대로입니다."
+                f"{name} 최근 커밋으로 시험 보고서를 #{job.get('channel_name')} 에 보냈습니다. "
+                "정기 보고의 순서는 그대로입니다."
             )
-        if preview_status == REPORT_QUIET:
+        if status == REPORT_QUIET:
             return f"{name} 에는 커밋이 하나도 없습니다."
-        status = preview_status
     if status == REPORT_SENT:
         return f"{name} 보고를 #{job.get('channel_name')} 에 보냈습니다."
+    if status == REPORT_QUIET:
+        return f"{name} 에 마지막 보고 이후 새 커밋이 없습니다. 보낼 것이 없습니다."
     if status == REPORT_BUSY:
         return f"{name} 보고가 이미 만들어지는 중입니다."
     if status == REPORT_UNAVAILABLE:

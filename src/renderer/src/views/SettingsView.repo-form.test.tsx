@@ -247,7 +247,7 @@ describe('지금 보고', () => {
     next_run: '2026-09-10T18:00'
   }
 
-  it('저장소 보고에만 버튼이 붙는다', async () => {
+  it('저장소 보고에만 두 버튼이 붙는다', async () => {
     stubApi({
       schedules: vi.fn().mockResolvedValue({
         jobs: [JOB, { ...JOB, id: 'job-2', kind: 'message', text: '알림' }]
@@ -255,17 +255,27 @@ describe('지금 보고', () => {
     })
     openDiscordSection()
 
-    await waitFor(() => expect(screen.getAllByRole('button', { name: '지금 보고' })).toHaveLength(1))
+    await waitFor(() => expect(screen.getAllByRole('button', { name: '새 커밋 보고' })).toHaveLength(1))
+    expect(screen.getAllByRole('button', { name: '테스트 보고' })).toHaveLength(1)
   })
 
-  it('누르면 결과를 그 자리에 보여 준다', async () => {
+  it("'새 커밋 보고'는 새 것만 묻는다 — preview 없이 부른다", async () => {
     const discord = stubApi({ schedules: vi.fn().mockResolvedValue({ jobs: [JOB] }) })
     openDiscordSection()
 
-    fireEvent.click(await screen.findByRole('button', { name: '지금 보고' }))
+    fireEvent.click(await screen.findByRole('button', { name: '새 커밋 보고' }))
 
-    await waitFor(() => expect(discord.repoReportNow).toHaveBeenCalledWith('job-1'))
+    await waitFor(() => expect(discord.repoReportNow).toHaveBeenCalledWith('job-1', false))
     await waitFor(() => expect(screen.getByText('보고를 보냈습니다.')).toBeTruthy())
+  })
+
+  it("'테스트 보고'는 새 커밋 여부와 상관없이 시험 보고서를 요청한다", async () => {
+    const discord = stubApi({ schedules: vi.fn().mockResolvedValue({ jobs: [JOB] }) })
+    openDiscordSection()
+
+    fireEvent.click(await screen.findByRole('button', { name: '테스트 보고' }))
+
+    await waitFor(() => expect(discord.repoReportNow).toHaveBeenCalledWith('job-1', true))
   })
 
   it('보낼 것이 없었다는 결과도 보여 준다 — 침묵은 고장과 구별되지 않는다', async () => {
@@ -277,7 +287,7 @@ describe('지금 보고', () => {
     })
     openDiscordSection()
 
-    fireEvent.click(await screen.findByRole('button', { name: '지금 보고' }))
+    fireEvent.click(await screen.findByRole('button', { name: '새 커밋 보고' }))
 
     await waitFor(() => expect(screen.getByText(/새 커밋이 없습니다/)).toBeTruthy())
   })
@@ -287,7 +297,97 @@ describe('지금 보고', () => {
     openDiscordSection()
     const before = discord.schedules.mock.calls.length
 
-    fireEvent.click(await screen.findByRole('button', { name: '지금 보고' }))
+    fireEvent.click(await screen.findByRole('button', { name: '새 커밋 보고' }))
+
+    await waitFor(() => expect(discord.schedules.mock.calls.length).toBeGreaterThan(before))
+  })
+})
+
+describe('매일 정해진 시각', () => {
+  async function fillRepoAndChannel(): Promise<void> {
+    fireEvent.click(screen.getByRole('button', { name: '폴더 선택' }))
+    await waitFor(() => expect(screen.getByText('D:/My_Git/AISO')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: '보고를 보낼 채널' }))
+    fireEvent.click(screen.getByRole('option', { name: '학기작 개발 · #dev-log' }))
+  }
+
+  it('기본은 주기마다이고, 시각은 토글해야 나온다', () => {
+    stubApi()
+    openDiscordSection()
+    expect(screen.getByLabelText('보고 주기(시간)')).toBeTruthy()
+    expect(screen.queryByLabelText('매일 보고할 시각')).toBeNull()
+  })
+
+  it('시각을 고르면 주기 대신 시각을 보낸다', async () => {
+    const discord = stubApi()
+    openDiscordSection()
+    await fillRepoAndChannel()
+
+    fireEvent.click(screen.getByRole('button', { name: '매일 정해진 시각' }))
+    fireEvent.change(screen.getByLabelText('매일 보고할 시각'), { target: { value: '07:30' } })
+    fireEvent.click(screen.getByRole('button', { name: '등록' }))
+
+    await waitFor(() =>
+      expect(discord.repoReportAdd).toHaveBeenCalledWith(
+        expect.objectContaining({ dailyAt: '07:30' })
+      )
+    )
+    expect(discord.repoReportAdd.mock.calls[0]![0]).not.toHaveProperty('intervalHours')
+  })
+
+  it('시각이 HH:MM 이 아니면 보내기 전에 막는다', async () => {
+    const discord = stubApi()
+    openDiscordSection()
+    await fillRepoAndChannel()
+
+    fireEvent.click(screen.getByRole('button', { name: '매일 정해진 시각' }))
+    fireEvent.change(screen.getByLabelText('매일 보고할 시각'), { target: { value: '9시' } })
+    fireEvent.click(screen.getByRole('button', { name: '등록' }))
+
+    await waitFor(() => expect(screen.getByText(/HH:MM/)).toBeTruthy())
+    expect(discord.repoReportAdd).not.toHaveBeenCalled()
+  })
+
+  it('목록은 매일 예약의 시각을 보여 준다', async () => {
+    stubApi({
+      schedules: vi.fn().mockResolvedValue({
+        jobs: [{
+          id: 'job-d', kind: 'repo_report', channel_name: 'dev-log', text: '',
+          repeat: 'daily', daily_at: '09:00', repo_path: 'D:/GitHub/CK_SemesterProject',
+          branch: '*', branch_cursors: {}, next_run: '2026-09-12T09:00'
+        }]
+      })
+    })
+    openDiscordSection()
+
+    await waitFor(() => expect(screen.getByText(/매일 09:00/)).toBeTruthy())
+  })
+})
+
+describe('예약 목록 자동 갱신', () => {
+  it('디스코드 섹션이 보이는 동안 러너의 틱에 맞춰 목록을 다시 읽는다', async () => {
+    vi.useFakeTimers()
+    try {
+      const discord = stubApi()
+      openDiscordSection()
+      await vi.advanceTimersByTimeAsync(0)
+      const before = discord.schedules.mock.calls.length
+
+      await vi.advanceTimersByTimeAsync(30_000)
+
+      expect(discord.schedules.mock.calls.length).toBeGreaterThan(before)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('창으로 돌아오면 바로 한 번 읽는다 — 자리를 비운 사이 지난 시각이 남아 있지 않게', async () => {
+    const discord = stubApi()
+    openDiscordSection()
+    await waitFor(() => expect(discord.schedules).toHaveBeenCalled())
+    const before = discord.schedules.mock.calls.length
+
+    window.dispatchEvent(new Event('focus'))
 
     await waitFor(() => expect(discord.schedules.mock.calls.length).toBeGreaterThan(before))
   })

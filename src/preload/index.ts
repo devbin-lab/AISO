@@ -365,8 +365,8 @@ const api = {
       input: RepoReportInput
     ): Promise<{ ok: boolean; detail?: string; job?: DiscordSchedule }> =>
       ipcRenderer.invoke('discord:repo-report-add', input),
-    repoReportNow: (id: string): Promise<{ ok: boolean; detail?: string }> =>
-      ipcRenderer.invoke('discord:repo-report-now', id)
+    repoReportNow: (id: string, preview = false): Promise<{ ok: boolean; detail?: string }> =>
+      ipcRenderer.invoke('discord:repo-report-now', id, preview)
   },
   updates: {
     version: (): Promise<string> => ipcRenderer.invoke('app:version'),

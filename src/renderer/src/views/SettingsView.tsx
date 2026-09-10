@@ -147,6 +147,23 @@ export function describeDiscordStatus(status: DiscordStatus | null): string {
   return reason ? `중지 · ${reason}` : '중지됨'
 }
 
+/** 예약 목록이 스스로 다시 읽는 간격. 사이드카 러너의 틱(30초)과 맞춘다. */
+export const SCHEDULE_REFRESH_MS = 30_000
+
+/**
+ * 예약의 '다음' 시각. 이미 지났으면 지났다고 적는다.
+ *
+ * 다음 시각은 예약이 발화할 때 사이드카가 옮긴다. 봇이 켜져 있으면 지난 시각은 길어야
+ * 한 틱(30초) 안에 사라지므로, 이 표시가 계속 보인다는 것은 발화할 주체가 없다는 뜻이다.
+ */
+export function describeNextRun(nextRun: string | undefined, now: number = Date.now()): string {
+  const raw = String(nextRun ?? '')
+  const text = raw.replace('T', ' ')
+  const at = Date.parse(raw)
+  if (!Number.isNaN(at) && at < now - 60_000) return `${text} (지남 — 봇 연결을 확인하세요)`
+  return text
+}
+
 /** 브랜치 드롭다운에서 '모든 브랜치'를 가리키는 표시 이름. 보낼 때 '*' 로 바꾼다. */
 export const ALL_BRANCHES_LABEL = '모든 브랜치'
 
@@ -691,11 +708,11 @@ function SettingsView({
   // 정기 회차에 다시 나가지 않는다.
   const [repoRunning, setRepoRunning] = useState('')
   const [repoRunNotice, setRepoRunNotice] = useState<{ id: string; text: string } | null>(null)
-  const runRepoReport = async (id: string): Promise<void> => {
+  const runRepoReport = async (id: string, preview = false): Promise<void> => {
     setRepoRunning(id)
     setRepoRunNotice(null)
     try {
-      const result = await window.api.discord.repoReportNow(id)
+      const result = await window.api.discord.repoReportNow(id, preview)
       // 새 커밋이 없어 조용히 끝나는 것도 결과다. 버튼을 눌렀는데 아무 반응이 없으면
       // 고장과 구별되지 않는다.
       setRepoRunNotice({ id, text: result.detail || (result.ok ? '보고를 보냈습니다.' : '보고하지 못했습니다.') })
@@ -716,6 +733,10 @@ function SettingsView({
   const [repoBranch, setRepoBranch] = useState('')
   const [repoTarget, setRepoTarget] = useState('')
   const [repoHours, setRepoHours] = useState('6')
+  // "아침에 어제 것을 한 장으로"는 시각이고 "쌓이는 대로"는 주기다. 둘을 한 값으로
+  // 표현하려 들면 어느 쪽도 정확히 말할 수 없어서 발화 방식을 둘 중 하나로 고른다.
+  const [repoCadence, setRepoCadence] = useState<'interval' | 'daily'>('interval')
+  const [repoDailyAt, setRepoDailyAt] = useState('09:00')
   const [repoInstruction, setRepoInstruction] = useState('')
   const [repoBusy, setRepoBusy] = useState(false)
   const [repoNotice, setRepoNotice] = useState('')
@@ -777,10 +798,14 @@ function SettingsView({
   const addRepoReport = async (): Promise<void> => {
     const target = repoTargets.byLabel.get(repoTarget)
     const hours = Number(repoHours)
+    const daily = repoCadence === 'daily'
     if (!repoPath) return setRepoNotice('보고할 저장소 폴더를 고르세요.')
     if (!repoBranch) return setRepoNotice('보고할 브랜치를 고르세요.')
     if (!target) return setRepoNotice('보고를 보낼 채널을 고르세요.')
-    if (!Number.isInteger(hours) || hours < 1 || hours > 168) {
+    if (daily && !/^([01]\d|2[0-3]):[0-5]\d$/.test(repoDailyAt)) {
+      return setRepoNotice('시각은 09:00 처럼 24시간 HH:MM 으로 적어 주세요.')
+    }
+    if (!daily && (!Number.isInteger(hours) || hours < 1 || hours > 168)) {
       return setRepoNotice('주기는 1~168 사이의 시간 수여야 합니다.')
     }
     setRepoBusy(true)
@@ -791,7 +816,7 @@ function SettingsView({
         branch: repoBranch === ALL_BRANCHES_LABEL ? ALL_BRANCHES : repoBranch,
         guildId: target.guildId,
         channelId: target.channelId,
-        intervalHours: hours,
+        ...(daily ? { dailyAt: repoDailyAt } : { intervalHours: hours }),
         instruction: repoInstruction
       })
       if (!result.ok) {
@@ -860,6 +885,19 @@ function SettingsView({
   useEffect(() => {
     if (active) refreshDiscord()
   }, [active])
+  // 목록의 '다음' 시각은 예약이 발화할 때마다 사이드카가 옮긴다. 화면이 스스로 다시 읽지
+  // 않으면 15시가 지나도 15시로 남아 있고, 사람은 그것을 "안 돌았다"로 읽는다. 디스코드
+  // 섹션이 보이는 동안만 러너의 틱에 맞춰 읽고, 창으로 돌아온 순간에도 한 번 읽는다.
+  useEffect(() => {
+    if (!active || activeSection !== 'discord') return
+    const timer = window.setInterval(refreshDiscord, SCHEDULE_REFRESH_MS)
+    const onFocus = (): void => refreshDiscord()
+    window.addEventListener('focus', onFocus)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [active, activeSection])
   const applyDiscord = async (): Promise<void> => {
     setDiscordApplying(true)
     try {
@@ -1967,17 +2005,42 @@ function SettingsView({
                       disabled={repoTargets.labels.length === 0}
                     />
                   </label>
-                  <label className="repo-form__field">
-                    <span className="repo-form__key">주기</span>
-                    <input
-                      className="input repo-form__hours"
-                      value={repoHours}
-                      inputMode="numeric"
-                      onChange={(e) => setRepoHours(e.target.value)}
-                      aria-label="보고 주기(시간)"
+                  <div className="repo-form__field">
+                    <span className="repo-form__key">발화</span>
+                    <Segmented
+                      value={repoCadence}
+                      options={[
+                        { v: 'interval', label: '주기마다' },
+                        { v: 'daily', label: '매일 정해진 시각' }
+                      ]}
+                      onChange={setRepoCadence}
                     />
-                    <span className="repo-form__unit">시간마다</span>
-                  </label>
+                  </div>
+                  {repoCadence === 'daily' ? (
+                    <label className="repo-form__field">
+                      <span className="repo-form__key">시각</span>
+                      <input
+                        className="input repo-form__hours"
+                        value={repoDailyAt}
+                        onChange={(e) => setRepoDailyAt(e.target.value)}
+                        placeholder="09:00"
+                        aria-label="매일 보고할 시각"
+                      />
+                      <span className="repo-form__unit">에 그날까지 쌓인 것을 한 번에</span>
+                    </label>
+                  ) : (
+                    <label className="repo-form__field">
+                      <span className="repo-form__key">주기</span>
+                      <input
+                        className="input repo-form__hours"
+                        value={repoHours}
+                        inputMode="numeric"
+                        onChange={(e) => setRepoHours(e.target.value)}
+                        aria-label="보고 주기(시간)"
+                      />
+                      <span className="repo-form__unit">시간마다</span>
+                    </label>
+                  )}
                   <label className="repo-form__field">
                     <span className="repo-form__key">지시</span>
                     <input
@@ -2014,8 +2077,12 @@ function SettingsView({
                             {describeScheduleKind(j.kind)}
                           </span>
                           <span className="sched-item__when">
-                            {j.repeat === 'daily' ? '매일 ' : j.repeat === 'interval' ? `${j.interval_hours ?? 1}시간마다 ` : ''}
-                            {String(j.next_run ?? '').replace('T', ' ')} → #{j.channel_name}
+                            {j.repeat === 'daily'
+                              ? `매일${j.daily_at ? ` ${j.daily_at}` : ''} · 다음 `
+                              : j.repeat === 'interval'
+                                ? `${j.interval_hours ?? 1}시간마다 · 다음 `
+                                : ''}
+                            {describeNextRun(j.next_run)} → #{j.channel_name}
                           </span>
                           <div className="sched-item__text" title={j.repo_path || undefined}>
                             {describeScheduleDetail(j)}
@@ -2034,13 +2101,26 @@ function SettingsView({
                         </div>
                         <div className="sched-item__actions">
                           {j.kind === 'repo_report' ? (
-                            <button
-                              className="btn btn--sm"
-                              disabled={repoRunning === j.id}
-                              onClick={() => void runRepoReport(j.id)}
-                            >
-                              {repoRunning === j.id ? '보고 중…' : '지금 보고'}
-                            </button>
+                            <>
+                              {/* 두 버튼은 묻는 것이 다르다. 하나로 합치면 "새 것만 확인하고
+                                  싶다"는 사람이 원치 않는 시험 보고서를 받는다. */}
+                              <button
+                                className="btn btn--sm"
+                                disabled={repoRunning === j.id}
+                                title="마지막 보고 이후의 새 커밋이 있으면 보고하고, 없으면 아무것도 보내지 않습니다."
+                                onClick={() => void runRepoReport(j.id)}
+                              >
+                                {repoRunning === j.id ? '보고 중…' : '새 커밋 보고'}
+                              </button>
+                              <button
+                                className="btn btn--sm"
+                                disabled={repoRunning === j.id}
+                                title="새 커밋 여부와 상관없이 최근 커밋으로 시험 보고서를 보냅니다. 정기 보고의 순서는 건드리지 않습니다."
+                                onClick={() => void runRepoReport(j.id, true)}
+                              >
+                                테스트 보고
+                              </button>
+                            </>
                           ) : null}
                           <button className="btn btn--sm btn--stop" onClick={() => void removeSchedule(j.id)}>
                             삭제

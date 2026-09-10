@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ALL_BRANCHES, type DiscordSchedule } from '../../../shared/discord'
 import {
+  describeNextRun,
   describeRepoFailure,
   describeRepoProgress,
   describeScheduleDetail,
@@ -143,5 +144,25 @@ describe('모든 브랜치 모드', () => {
 
   it('브랜치 하나짜리 예약은 전과 똑같이 커밋을 보여 준다', () => {
     expect(describeRepoProgress(REPO)).toBe('아직 보고 없음 · 기준 커밋 92b0384')
+  })
+})
+
+describe('describeNextRun', () => {
+  const NOW = Date.parse('2026-09-11T15:30')
+
+  it('앞으로의 시각은 그대로 보여 준다', () => {
+    expect(describeNextRun('2026-09-11T21:00', NOW)).toBe('2026-09-11 21:00')
+  })
+
+  it('지난 시각은 지났다고 말한다 — 봇이 켜져 있으면 한 틱 안에 옮겨졌을 값이다', () => {
+    expect(describeNextRun('2026-09-11T15:00', NOW)).toContain('(지남')
+  })
+
+  it('방금 지난 1분은 러너의 틱이 아직 안 돈 것일 수 있으니 지났다고 하지 않는다', () => {
+    expect(describeNextRun('2026-09-11T15:29:30', NOW)).toBe('2026-09-11 15:29:30')
+  })
+
+  it('없는 값은 빈 문자열이다', () => {
+    expect(describeNextRun(undefined, NOW)).toBe('')
   })
 })

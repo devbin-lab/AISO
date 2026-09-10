@@ -132,7 +132,8 @@ def test_the_tool_schema_requires_a_path_and_never_defaults_it():
     required = schema["parameters"]["required"]
     assert "repo_path" in required
     assert "report_channel" in required
-    assert "interval_hours" in required
+    # 주기와 시각 중 하나면 된다. 둘 다 없을 때는 build 가 거부한다(아래 테스트).
+    assert "interval_hours" not in required and "daily_at" not in required
     assert "branch" not in required
     assert "그대로" in schema["description"]
 
@@ -673,18 +674,44 @@ def test_an_unknown_id_is_not_silently_ignored(monkeypatch):
     assert "찾지 못했습니다" in asyncio.run(discordbot.report_repo_now("nope"))
 
 
-def test_a_quiet_run_falls_back_to_a_preview(monkeypatch):
-    """등록 직후에는 정의상 새 커밋이 0개다. 그래서 '지금 보고'가 언제나 빈손이었다 —
-    되는지 확인하려고 만든 버튼으로 확인이 되지 않았다."""
+def test_a_quiet_run_says_there_was_nothing_and_sends_nothing(monkeypatch):
+    """'새 커밋만' 버튼은 "새로 올라온 것이 있나?"만 묻는다. 없으면 보내지 않고 없다고 답한다.
+
+    예전에는 여기서 알아서 미리보기로 넘어갔는데, 그러면 새 것만 확인하고 싶은 사람이
+    원치 않는 시험 보고서를 받는다."""
     channel = FakeChannel(123)
     _run_job()
     _arrange(monkeypatch, [], channel, recent=[_commit("old11111"), _commit("old22222")])
 
     answer = asyncio.run(discordbot.report_repo_now())
 
+    assert channel.sent == []
+    assert "새 커밋이 없습니다" in answer
+
+
+def test_a_test_report_is_sent_even_when_nothing_is_new(monkeypatch):
+    """'테스트 보고' 버튼은 "보고서가 어떤 모양이고 채널까지 닿나?"를 묻는다."""
+    channel = FakeChannel(123)
+    _run_job()
+    _arrange(monkeypatch, [], channel, recent=[_commit("old11111"), _commit("old22222")])
+
+    answer = asyncio.run(discordbot.report_repo_now(preview=True))
+
     assert len(channel.sent) == 1
-    assert "미리보기" in channel.sent[0]
-    assert "새 커밋이 없어" in answer and "미리보기" in answer
+    assert "시험 보고" in channel.sent[0]
+    assert "시험 보고서" in answer
+
+
+def test_a_test_report_ignores_new_commits_too(monkeypatch):
+    """새 커밋이 있어도 시험 보고는 커서를 옮기지 않는다 — 그 커밋은 정기 회차의 몫이다."""
+    channel = FakeChannel(123)
+    _run_job()
+    _arrange(monkeypatch, [_commit("new11111")], channel, recent=[_commit("old11111")])
+
+    asyncio.run(discordbot.report_repo_now(preview=True))
+
+    assert len(channel.sent) == 1
+    assert discordsched.jobs()[0]["last_commit"] == "cafe1234"
 
 
 def test_a_preview_leaves_the_schedule_exactly_where_it_was(monkeypatch):
@@ -693,11 +720,11 @@ def test_a_preview_leaves_the_schedule_exactly_where_it_was(monkeypatch):
     _run_job()
     _arrange(monkeypatch, [], channel, recent=[_commit("old11111")])
 
-    asyncio.run(discordbot.report_repo_now())
+    asyncio.run(discordbot.report_repo_now(preview=True))
 
     stored = discordsched.jobs()[0]
     assert stored["last_commit"] == "cafe1234", "커서는 그대로다"
-    assert "last_reported_at" not in stored, "미리보기는 보고가 아니다"
+    assert "last_reported_at" not in stored, "시험 보고는 보고가 아니다"
 
 
 def test_a_preview_is_visibly_not_a_real_report(monkeypatch):
@@ -706,9 +733,9 @@ def test_a_preview_is_visibly_not_a_real_report(monkeypatch):
     _run_job()
     _arrange(monkeypatch, [], channel, recent=[_commit("old11111")])
 
-    asyncio.run(discordbot.report_repo_now())
+    asyncio.run(discordbot.report_repo_now(preview=True))
 
-    assert "등록 이전 커밋입니다" in channel.sent[0]
+    assert "새 커밋 여부와 상관없이" in channel.sent[0]
 
 
 def test_an_empty_repository_has_nothing_to_preview_either(monkeypatch):
@@ -716,7 +743,7 @@ def test_an_empty_repository_has_nothing_to_preview_either(monkeypatch):
     _run_job()
     _arrange(monkeypatch, [], channel, recent=[])
 
-    answer = asyncio.run(discordbot.report_repo_now())
+    answer = asyncio.run(discordbot.report_repo_now(preview=True))
 
     assert channel.sent == []
     assert "커밋이 하나도 없습니다" in answer
@@ -786,7 +813,19 @@ def test_the_now_tool_tells_the_model_it_is_not_a_registration():
     assert schema["name"] == "discord_repo_report_now"
     assert schema["parameters"]["required"] == []
     assert "새 예약을 만들지 않으므로" in schema["description"]
-    assert "미리보기" in schema["description"], "빈손으로 끝나지 않는다는 것도 알려 준다"
+    assert schema["parameters"]["properties"]["mode"]["enum"] == ["new", "preview"]
+
+
+def test_the_model_can_ask_for_a_test_report_by_mode(monkeypatch):
+    channel = FakeChannel(123)
+    _run_job()
+    _arrange(monkeypatch, [], channel, recent=[_commit("old11111")])
+    monkeypatch.setattr(discordbot._S, "owner_id", "1")
+
+    answer = asyncio.run(
+        discordbot._run_bot_tool(channel, "1", "discord_repo_report_now", {"mode": "preview"})
+    )
+    assert "시험 보고서" in answer and len(channel.sent) == 1
 
 
 def test_only_the_owner_can_fire_a_report_on_demand(monkeypatch):
@@ -806,3 +845,74 @@ def test_only_the_owner_can_fire_a_report_on_demand(monkeypatch):
         discordbot._run_bot_tool(channel, "1", "discord_repo_report_now", {})
     )
     assert "보냈습니다" in allowed
+
+
+# ── 매일 고정 시각 ───────────────────────────────────────────────────────
+# "아침에 어제 것을 한 장으로"는 시각이고 "쌓이는 대로"는 주기다. 둘을 한 값으로
+# 표현하려 들면 어느 쪽도 정확히 말할 수 없어서, 발화 방식을 둘 중 하나로 고른다.
+
+def test_a_daily_time_schedules_the_next_occurrence_of_that_time():
+    job, err = build(interval_hours=None, daily_at="09:00", now=datetime(2026, 9, 11, 15, 0))
+    assert err is None and job is not None
+    assert job["repeat"] == "daily"
+    assert job["daily_at"] == "09:00"
+    assert job["next_run"] == "2026-09-12T09:00", "오늘 9시는 지났으니 내일이다"
+    assert "interval_hours" not in job
+
+
+def test_a_daily_time_still_ahead_today_fires_today():
+    job, _err = build(interval_hours=None, daily_at="22:30", now=datetime(2026, 9, 11, 15, 0))
+    assert job["next_run"] == "2026-09-11T22:30"
+
+
+def test_a_daily_time_must_be_a_clock_time():
+    for bad in ("9시", "2026-09-12 09:00", "25:00", "09:60"):
+        job, err = build(interval_hours=None, daily_at=bad)
+        assert job is None and err is not None, bad
+
+
+def test_neither_a_period_nor_a_time_is_refused():
+    job, err = build(interval_hours=None, daily_at="")
+    assert job is None and err is not None and "daily_at" in err
+
+
+def test_a_time_wins_over_a_period_when_both_are_given():
+    """모델이 둘 다 채워 보내는 일이 있다. 시각을 말했으면 시각이 뜻이다."""
+    job, _err = build(interval_hours=6, daily_at="09:00")
+    assert job["repeat"] == "daily"
+
+
+def test_a_daily_repo_report_fires_at_its_time_and_advances_a_day():
+    """pop_due 가 종류만 보고 interval_hours 를 요구하면 이 예약이 매 틱 '깨진 잡'으로 버려진다."""
+    job, _err = build(interval_hours=None, daily_at="09:00", now=datetime(2026, 9, 11, 8, 0))
+    discordsched.commit_job(job)
+
+    assert discordsched.pop_due(now=datetime(2026, 9, 11, 8, 59)) == []
+    fired = discordsched.pop_due(now=datetime(2026, 9, 11, 9, 0))
+    assert [f["kind"] for f in fired] == ["repo_report"]
+    assert discordsched.jobs()[0]["next_run"] == "2026-09-12T09:00"
+
+
+def test_the_cadence_reads_as_a_time_or_a_period():
+    daily, _e = build(interval_hours=None, daily_at="09:00")
+    hourly, _e = build(interval_hours=6)
+    assert discordsched.describe_cadence(daily) == "매일 09:00"
+    assert discordsched.describe_cadence(hourly) == "6시간마다"
+    assert "매일 09:00" in discordsched.render_job(discordsched.commit_job(daily))
+
+
+def test_registering_from_the_app_with_a_time(monkeypatch):
+    job, error = _register(monkeypatch, interval_hours=None, daily_at="07:30")
+    assert error is None and job is not None
+    assert job["repeat"] == "daily" and job["daily_at"] == "07:30"
+
+
+def test_the_failure_notice_names_the_time_for_daily_jobs(monkeypatch):
+    channel = FakeChannel(123)
+    job, _e = build(interval_hours=None, daily_at="09:00")
+    job = discordsched.commit_job(job)
+    command = _arrange(monkeypatch, [_commit("aaaa1111")], channel, generate=_boom())
+
+    asyncio.run(discordbot._run_repo_report(job))
+
+    assert "매일 09:00" in command.sent[0]

@@ -1532,7 +1532,9 @@ class RepoReportAddRequest(BaseModel):
     branch: str = ""
     guild_id: str = ""
     channel_id: str
-    interval_hours: int = 6
+    # 둘 중 하나. daily_at('HH:MM')이 있으면 매일 그 시각, 없으면 interval_hours 마다.
+    interval_hours: int | None = None
+    daily_at: str = ""
     instruction: str = ""
 
 
@@ -1548,6 +1550,7 @@ async def discord_repo_report_add_ep(req: RepoReportAddRequest):
             guild_id=req.guild_id,
             channel_id=req.channel_id,
             interval_hours=req.interval_hours,
+            daily_at=req.daily_at,
             instruction=req.instruction,
         )
     except Exception as e:  # noqa: BLE001
@@ -1559,6 +1562,8 @@ async def discord_repo_report_add_ep(req: RepoReportAddRequest):
 
 class RepoReportRunRequest(BaseModel):
     id: str = ""
+    # True 면 새 커밋 여부와 상관없이 최근 커밋으로 시험 보고서를 보낸다(커서 불변).
+    preview: bool = False
 
 
 @app.post("/discord/schedules/repo_report/run")
@@ -1571,7 +1576,7 @@ async def discord_repo_report_run_ep(req: RepoReportRunRequest):
     if discordbot is None:
         return {"ok": False, "detail": "discord.py 미설치"}
     try:
-        return {"ok": True, "detail": await discordbot.report_repo_now(req.id)}
+        return {"ok": True, "detail": await discordbot.report_repo_now(req.id, preview=req.preview)}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "detail": str(e)}
 
