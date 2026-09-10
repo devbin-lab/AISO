@@ -144,6 +144,7 @@ export interface AisoAPI {
     repoReportAdd: (
       input: RepoReportInput
     ) => Promise<{ ok: boolean; detail?: string; job?: DiscordSchedule }>
+    repoReportNow: (id: string) => Promise<{ ok: boolean; detail?: string }>
   }
   updates: {
     version: () => Promise<string>

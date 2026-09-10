@@ -79,6 +79,7 @@ export function installSettingsApiStub(overrides: Record<string, unknown> = {}):
         pickRepo: vi.fn().mockResolvedValue(null),
         repoBranches: vi.fn().mockResolvedValue({ ok: true, remote: [], local: [] }),
         repoReportAdd: vi.fn().mockResolvedValue({ ok: true }),
+        repoReportNow: vi.fn().mockResolvedValue({ ok: true, detail: '보고를 보냈습니다.' }),
         setLlmProvider: vi.fn(),
         saveToken: vi.fn().mockResolvedValue(undefined),
         apply: vi.fn().mockResolvedValue({ ok: true })

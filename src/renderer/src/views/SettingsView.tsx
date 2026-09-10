@@ -686,6 +686,25 @@ function SettingsView({
     refreshDiscord()
   }
 
+  // 등록한 뒤 다음 회차(최대 며칠)를 기다리지 않고 "이게 실제로 되나"를 확인하는 길.
+  // 예약과 같은 경로를 그대로 타므로 커서도 함께 전진한다 — 지금 보고한 커밋이 다음
+  // 정기 회차에 다시 나가지 않는다.
+  const [repoRunning, setRepoRunning] = useState('')
+  const [repoRunNotice, setRepoRunNotice] = useState<{ id: string; text: string } | null>(null)
+  const runRepoReport = async (id: string): Promise<void> => {
+    setRepoRunning(id)
+    setRepoRunNotice(null)
+    try {
+      const result = await window.api.discord.repoReportNow(id)
+      // 새 커밋이 없어 조용히 끝나는 것도 결과다. 버튼을 눌렀는데 아무 반응이 없으면
+      // 고장과 구별되지 않는다.
+      setRepoRunNotice({ id, text: result.detail || (result.ok ? '보고를 보냈습니다.' : '보고하지 못했습니다.') })
+      refreshDiscord()
+    } finally {
+      setRepoRunning('')
+    }
+  }
+
   // ── 저장소 보고 등록 ──
   // 자연어 등록(#aiso 채널)은 그대로 두고 이 창에서도 등록할 수 있게 한다. 자연어로는
   // 사람이 경로를 문장 안에 손으로 적어야 하고, 브랜치도 직접 타이핑해야 한다 —
@@ -2009,10 +2028,24 @@ function SettingsView({
                               {describeRepoFailure(j)}
                             </div>
                           ) : null}
+                          {repoRunNotice?.id === j.id ? (
+                            <div className="sched-item__progress">{repoRunNotice.text}</div>
+                          ) : null}
                         </div>
-                        <button className="btn btn--sm btn--stop" onClick={() => void removeSchedule(j.id)}>
-                          삭제
-                        </button>
+                        <div className="sched-item__actions">
+                          {j.kind === 'repo_report' ? (
+                            <button
+                              className="btn btn--sm"
+                              disabled={repoRunning === j.id}
+                              onClick={() => void runRepoReport(j.id)}
+                            >
+                              {repoRunning === j.id ? '보고 중…' : '지금 보고'}
+                            </button>
+                          ) : null}
+                          <button className="btn btn--sm btn--stop" onClick={() => void removeSchedule(j.id)}>
+                            삭제
+                          </button>
+                        </div>
                       </li>
                     ))}
                   </ul>

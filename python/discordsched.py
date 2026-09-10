@@ -694,6 +694,28 @@ REPO_REPORT_ADD_SCHEMA = {
 }
 
 
+REPO_REPORT_NOW_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "discord_repo_report_now",
+        "description": (
+            "이미 등록된 저장소 보고를 기다리지 않고 지금 한 번 돌린다. 새 예약을 만들지 않으므로 "
+            "저장소 경로나 주기를 되물을 필요가 없다. 마지막 보고 이후의 커밋이 없으면 아무것도 "
+            "보내지 않고 없다고 답한다. 사용자가 '지금 보고해줘'·'바로 만들어줘'처럼 말하면 이것을 쓴다."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "예약 id. 저장소 보고가 하나뿐이면 생략한다.",
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
 SCHEDULE_LIST_SCHEMA = {
     "type": "function",
     "function": {

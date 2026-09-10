@@ -1557,6 +1557,25 @@ async def discord_repo_report_add_ep(req: RepoReportAddRequest):
     return {"ok": True, "job": job}
 
 
+class RepoReportRunRequest(BaseModel):
+    id: str = ""
+
+
+@app.post("/discord/schedules/repo_report/run")
+async def discord_repo_report_run_ep(req: RepoReportRunRequest):
+    """등록된 저장소 보고를 지금 한 번 돌린다(설정 탭의 '지금 보고').
+
+    예약과 같은 경로를 그대로 타므로 커서도 같이 전진한다 — 지금 보고한 커밋이 다음
+    정기 회차에 다시 나가지 않는다.
+    """
+    if discordbot is None:
+        return {"ok": False, "detail": "discord.py 미설치"}
+    try:
+        return {"ok": True, "detail": await discordbot.report_repo_now(req.id)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "detail": str(e)}
+
+
 class ScheduleRemoveRequest(BaseModel):
     id: str
 

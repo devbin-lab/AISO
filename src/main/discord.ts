@@ -290,6 +290,22 @@ export async function discordRepoReportAdd(input: {
   }
 }
 
+/** 등록된 저장소 보고를 지금 한 번 — 다음 회차를 기다리지 않고 확인할 수 있게. */
+export async function discordRepoReportNow(id: string): Promise<unknown> {
+  const info = backendInfo()
+  if (info.state !== 'ready' || !info.port) return { ok: false, detail: '백엔드 준비 안 됨' }
+  try {
+    const r = await fetch(`http://127.0.0.1:${info.port}/discord/schedules/repo_report/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Aiso-Token': backendToken() },
+      body: JSON.stringify({ id })
+    })
+    return await r.json()
+  } catch (error) {
+    return { ok: false, detail: String(error) }
+  }
+}
+
 /** 예약 삭제(설정 탭 목록의 삭제 버튼). */
 export async function discordScheduleRemove(id: string): Promise<{ ok: boolean }> {
   const info = backendInfo()

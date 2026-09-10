@@ -45,6 +45,7 @@ function stubApi(overrides: Record<string, unknown> = {}): Record<string, Return
     pickRepo: vi.fn().mockResolvedValue('D:/My_Git/AISO'),
     repoBranches: vi.fn().mockResolvedValue(REFS),
     repoReportAdd: vi.fn().mockResolvedValue({ ok: true }),
+    repoReportNow: vi.fn().mockResolvedValue({ ok: true, detail: '보고를 보냈습니다.' }),
     setLlmProvider: vi.fn(),
     saveToken: vi.fn().mockResolvedValue(undefined),
     apply: vi.fn().mockResolvedValue({ ok: true }),
@@ -229,5 +230,65 @@ describe('저장소 보고 등록', () => {
     stubApi({ channels: vi.fn().mockResolvedValue({ guilds: [] }) })
     openDiscordSection()
     expect(screen.getByText('봇을 먼저 연결하세요')).toBeTruthy()
+  })
+})
+
+describe('지금 보고', () => {
+  const JOB = {
+    id: 'job-1',
+    kind: 'repo_report',
+    channel_name: 'dev-log',
+    text: '',
+    repeat: 'interval',
+    interval_hours: 6,
+    repo_path: 'D:/GitHub/CK_SemesterProject',
+    branch: '*',
+    branch_cursors: { 'origin/main': 'aaaa1111' },
+    next_run: '2026-09-10T18:00'
+  }
+
+  it('저장소 보고에만 버튼이 붙는다', async () => {
+    stubApi({
+      schedules: vi.fn().mockResolvedValue({
+        jobs: [JOB, { ...JOB, id: 'job-2', kind: 'message', text: '알림' }]
+      })
+    })
+    openDiscordSection()
+
+    await waitFor(() => expect(screen.getAllByRole('button', { name: '지금 보고' })).toHaveLength(1))
+  })
+
+  it('누르면 결과를 그 자리에 보여 준다', async () => {
+    const discord = stubApi({ schedules: vi.fn().mockResolvedValue({ jobs: [JOB] }) })
+    openDiscordSection()
+
+    fireEvent.click(await screen.findByRole('button', { name: '지금 보고' }))
+
+    await waitFor(() => expect(discord.repoReportNow).toHaveBeenCalledWith('job-1'))
+    await waitFor(() => expect(screen.getByText('보고를 보냈습니다.')).toBeTruthy())
+  })
+
+  it('보낼 것이 없었다는 결과도 보여 준다 — 침묵은 고장과 구별되지 않는다', async () => {
+    stubApi({
+      schedules: vi.fn().mockResolvedValue({ jobs: [JOB] }),
+      repoReportNow: vi
+        .fn()
+        .mockResolvedValue({ ok: true, detail: 'CK_SemesterProject 에 마지막 보고 이후 새 커밋이 없습니다.' })
+    })
+    openDiscordSection()
+
+    fireEvent.click(await screen.findByRole('button', { name: '지금 보고' }))
+
+    await waitFor(() => expect(screen.getByText(/새 커밋이 없습니다/)).toBeTruthy())
+  })
+
+  it('보고가 끝나면 목록을 다시 읽어 마지막 보고 시각을 반영한다', async () => {
+    const discord = stubApi({ schedules: vi.fn().mockResolvedValue({ jobs: [JOB] }) })
+    openDiscordSection()
+    const before = discord.schedules.mock.calls.length
+
+    fireEvent.click(await screen.findByRole('button', { name: '지금 보고' }))
+
+    await waitFor(() => expect(discord.schedules.mock.calls.length).toBeGreaterThan(before))
   })
 })

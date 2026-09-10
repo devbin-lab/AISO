@@ -4935,6 +4935,12 @@ body.todo-pointer-dragging * { cursor: grabbing !important; user-select: none !i
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.sched-item__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
 .sched-item__progress--warn {
   color: var(--warn, #f0b429);
   opacity: 1;

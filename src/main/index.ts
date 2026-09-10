@@ -78,6 +78,7 @@ import {
   discordChannels,
   discordRepoBranches,
   discordRepoReportAdd,
+  discordRepoReportNow,
   clearDiscordData,
   type NvidiaDiscordRuntime
 } from './discord'
@@ -1557,6 +1558,7 @@ app.whenReady().then(() => {
   ipcMain.handle('discord:schedules', () => discordSchedules())
   ipcMain.handle('discord:schedule-remove', (_e, id: string) => discordScheduleRemove(id))
   ipcMain.handle('discord:channels', () => discordChannels())
+  ipcMain.handle('discord:repo-report-now', (_e, id: string) => discordRepoReportNow(id))
   // 저장소 폴더는 사람이 탐색기에서 고른다. 경로를 손으로 적게 두면 오타 하나로 등록이
   // 거부되고, 모델에게 받아 적게 하면 없는 경로를 지어낸다.
   ipcMain.handle('discord:pick-repo', async (e) => {

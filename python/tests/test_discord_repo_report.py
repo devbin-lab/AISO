@@ -612,3 +612,140 @@ def test_a_real_branch_name_is_never_mistaken_for_all_branches():
     for said in ("main", "origin/main", "feature/all", "allocation"):
         job, _err = build(branch=said, head="")
         assert job["branch"] == said
+
+
+# ── 지금 보고 ────────────────────────────────────────────────────────────
+# 등록하고 나면 다음 회차까지 몇 시간을 기다려야 "이게 실제로 되나"를 알 수 있었다.
+# 디스코드에서 "지금 만들어줘"라고 하면 모델이 집을 수 있는 도구가 등록밖에 없어서
+# 저장소 경로와 주기를 처음부터 다시 물었다 — 그 자리를 메우는 경로다.
+
+def test_with_nothing_registered_it_says_so(monkeypatch):
+    assert "없습니다" in asyncio.run(discordbot.report_repo_now())
+
+
+def test_a_single_registration_needs_no_id(monkeypatch):
+    channel = FakeChannel(123)
+    _run_job()
+    _arrange(monkeypatch, [_commit("aaaa1111")], channel)
+
+    answer = asyncio.run(discordbot.report_repo_now())
+
+    assert len(channel.sent) == 1
+    assert "#dev-log" in answer
+
+
+def test_with_several_registrations_it_refuses_to_guess(monkeypatch):
+    """보고는 채널로 나가는 발신이다. 잘못 고르면 되돌릴 수 없다."""
+    channel = FakeChannel(123)
+    _run_job(head="aaaa0000")
+    _run_job(head="bbbb0000")
+    _arrange(monkeypatch, [_commit("aaaa1111")], channel)
+
+    answer = asyncio.run(discordbot.report_repo_now())
+
+    assert channel.sent == []
+    assert "여럿" in answer
+
+
+def test_a_short_id_is_enough(monkeypatch):
+    """목록이 id 앞 8자리만 보여 준다. 사람이 볼 수 있는 값으로 고를 수 있어야 한다."""
+    channel = FakeChannel(123)
+    _run_job(head="aaaa0000")
+    wanted = _run_job(head="bbbb0000")
+    _arrange(monkeypatch, [_commit("aaaa1111")], channel)
+
+    answer = asyncio.run(discordbot.report_repo_now(wanted["id"][:8]))
+
+    assert len(channel.sent) == 1
+    assert "보냈습니다" in answer
+
+
+def test_an_unknown_id_is_not_silently_ignored(monkeypatch):
+    _run_job()
+    assert "찾지 못했습니다" in asyncio.run(discordbot.report_repo_now("nope"))
+
+
+def test_a_quiet_run_says_there_was_nothing_to_send(monkeypatch):
+    """정기 회차의 침묵은 정상이지만, 사람이 누른 자리의 침묵은 고장과 구별되지 않는다."""
+    channel = FakeChannel(123)
+    _run_job()
+    _arrange(monkeypatch, [], channel)
+
+    answer = asyncio.run(discordbot.report_repo_now())
+
+    assert channel.sent == []
+    assert "새 커밋이 없습니다" in answer
+
+
+def test_a_failed_run_points_at_the_command_channel(monkeypatch):
+    channel = FakeChannel(123)
+    _run_job()
+    command = _arrange(monkeypatch, [_commit("aaaa1111")], channel, generate=_boom())
+
+    answer = asyncio.run(discordbot.report_repo_now())
+
+    assert "명령 채널" in answer
+    assert len(command.sent) == 1
+
+
+def test_an_immediate_run_advances_the_cursor_like_any_other(monkeypatch):
+    """지금 보고한 커밋이 다음 정기 회차에 또 나가면 안 된다."""
+    channel = FakeChannel(123)
+    _run_job()
+    _arrange(monkeypatch, [_commit("aaaa1111")], channel)
+
+    asyncio.run(discordbot.report_repo_now())
+
+    assert discordsched.jobs()[0]["last_commit"] == "aaaa1111"
+
+
+def test_two_runs_of_one_job_never_overlap(monkeypatch):
+    """버튼을 누른 순간 마침 예약 회차가 발화하면 같은 커밋이 두 번 나갈 수 있다."""
+    channel = FakeChannel(123)
+    job = _run_job()
+    holding = asyncio.Event()
+
+    async def slow_generate(_messages):
+        await holding.wait()
+        return "추가된 것"
+
+    _arrange(monkeypatch, [_commit("aaaa1111")], channel, generate=slow_generate)
+
+    async def scenario():
+        first = asyncio.create_task(discordbot._run_repo_report(job))
+        await asyncio.sleep(0)  # 첫 실행이 가드를 잡을 틈을 준다
+        second = await discordbot.report_repo_now()
+        holding.set()
+        return await first, second
+
+    _first, answer = asyncio.run(scenario())
+
+    assert len(channel.sent) == 1, "같은 잡이 겹쳐 돌면 안 된다"
+    assert "이미" in answer
+
+
+def test_the_now_tool_tells_the_model_it_is_not_a_registration():
+    """모델이 '지금 만들어줘'에 등록 도구를 집어 저장소 경로부터 되묻던 자리를 메운다."""
+    schema = discordsched.REPO_REPORT_NOW_SCHEMA["function"]
+    assert schema["name"] == "discord_repo_report_now"
+    assert schema["parameters"]["required"] == []
+    assert "새 예약을 만들지 않으므로" in schema["description"]
+
+
+def test_only_the_owner_can_fire_a_report_on_demand(monkeypatch):
+    """허용목록 사용자가 보고 채널을 마음대로 울릴 수 있게 두지 않는다."""
+    channel = FakeChannel(123)
+    _run_job()
+    _arrange(monkeypatch, [_commit("aaaa1111")], channel)
+    monkeypatch.setattr(discordbot._S, "owner_id", "1")
+
+    refused = asyncio.run(
+        discordbot._run_bot_tool(channel, "2", "discord_repo_report_now", {})
+    )
+    assert refused.startswith("[거부]")
+    assert channel.sent == []
+
+    allowed = asyncio.run(
+        discordbot._run_bot_tool(channel, "1", "discord_repo_report_now", {})
+    )
+    assert "보냈습니다" in allowed

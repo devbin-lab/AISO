@@ -835,6 +835,12 @@ async def _run_bot_tool(channel, author_id: str, name: str, args: dict) -> str:
         return await _channel_report_add_with_approval(channel, args)
     if name == "discord_repo_report_add":
         return await _repo_report_add_with_approval(channel, args)
+    if name == "discord_repo_report_now":
+        # 소유자만. 등록 때 이미 승인한 저장소와 채널로 나가므로 버튼은 다시 묻지 않지만,
+        # 허용목록 사용자가 보고 채널을 마음대로 울릴 수 있게 두지는 않는다.
+        if not _S.owner_id or str(author_id) != _S.owner_id:
+            return "[거부] 즉시 보고는 소유자만 요청할 수 있습니다."
+        return await report_repo_now(str((args or {}).get("job_id") or ""))
     if name == "discord_schedule_list":
         return await discordsched.schedule_list()
     if name == "discord_schedule_remove":
@@ -883,7 +889,7 @@ async def _tool_chat(channel, author_id: str, convo: list) -> str:
         discordops.MAP_SCHEMA, discordops.APPLY_SCHEMA, discordops.SEND_SCHEMA,
         discordsched.SCHEDULE_ADD_SCHEMA, discordsched.SCHEDULE_LIST_SCHEMA,
         discordsched.SCHEDULE_REMOVE_SCHEMA, discordsched.CHANNEL_REPORT_ADD_SCHEMA,
-        discordsched.REPO_REPORT_ADD_SCHEMA,
+        discordsched.REPO_REPORT_ADD_SCHEMA, discordsched.REPO_REPORT_NOW_SCHEMA,
     ]
     if _S.image is not None:
         from comfy_generation import GENERATE_IMAGE_SCHEMA  # noqa: PLC0415
@@ -1325,6 +1331,20 @@ async def _collect_channel_report_messages(guild, job: dict) -> tuple[list[str],
     return [line for _created, line in collected], updated_sources, errors
 
 
+# 저장소 보고 1회의 결과. 예약 러너는 무시하지만, 사람이 '지금 보고'를 눌렀을 때는
+# 이 값이 그대로 답이 된다 — 새 커밋이 없어 조용히 끝나는 것이 정기 회차에서는 정상이지만,
+# 버튼을 누른 자리에서의 침묵은 고장과 구별되지 않는다.
+REPORT_SENT = "sent"
+REPORT_QUIET = "quiet"
+REPORT_FAILED = "failed"
+REPORT_UNAVAILABLE = "unavailable"
+REPORT_BUSY = "busy"
+
+# 지금 돌고 있는 저장소 보고의 잡 id. 사람이 버튼을 누른 순간에 마침 예약 회차가
+# 발화하면 같은 커밋이 두 번 나갈 수 있다 — 한 잡은 한 번에 하나만 돈다.
+_RUNNING_REPORTS: set[str] = set()
+
+
 async def _report_repo_failure(guild, job: dict, reason: str, *, pending: int = 0) -> None:
     """저장소 보고가 실패했음을 명령 채널(#aiso)에 알린다. 커서는 옮기지 않는다.
 
@@ -1358,8 +1378,8 @@ async def _report_repo_failure(guild, job: dict, reason: str, *, pending: int = 
         print(f"[discord] 저장소 보고 실패 알림 전송 실패: {error}")
 
 
-async def _run_repo_report(job: dict) -> None:
-    """저장소 보고 1건 — 성공적으로 보낸 뒤에만 커서를 옮긴다.
+async def _run_repo_report(job: dict) -> str:
+    """저장소 보고 1건 — 성공적으로 보낸 뒤에만 커서를 옮긴다. 결과 상태를 돌려준다.
 
     커서를 먼저 옮기면 전송 실패한 회차의 커밋이 영영 보고되지 않는다. 반대로 나중에
     옮기면 최악의 경우 같은 내용을 한 번 더 보내는데, 보고서는 중복이 누락보다 낫다.
@@ -1367,14 +1387,30 @@ async def _run_repo_report(job: dict) -> None:
     import discordsched  # noqa: PLC0415
     import gitreport  # noqa: PLC0415
 
+    job_id = str(job.get("id") or "")
+    if job_id and job_id in _RUNNING_REPORTS:
+        return REPORT_BUSY
     # 등록 때 적어 둔 서버로 간다. 인자 없이 부르면 '지금 처리 중인 서버'를 찾는데,
     # 예약 러너에는 그 문맥이 없어 서버가 둘 이상이면 None 이 되어 조용히 끝난다.
     guild = bound_guild(str(job.get("guild_id") or ""))
     if guild is None:
-        return
+        return REPORT_UNAVAILABLE
     channel = guild.get_channel(int(job["channel_id"])) if str(job.get("channel_id", "")).isdigit() else None
     if channel is None:
-        return
+        return REPORT_UNAVAILABLE
+    if job_id:
+        _RUNNING_REPORTS.add(job_id)
+    try:
+        return await _run_repo_report_body(guild, channel, job)
+    finally:
+        _RUNNING_REPORTS.discard(job_id)
+
+
+async def _run_repo_report_body(guild, channel, job: dict) -> str:
+    """수집 → 생성 → 전송. 동시 실행 가드 안에서만 불린다."""
+    import discordsched  # noqa: PLC0415
+    import gitreport  # noqa: PLC0415
+
     branch = str(job.get("branch") or "HEAD")
     all_branches = branch == gitreport.ALL_BRANCHES
     try:
@@ -1391,7 +1427,7 @@ async def _run_repo_report(job: dict) -> None:
             )
     except gitreport.GitReportError as error:
         await _report_repo_failure(guild, job, str(error))
-        return
+        return REPORT_FAILED
     if not report.commits:
         # 새 커밋이 없으면 아무 말도 하지 않는다. 조용한 것이 정상이다.
         # 다만 기준점은 지금 상태로 당겨 둔다 — 등록 직후 첫 회차나, 기준이 사라져
@@ -1401,7 +1437,7 @@ async def _run_repo_report(job: dict) -> None:
                 discordsched.update_job(job.get("id", ""), {"branch_cursors": report.ref_heads})
         elif report.head and report.head != str(job.get("last_commit") or ""):
             discordsched.update_job(job.get("id", ""), {"last_commit": report.head})
-        return
+        return REPORT_QUIET
 
     facts = gitreport.build_facts(report)
     response_language = _job_response_language(job)
@@ -1427,7 +1463,7 @@ async def _run_repo_report(job: dict) -> None:
     try:
         async with _S.gen_lock:
             if _S.generate is None:
-                return
+                return REPORT_UNAVAILABLE
             body = await asyncio.wait_for(_S.generate(messages), timeout=CHANNEL_REPORT_TIMEOUT_S)
     except asyncio.TimeoutError:
         failure = f"보고서 생성이 {CHANNEL_REPORT_TIMEOUT_S}초를 넘겨 중단되었습니다."
@@ -1438,7 +1474,7 @@ async def _run_repo_report(job: dict) -> None:
         failure = "모델이 빈 보고서를 내놓았습니다."
     if failure:
         await _report_repo_failure(guild, job, failure, pending=len(report.commits))
-        return
+        return REPORT_FAILED
 
     name = Path(str(job.get("repo_path") or "")).name or "저장소"
     header = f"📦 **{name}** — {len(report.commits)}개 커밋"
@@ -1471,6 +1507,53 @@ async def _run_repo_report(job: dict) -> None:
             "last_reported_at": datetime.now().isoformat(timespec="minutes"),
             "last_failure": "",
         })
+        return REPORT_SENT
+    return REPORT_FAILED
+
+
+async def report_repo_now(job_id: str = "") -> str:
+    """저장소 보고를 지금 한 번 돌린다. 사람에게 그대로 보여 줄 문장을 돌려준다.
+
+    설정 탭의 '지금 보고' 버튼과 디스코드의 `discord_repo_report_now` 가 함께 쓴다.
+    예약과 **같은 경로를 그대로** 탄다 — 커서도 같이 전진하므로, 지금 보고한 커밋이
+    다음 정기 회차에 다시 나가지 않는다. 다른 점은 결과를 말로 돌려준다는 것뿐이다.
+
+    새 커밋이 없어 조용히 끝나는 것은 정기 회차에서는 정상이지만, 사람이 버튼을 누른
+    자리에서 아무 일도 일어나지 않으면 고장과 구별되지 않는다. 그래서 조용한 경우에도
+    조용했다고 말한다.
+    """
+    import discordsched  # noqa: PLC0415
+
+    repo_jobs = [j for j in discordsched.jobs() if j.get("kind") == "repo_report"]
+    if not repo_jobs:
+        return "등록된 저장소 보고가 없습니다."
+    wanted = str(job_id or "").strip()
+    if wanted:
+        # 목록 표시가 id 앞 8자리만 보여 주므로 그 조각으로도 찾을 수 있어야 한다.
+        matches = [j for j in repo_jobs if str(j.get("id", "")).startswith(wanted)]
+        if not matches:
+            return f"그런 저장소 보고 예약을 찾지 못했습니다: {wanted}"
+        if len(matches) > 1:
+            return "예약 id 가 여럿에 걸립니다. 더 긴 id 로 다시 알려 주세요."
+        job = matches[0]
+    elif len(repo_jobs) == 1:
+        job = repo_jobs[0]
+    else:
+        # 아무거나 고르지 않는다. 보고는 채널로 나가는 발신이라 잘못 고르면 되돌릴 수 없다.
+        listing = chr(10).join(discordsched.render_job(j) for j in repo_jobs)
+        return "저장소 보고가 여럿입니다. 어느 것인지 알려 주세요." + chr(10) + listing
+
+    status = await _run_repo_report(job)
+    name = Path(str(job.get("repo_path") or "")).name or "저장소"
+    if status == REPORT_SENT:
+        return f"{name} 보고를 #{job.get('channel_name')} 에 보냈습니다."
+    if status == REPORT_QUIET:
+        return f"{name} 에 마지막 보고 이후 새 커밋이 없습니다. 보낼 것이 없습니다."
+    if status == REPORT_BUSY:
+        return f"{name} 보고가 이미 만들어지는 중입니다."
+    if status == REPORT_UNAVAILABLE:
+        return "보고를 보낼 서버나 채널을 찾지 못했습니다. 봇 연결을 확인해 주세요."
+    return f"{name} 보고를 만들지 못했습니다. 사유는 명령 채널에 남겼습니다."
 
 
 async def _run_channel_report(job: dict) -> None:
