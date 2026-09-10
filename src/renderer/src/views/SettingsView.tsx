@@ -21,11 +21,12 @@ import type { LlmCapabilityState } from '../../../shared/llm'
 import type { BackendInfo, HealthInfo } from '../../../shared/backend'
 import type { UpdateStatus } from '../../../shared/update'
 import type { SkillMeta } from '../../../shared/skill'
-import type {
-  DiscordStatus,
-  DiscordSchedule,
-  DiscordGuildChannels,
-  RepoBranches
+import {
+  ALL_BRANCHES,
+  type DiscordStatus,
+  type DiscordSchedule,
+  type DiscordGuildChannels,
+  type RepoBranches
 } from '../../../shared/discord'
 import Select from '../components/Select'
 import Segmented from '../components/Segmented'
@@ -146,6 +147,9 @@ export function describeDiscordStatus(status: DiscordStatus | null): string {
   return reason ? `중지 · ${reason}` : '중지됨'
 }
 
+/** 브랜치 드롭다운에서 '모든 브랜치'를 가리키는 표시 이름. 보낼 때 '*' 로 바꾼다. */
+export const ALL_BRANCHES_LABEL = '모든 브랜치'
+
 /** 예약 종류의 사람 이름. 모르는 종류는 '메시지'로 떨어진다(옛 저장 파일 대비). */
 export function describeScheduleKind(kind: DiscordSchedule['kind']): string {
   if (kind === 'briefing') return '브리핑'
@@ -171,7 +175,8 @@ export function describeScheduleDetail(job: DiscordSchedule): string {
   if (job.kind === 'repo_report') {
     // 브랜치를 반드시 보여준다. main 과 origin/main 을 잘못 고르면 fetch 는 성공하는데
     // 보고는 영영 비어 있고, 침묵이 정상 동작이라 아무도 눈치채지 못한다.
-    const where = `${repoFolderName(job.repo_path) || job.repo_path || '저장소'} · ${job.branch || 'HEAD'}`
+    const branch = job.branch === ALL_BRANCHES ? ALL_BRANCHES_LABEL : job.branch || 'HEAD'
+    const where = `${repoFolderName(job.repo_path) || job.repo_path || '저장소'} · ${branch}`
     return job.text ? `${where} · ${job.text}` : where
   }
   return job.text
@@ -191,11 +196,17 @@ export function describeRepoFailure(job: DiscordSchedule): string {
 
 export function describeRepoProgress(job: DiscordSchedule): string {
   if (job.kind !== 'repo_report') return ''
-  const commit = String(job.last_commit ?? '').slice(0, 7)
+  // 모든 브랜치 모드는 기준이 sha 하나가 아니라 ref 마다 하나다. 커밋 하나를 골라
+  // 보여 주면 나머지 브랜치를 어디까지 봤는지 거짓으로 말하는 셈이 된다.
+  const all = job.branch === ALL_BRANCHES
+  const marker = all
+    ? `브랜치 ${Object.keys(job.branch_cursors ?? {}).length}개`
+    : String(job.last_commit ?? '').slice(0, 7)
   if (job.last_reported_at) {
-    return `마지막 보고 ${String(job.last_reported_at).replace('T', ' ')}${commit ? ` · ${commit}` : ''}`
+    return `마지막 보고 ${String(job.last_reported_at).replace('T', ' ')}${marker ? ` · ${marker}` : ''}`
   }
-  return commit ? `아직 보고 없음 · 기준 커밋 ${commit}` : '아직 보고 없음'
+  if (!marker) return '아직 보고 없음'
+  return `아직 보고 없음 · 기준 ${all ? marker : `커밋 ${marker}`}`
 }
 
 function capabilityLabel(state: LlmCapabilityState): string {
@@ -707,9 +718,14 @@ function SettingsView({
     return { labels, byLabel }
   }, [repoGuilds])
 
-  /** 원격 추적 ref 를 먼저 보여 준다 — 거의 언제나 그쪽이 정답이다. */
+  /**
+   * 맨 위가 '모든 브랜치', 그다음이 원격 추적 ref, 마지막이 로컬 브랜치다.
+   *
+   * 각자 자기 브랜치에서 일하는 팀은 브랜치 하나짜리 예약으로 따라갈 수 없다 —
+   * origin/main 만 보면 머지 전까지 보고서가 계속 비어 있다.
+   */
   const repoBranchOptions = useMemo(
-    () => [...(repoRefs?.remote ?? []), ...(repoRefs?.local ?? [])],
+    () => [ALL_BRANCHES_LABEL, ...(repoRefs?.remote ?? []), ...(repoRefs?.local ?? [])],
     [repoRefs]
   )
 
@@ -728,7 +744,11 @@ function SettingsView({
         return
       }
       setRepoRefs(refs)
-      setRepoBranch(refs.recommended || '')
+      // 원격 브랜치가 둘 이상이면 갈라져 일하는 저장소다. 그때 한 브랜치만 고르는 것은
+      // 거의 언제나 실수라서, 기본값을 '모든 브랜치'로 둔다.
+      setRepoBranch(
+        (refs.remote ?? []).length >= 2 ? ALL_BRANCHES_LABEL : refs.recommended || ''
+      )
       if (refs.warning) setRepoNotice(refs.warning)
     } finally {
       setRepoBusy(false)
@@ -749,7 +769,7 @@ function SettingsView({
     try {
       const result = await window.api.discord.repoReportAdd({
         repoPath,
-        branch: repoBranch,
+        branch: repoBranch === ALL_BRANCHES_LABEL ? ALL_BRANCHES : repoBranch,
         guildId: target.guildId,
         channelId: target.channelId,
         intervalHours: hours,
@@ -1911,8 +1931,9 @@ function SettingsView({
                       {/* 왜 원격이 기본인지 말해 준다. 이 한 줄이 없으면 사람은 익숙한
                           `main` 을 고르고, 다른 사람 커밋이 하나도 안 잡히는 채로 몇 주를 보낸다. */}
                       <div className="row__hint">
-                        다른 사람이 올린 커밋은 <span className="mono">origin/</span> 으로 시작하는 원격
-                        브랜치에만 들어옵니다. 로컬 브랜치를 고르면 내 커밋만 보고됩니다.
+                        {repoBranch === ALL_BRANCHES_LABEL
+                          ? '원격의 모든 브랜치를 함께 봅니다. 나중에 새 브랜치가 생겨도 따로 등록할 필요가 없고, 같은 커밋이 여러 브랜치에 걸쳐 있어도 한 번만 보고됩니다.'
+                          : '다른 사람이 올린 커밋은 origin/ 으로 시작하는 원격 브랜치에만 들어옵니다. 로컬 브랜치를 고르면 내 커밋만 보고됩니다.'}
                       </div>
                     </>
                   ) : null}

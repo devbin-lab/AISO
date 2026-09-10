@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { DiscordSchedule } from '../../../shared/discord'
+import { ALL_BRANCHES, type DiscordSchedule } from '../../../shared/discord'
 import {
   describeRepoFailure,
   describeRepoProgress,
@@ -116,5 +116,32 @@ describe('describeRepoFailure', () => {
 
   it('저장소 보고가 아니면 해당 없음이다', () => {
     expect(describeRepoFailure({ ...REPO, kind: 'message', last_failure: 'x' })).toBe('')
+  })
+})
+
+describe('모든 브랜치 모드', () => {
+  const ALL: DiscordSchedule = {
+    ...REPO,
+    branch: ALL_BRANCHES,
+    last_commit: '',
+    branch_cursors: { 'origin/main': 'aaaa1111', 'origin/feature/net': 'bbbb2222' }
+  }
+
+  it('별표가 아니라 사람 말로 보여 준다', () => {
+    expect(describeScheduleDetail(ALL)).toBe('AISO · 모든 브랜치')
+  })
+
+  it('커밋 하나를 골라 보여 주지 않는다 — 나머지 브랜치를 거짓으로 말하게 된다', () => {
+    expect(describeRepoProgress(ALL)).toBe('아직 보고 없음 · 기준 브랜치 2개')
+  })
+
+  it('보고한 적이 있으면 시각과 함께 몇 개 브랜치를 보고 있는지 말한다', () => {
+    expect(describeRepoProgress({ ...ALL, last_reported_at: '2026-09-10T12:00' })).toBe(
+      '마지막 보고 2026-09-10 12:00 · 브랜치 2개'
+    )
+  })
+
+  it('브랜치 하나짜리 예약은 전과 똑같이 커밋을 보여 준다', () => {
+    expect(describeRepoProgress(REPO)).toBe('아직 보고 없음 · 기준 커밋 92b0384')
   })
 })

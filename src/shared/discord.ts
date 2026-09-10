@@ -37,6 +37,13 @@ export interface DiscordStatus {
   detail?: string
 }
 
+/**
+ * branch 필드의 '모든 브랜치' 표식(discordsched.ALL_BRANCHES).
+ *
+ * git 이 브랜치 이름으로 허용하지 않는 문자라 실제 ref 와 헷갈릴 일이 없다.
+ */
+export const ALL_BRANCHES = '*'
+
 // 등록된 예약 1건 — 사이드카(discordsched.py)가 /discord/schedules로 돌려주는 형태.
 export interface DiscordSchedule {
   id: string
@@ -46,9 +53,18 @@ export interface DiscordSchedule {
   repeat: 'once' | 'daily' | 'interval'
   interval_hours?: number
   source_channels?: Array<{ id: string; name: string; last_message_id: string }>
-  /** 저장소 보고 — 등록 시점에 고정된 클론 경로와 로그 대상 ref(예: origin/main). */
+  /**
+   * 저장소 보고 — 등록 시점에 고정된 클론 경로와 로그 대상 ref(예: origin/main).
+   * branch 가 ALL_BRANCHES('*') 면 한 브랜치가 아니라 원격의 모든 브랜치를 함께 본다.
+   */
   repo_path?: string
   branch?: string
+  /**
+   * 모든 브랜치 모드의 ref 별 기준 커밋.
+   *
+   * 브랜치가 각자 다른 속도로 움직이므로 sha 하나로는 "어디까지 봤는가"를 적을 수 없다.
+   */
+  branch_cursors?: Record<string, string>
   /**
    * 저장소 보고가 마지막으로 보고를 마친 커밋 — "지금 어디까지 봤는가".
    *

@@ -182,7 +182,7 @@ def _run_job(head: str = "cafe1234", **overrides) -> dict:
 
 
 def _arrange(monkeypatch, commits, channel, *, guilds=None, generate=None, command=None,
-             collect_error=""):
+             collect_error="", ref_heads=None, moved_branches=""):
     """저장소 읽기와 모델 생성을 대역으로 바꾼다 — 남는 것은 커서·시각 기록뿐이다."""
     async def collect(_path, branch, _cursor, **_kw):
         if collect_error:
@@ -203,7 +203,19 @@ def _arrange(monkeypatch, commits, channel, *, guilds=None, generate=None, comma
     # 보고 채널로 아무 말도 할 수 없기 때문이다.
     command_channel = command if command is not None else FakeChannel(999, name="aiso")
     table = guilds if guilds is not None else {"": FakeGuild(channel, command_channel)}
+    async def collect_all(_path, cursors, **_kw):
+        if collect_error:
+            raise gitreport.GitReportError(collect_error)
+        return gitreport.RepoReport(
+            repo_path="/repo",
+            branch=moved_branches or gitreport.ALL_BRANCHES,
+            head="",
+            commits=list(commits),
+            ref_heads=dict(ref_heads or {}),
+        )
+
     monkeypatch.setattr(gitreport, "collect", collect)
+    monkeypatch.setattr(gitreport, "collect_all_branches", collect_all)
     monkeypatch.setattr(discordbot, "bound_guild", lambda guild_id="": table.get(str(guild_id)))
     monkeypatch.setattr(discordbot, "command_channel_id", lambda guild_id="": "999")
     monkeypatch.setattr(discordbot._S, "generate", generate or default_generate)
@@ -486,3 +498,117 @@ def test_an_unreadable_repository_is_announced_on_the_command_channel(monkeypatc
 
     assert channel.sent == [], "실패는 보고 채널로 가지 않는다"
     assert len(command.sent) == 1 and "폴더를 찾을 수 없습니다" in command.sent[0]
+
+
+# ── 모든 브랜치 모드 ─────────────────────────────────────────────────────
+# 브랜치 하나짜리 예약으로는 각자 자기 브랜치에서 일하는 팀을 따라갈 수 없다.
+# 기준점이 sha 하나가 아니라 ref 마다 하나라는 것이 이 모드의 유일한 구조적 차이다.
+
+ALL = gitreport.ALL_BRANCHES
+HEADS = {"origin/main": "aaaa1111", "origin/feature/net": "bbbb2222"}
+
+
+def _all_job(cursors=None):
+    job, err = build(branch=ALL, head="", cursors=cursors or {"origin/main": "0000start"})
+    assert err is None and job is not None
+    return discordsched.commit_job(job)
+
+
+def test_all_branches_registration_keeps_a_cursor_per_ref():
+    """브랜치가 각자 다른 속도로 움직인다. sha 하나로는 어디까지 봤는지 적을 수 없다."""
+    job, err = build(branch=ALL, head="", cursors=HEADS)
+    assert err is None
+    assert job["branch"] == ALL
+    assert job["branch_cursors"] == HEADS
+    assert job["last_commit"] == ""
+
+
+def test_a_single_branch_job_carries_no_per_ref_cursors():
+    job, _err = build()
+    assert job["branch_cursors"] == {}
+    assert job["last_commit"] == "abc123def456"
+
+
+def test_the_list_calls_it_all_branches_not_a_star():
+    rendered = discordsched.render_job(discordsched.commit_job(build(branch=ALL, head="")[0]))
+    assert "모든 브랜치" in rendered
+    assert "(*)" not in rendered
+
+
+def test_a_successful_all_branches_report_advances_every_cursor(monkeypatch):
+    channel = FakeChannel(123)
+    job = _all_job()
+    _arrange(monkeypatch, [_commit("aaaa1111")], channel, ref_heads=HEADS,
+             moved_branches="origin/feature/net")
+
+    asyncio.run(discordbot._run_repo_report(job))
+
+    stored = discordsched.jobs()[0]
+    assert stored["branch_cursors"] == HEADS
+    assert stored["last_commit"] == "", "이 모드에서는 sha 하나짜리 커서를 쓰지 않는다"
+    assert stored["last_reported_at"]
+
+
+def test_the_header_says_which_branches_moved(monkeypatch):
+    """여러 브랜치를 한꺼번에 보면, 이 줄이 없이는 어디서 벌어진 일인지 다 읽어야 안다."""
+    channel = FakeChannel(123)
+    job = _all_job()
+    _arrange(monkeypatch, [_commit("aaaa1111")], channel, ref_heads=HEADS,
+             moved_branches="origin/feature/net")
+
+    asyncio.run(discordbot._run_repo_report(job))
+
+    assert "origin/feature/net" in channel.sent[0]
+
+
+def test_a_failed_all_branches_report_keeps_every_cursor(monkeypatch):
+    channel = FakeChannel(123)
+    job = _all_job()
+    _arrange(monkeypatch, [_commit("aaaa1111")], channel, ref_heads=HEADS, generate=_boom())
+
+    asyncio.run(discordbot._run_repo_report(job))
+
+    assert channel.sent == []
+    assert discordsched.jobs()[0]["branch_cursors"] == {"origin/main": "0000start"}
+
+
+def test_a_quiet_cycle_still_pins_newly_discovered_branches(monkeypatch):
+    """새 브랜치가 생겼는데 새 커밋이 없는 회차. 기준을 안 잡으면 다음에 통째로 쏟아진다."""
+    channel = FakeChannel(123)
+    job = _all_job()
+    _arrange(monkeypatch, [], channel, ref_heads=HEADS)
+
+    asyncio.run(discordbot._run_repo_report(job))
+
+    assert channel.sent == []
+    stored = discordsched.jobs()[0]
+    assert stored["branch_cursors"] == HEADS
+    assert "last_reported_at" not in stored, "조용한 회차는 보고가 아니다"
+
+
+def test_registering_all_branches_baselines_every_ref(monkeypatch):
+    async def collect_all(_path, _cursors, **_kw):
+        return gitreport.RepoReport(
+            repo_path="/repo", branch=ALL, head="", commits=[], ref_heads=HEADS,
+        )
+
+    monkeypatch.setattr(gitreport, "collect_all_branches", collect_all)
+    job, error = _register(monkeypatch, branch=ALL)
+
+    assert error is None and job is not None
+    assert job["branch"] == ALL
+    assert job["branch_cursors"] == HEADS, "등록 시점의 모든 ref 가 기준이 된다"
+
+
+def test_natural_language_ways_of_saying_all_branches_land_on_the_same_mode():
+    """자연어 등록에서 모델이 무엇을 적어 보낼지 알 수 없다. 한 곳에서 모은다."""
+    for said in ("모든 브랜치", "전체", "*", "all branches", " 모든브랜치 "):
+        job, err = build(branch=said, head="")
+        assert err is None, said
+        assert job["branch"] == ALL, said
+
+
+def test_a_real_branch_name_is_never_mistaken_for_all_branches():
+    for said in ("main", "origin/main", "feature/all", "allocation"):
+        job, _err = build(branch=said, head="")
+        assert job["branch"] == said

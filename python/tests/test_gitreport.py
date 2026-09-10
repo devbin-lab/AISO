@@ -251,12 +251,17 @@ def _fake_git(monkeypatch, refs: str, *, current: str = "main", fetch_error: str
     monkeypatch.setattr(gitreport, "_git", fake)
 
 
-REFS = """refs/heads/main
-refs/heads/feature/login
-refs/remotes/origin/HEAD
-refs/remotes/origin/main
-refs/remotes/origin/feature/login
-"""
+# git 이 실제로 내보내는 모양: `<ref><TAB><sha>` (for-each-ref --format)
+REFS = "".join(
+    f"{ref}{chr(9)}{sha}" + chr(10)
+    for ref, sha in [
+        ("refs/heads/main", "aaaa11112222"),
+        ("refs/heads/feature/login", "bbbb11112222"),
+        ("refs/remotes/origin/HEAD", "aaaa11112222"),
+        ("refs/remotes/origin/main", "aaaa11112222"),
+        ("refs/remotes/origin/feature/login", "bbbb11112222"),
+    ]
+)
 
 
 def test_local_and_remote_branches_are_told_apart(tmp_path, monkeypatch):
@@ -318,3 +323,140 @@ def test_skipping_the_refresh_never_touches_the_network(tmp_path, monkeypatch):
 def test_a_folder_that_is_not_a_repository_is_refused_before_any_git_call(tmp_path):
     with pytest.raises(gitreport.GitReportError):
         asyncio.run(gitreport.list_refs(str(tmp_path)))
+
+
+# ── 모든 브랜치 한 번에 ──────────────────────────────────────────────────
+# 각자 자기 브랜치에서 일하는 팀은 브랜치 하나만 봐서는 따라갈 수 없다. origin/main 만
+# 보면 머지 전까지 보고서가 계속 비어 있고, 브랜치마다 예약을 걸면 새 브랜치가 생길
+# 때마다 사람이 등록해 줘야 한다.
+
+def _recording_git(monkeypatch, refs: str, log: str = "", *, missing=(), fetch_error=""):
+    """git 호출을 기록하는 대역. 어떤 인자로 log 를 불렀는지가 이 모드의 핵심이다."""
+    calls: list[list[str]] = []
+
+    async def fake(_repo, args, _timeout):
+        calls.append(list(args))
+        if args[0] == "fetch":
+            if fetch_error:
+                raise gitreport.GitReportError(fetch_error)
+            return ""
+        if args[0] == "for-each-ref":
+            return refs
+        if args[0] == "cat-file":
+            target = args[2].split("^")[0]
+            if target in missing:
+                raise gitreport.GitReportError("존재하지 않는 커밋")
+            return ""
+        if args[0] == "log":
+            return log
+        raise AssertionError(f"예상하지 못한 git 호출: {args}")
+
+    monkeypatch.setattr(gitreport, "_git", fake)
+    return calls
+
+
+def _log_call(calls):
+    return next(args for args in calls if args[0] == "log")
+
+
+ONE_COMMIT = commit_chunk(
+    "abc123", "Alice", "alice@example.com", "2026-09-10 12:00", "Feat : network", "",
+    ["20" + chr(9) + "1" + chr(9) + "Assets/Net.cs"],
+)
+
+
+def test_every_branch_is_read_against_every_known_cursor(tmp_path, monkeypatch):
+    """`git log <지금 ref 전부> --not <지난 커서 전부>` 가 이 모드의 전부다.
+
+    이 형태라야 새로 생긴 브랜치에서 그 브랜치만의 커밋이 나오고(갈라져 나온 지점까지는
+    다른 커서로 닿는다), 머지된 커밋이 두 브랜치에 걸쳐도 한 번만 나온다.
+    """
+    calls = _recording_git(monkeypatch, REFS, ONE_COMMIT)
+    report = asyncio.run(gitreport.collect_all_branches(
+        _repo(tmp_path), {"origin/main": "aaaa00000000"}, fetch=False,
+    ))
+    args = _log_call(calls)
+    assert "aaaa11112222" in args and "bbbb11112222" in args, "원격 ref 를 모두 넣는다"
+    assert args[args.index("--not") + 1] == "aaaa00000000"
+    assert len(report.commits) == 1
+
+
+def test_the_default_branch_alias_is_not_counted_twice(tmp_path, monkeypatch):
+    """origin/HEAD 는 origin/main 과 같은 커밋을 가리키는 별칭이다."""
+    calls = _recording_git(monkeypatch, REFS, ONE_COMMIT)
+    report = asyncio.run(gitreport.collect_all_branches(
+        _repo(tmp_path), {"origin/main": "aaaa00000000"}, fetch=False,
+    ))
+    assert "origin/HEAD" not in report.ref_heads
+    assert sorted(report.ref_heads) == ["origin/feature/login", "origin/main"]
+
+
+def test_without_any_cursor_it_takes_a_baseline_instead_of_dumping_history(tmp_path, monkeypatch):
+    """등록 직후 첫 회차. 저장소 전체 역사를 쏟아내면 보고서가 아니라 재난이다."""
+    calls = _recording_git(monkeypatch, REFS, ONE_COMMIT)
+    report = asyncio.run(gitreport.collect_all_branches(_repo(tmp_path), {}, fetch=False))
+    assert report.commits == []
+    assert report.ref_heads == {
+        "origin/main": "aaaa11112222", "origin/feature/login": "bbbb11112222",
+    }
+    assert not any(args[0] == "log" for args in calls), "볼 것이 없으면 로그도 읽지 않는다"
+
+
+def test_a_cursor_that_vanished_is_dropped_and_said_out_loud(tmp_path, monkeypatch):
+    """강제 푸시·리베이스로 기준이 사라져도 나머지 커서가 공통 역사를 걸러 준다."""
+    calls = _recording_git(
+        monkeypatch, REFS, ONE_COMMIT, missing=("dddd00000000",),
+    )
+    report = asyncio.run(gitreport.collect_all_branches(
+        _repo(tmp_path),
+        {"origin/main": "aaaa00000000", "origin/feature/login": "dddd00000000"},
+        fetch=False,
+    ))
+    args = _log_call(calls)
+    assert "dddd00000000" not in args
+    assert "aaaa00000000" in args
+    assert "사라진 기준 커밋" in report.fetch_warning
+
+
+def test_only_the_branches_that_moved_are_named(tmp_path, monkeypatch):
+    """제목에 적히는 값이다. 움직이지 않은 브랜치까지 적으면 어디서 벌어진 일인지 흐려진다."""
+    _recording_git(monkeypatch, REFS, ONE_COMMIT)
+    report = asyncio.run(gitreport.collect_all_branches(
+        _repo(tmp_path),
+        {"origin/main": "aaaa11112222", "origin/feature/login": "cccc00000000"},
+        fetch=False,
+    ))
+    assert report.branch == "origin/feature/login"
+
+
+def test_a_repository_without_a_remote_falls_back_to_local_branches(tmp_path, monkeypatch):
+    """원격이 아예 없는 저장소는 로컬 브랜치가 전부다 — 아니면 볼 것이 없다."""
+    refs = "".join(
+        f"{ref}{chr(9)}{sha}" + chr(10)
+        for ref, sha in [("refs/heads/main", "aaaa11112222"), ("refs/heads/wip", "eeee11112222")]
+    )
+    _recording_git(monkeypatch, refs, ONE_COMMIT)
+    report = asyncio.run(gitreport.collect_all_branches(_repo(tmp_path), {}, fetch=False))
+    assert sorted(report.ref_heads) == ["main", "wip"]
+
+
+def test_local_branches_are_ignored_when_a_remote_exists(tmp_path, monkeypatch):
+    """로컬 브랜치는 아직 아무에게도 공유되지 않은 작업이다."""
+    _recording_git(monkeypatch, REFS, ONE_COMMIT)
+    report = asyncio.run(gitreport.collect_all_branches(_repo(tmp_path), {}, fetch=False))
+    assert all(name.startswith("origin/") for name in report.ref_heads)
+
+
+def test_a_repository_with_no_branches_at_all_is_an_error(tmp_path, monkeypatch):
+    _recording_git(monkeypatch, "")
+    with pytest.raises(gitreport.GitReportError):
+        asyncio.run(gitreport.collect_all_branches(_repo(tmp_path), {}, fetch=False))
+
+
+def test_a_failed_fetch_still_reports_what_is_already_local(tmp_path, monkeypatch):
+    _recording_git(monkeypatch, REFS, ONE_COMMIT, fetch_error="원격에 접근할 수 없습니다")
+    report = asyncio.run(gitreport.collect_all_branches(
+        _repo(tmp_path), {"origin/main": "aaaa00000000"},
+    ))
+    assert len(report.commits) == 1
+    assert "원격에 접근할 수 없습니다" in report.fetch_warning

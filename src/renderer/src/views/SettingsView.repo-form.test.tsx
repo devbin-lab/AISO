@@ -80,13 +80,14 @@ afterEach(() => {
 
 describe('저장소 보고 등록', () => {
   it('폴더를 고르면 브랜치를 원격 추적 ref 로 미리 잡아 준다', async () => {
-    stubApi()
+    // 원격이 하나뿐이면 고를 여지가 없다. 익숙한 `main` 이 아니라 `origin/main` 이
+    // 잡혀 있어야 남의 커밋이 잡힌다.
+    stubApi({ repoBranches: vi.fn().mockResolvedValue({ ...REFS, remote: ['origin/main'] }) })
     openDiscordSection()
 
     fireEvent.click(screen.getByRole('button', { name: '폴더 선택' }))
 
     await waitFor(() => expect(screen.getByText('D:/My_Git/AISO')).toBeTruthy())
-    // 익숙한 `main` 이 아니라 `origin/main` 이 잡혀 있어야 남의 커밋이 잡힌다.
     await waitFor(() => expect(screen.getByText('origin/main')).toBeTruthy())
   })
 
@@ -138,6 +139,9 @@ describe('저장소 보고 등록', () => {
     fireEvent.click(screen.getByRole('button', { name: '폴더 선택' }))
     await waitFor(() => expect(screen.getByText('D:/My_Git/AISO')).toBeTruthy())
 
+    // 기본값(모든 브랜치)에서 한 브랜치로 바꿔 고른다 — 고른 값이 그대로 가야 한다.
+    fireEvent.click(screen.getByRole('button', { name: '보고할 브랜치' }))
+    fireEvent.click(screen.getByRole('option', { name: 'origin/main' }))
     fireEvent.click(screen.getByRole('button', { name: '보고를 보낼 채널' }))
     fireEvent.click(screen.getByRole('option', { name: '학기작 개발 · #dev-log' }))
     fireEvent.click(screen.getByRole('button', { name: '등록' }))
@@ -180,6 +184,45 @@ describe('저장소 보고 등록', () => {
 
     await waitFor(() => expect(screen.getByText('예약은 최대 20개까지')).toBeTruthy())
     expect(screen.getByText('D:/My_Git/AISO')).toBeTruthy()
+  })
+
+  it('원격 브랜치가 여럿이면 모든 브랜치를 기본으로 잡는다', async () => {
+    // 갈라져 일하는 저장소에서 한 브랜치만 고르는 것은 거의 언제나 실수다.
+    stubApi()
+    openDiscordSection()
+
+    fireEvent.click(screen.getByRole('button', { name: '폴더 선택' }))
+
+    await waitFor(() => expect(screen.getByText('모든 브랜치')).toBeTruthy())
+    expect(screen.getByText(/새 브랜치가 생겨도 따로 등록할 필요가 없고/)).toBeTruthy()
+  })
+
+  it('원격 브랜치가 하나뿐이면 그 브랜치를 기본으로 잡는다', async () => {
+    stubApi({
+      repoBranches: vi.fn().mockResolvedValue({ ...REFS, remote: ['origin/main'] })
+    })
+    openDiscordSection()
+
+    fireEvent.click(screen.getByRole('button', { name: '폴더 선택' }))
+
+    await waitFor(() => expect(screen.getByText('origin/main')).toBeTruthy())
+  })
+
+  it('모든 브랜치를 고르면 사이드카에는 별표로 보낸다', async () => {
+    const discord = stubApi()
+    openDiscordSection()
+
+    fireEvent.click(screen.getByRole('button', { name: '폴더 선택' }))
+    await waitFor(() => expect(screen.getByText('모든 브랜치')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: '보고를 보낼 채널' }))
+    fireEvent.click(screen.getByRole('option', { name: '학기작 개발 · #dev-log' }))
+    fireEvent.click(screen.getByRole('button', { name: '등록' }))
+
+    await waitFor(() =>
+      expect(discord.repoReportAdd).toHaveBeenCalledWith(
+        expect.objectContaining({ branch: '*' })
+      )
+    )
   })
 
   it('봇이 꺼져 있어 채널 목록이 비면 채널을 고를 수 없다고 말한다', () => {

@@ -26,6 +26,9 @@ FETCH_TIMEOUT_S = 90
 # 90초를 쓰면 폴더를 고른 뒤 화면이 멈춘 것처럼 보인다 — 짧게 끊고 경고로 알린다.
 REFS_FETCH_TIMEOUT_S = 20
 MAX_REFS = 200
+# branch 필드가 이 값이면 '한 브랜치'가 아니라 '움직이는 모든 브랜치'를 본다.
+# git 이 브랜치 이름으로 절대 허용하지 않는 문자라 실제 ref 와 헷갈릴 일이 없다.
+ALL_BRANCHES = '*'
 LOG_TIMEOUT_S = 30
 # 실제로 사람이 쓴 코드와 도구가 만들어 낸 산출물을 가른다. 유니티에서는 줄 수의 90%가
 # 후자라, 구분하지 않으면 "무엇을 했는가"가 에셋 줄 수에 묻힌다.
@@ -92,6 +95,10 @@ class RepoReport:
     """커서 이후 커밋이 MAX_COMMITS 를 넘어 잘렸으면 그 사실을 알린다 — 조용히 빠뜨리지 않는다."""
     truncated: bool = False
     fetch_warning: str = ''
+    # 모든 브랜치 모드에서 **이번에 읽은** ref 별 최신 sha. 전송에 성공한 뒤 그대로
+    # 커서로 저장한다. 보내는 동안 누가 푸시해도 그 커밋을 건너뛰지 않기 위해,
+    # 커서는 전송 시각이 아니라 읽은 시각의 값이어야 한다.
+    ref_heads: dict = field(default_factory=dict)
 
     @property
     def authors(self) -> list[tuple[str, int]]:
@@ -288,6 +295,112 @@ async def collect(
     )
 
 
+async def _ref_shas(repo: Path) -> "tuple[dict[str, str], dict[str, str]]":
+    """(원격 추적 ref, 로컬 브랜치) 각각의 이름 → sha.
+
+    짧은 이름이 아니라 전체 ref 로 받는다. `feature/login` 같은 로컬 브랜치도 이름에
+    슬래시가 있어서, 짧은 이름만 보고 원격 여부를 가르면 로컬을 원격으로 오분류한다.
+    """
+    raw = await _git(repo, [
+        'for-each-ref', '--format=%(refname)%09%(objectname)', 'refs/heads', 'refs/remotes',
+    ], LOG_TIMEOUT_S)
+    remote: dict[str, str] = {}
+    local: dict[str, str] = {}
+    for line in raw.splitlines():
+        ref, _, sha = line.strip().partition(chr(9))
+        if not ref or not sha:
+            continue
+        if ref.startswith('refs/heads/'):
+            local[ref[len('refs/heads/'):]] = sha[:12]
+        elif ref.startswith('refs/remotes/'):
+            name = ref[len('refs/remotes/'):]
+            # origin/HEAD 는 브랜치가 아니라 기본 브랜치를 가리키는 별칭이다. 세면 같은
+            # 커밋을 두 번 세고, 원격의 기본 브랜치가 바뀌면 보는 대상이 조용히 바뀐다.
+            if not name.endswith('/HEAD'):
+                remote[name] = sha[:12]
+    return remote, local
+
+
+async def collect_all_branches(
+    repo_path: str,
+    cursors: dict,
+    *,
+    fetch: bool = True,
+) -> RepoReport:
+    """저장소의 **모든 브랜치**에서 마지막 보고 이후의 커밋을 모은다.
+
+    브랜치 하나를 보는 모드로는 각자 자기 브랜치에서 일하는 팀을 따라갈 수 없다.
+    origin/main 만 보면 머지되기 전까지 보고서가 계속 비어 있고, 브랜치마다 예약을
+    따로 걸면 새 브랜치가 생길 때마다 사람이 등록해 줘야 한다.
+
+    수집은 git 에게 통째로 맡긴다 — `git log <지금 ref 전부> --not <지난 커서 전부>` 는
+    "지금 어느 브랜치에서든 닿지만 지난번에는 닿지 않던 커밋"을 정확히 준다. 그래서
+    새로 생긴 브랜치는 **그 브랜치만의 커밋**만 나오고(갈라져 나온 지점까지는 이미 다른
+    커서로 닿는다), 머지된 커밋이 두 브랜치에 걸쳐도 한 번만 나온다.
+    """
+    repo = assert_repository(repo_path)
+    warning = ''
+    if fetch:
+        try:
+            await _git(repo, ['fetch', '--quiet'], FETCH_TIMEOUT_S)
+        except GitReportError as error:
+            warning = str(error)
+
+    remote, local = await _ref_shas(repo)
+    # 원격이 있으면 원격만 본다. 로컬 브랜치는 아직 아무에게도 공유되지 않은 작업이고,
+    # 매 회차 fetch 로 움직이는 것도 원격 쪽이다. 원격이 아예 없는 저장소(혼자 쓰는
+    # 로컬 저장소)에서만 로컬 브랜치로 떨어진다 — 그러지 않으면 볼 것이 없다.
+    heads = remote or local
+    if not heads:
+        raise GitReportError('브랜치가 하나도 없습니다.')
+    ref_heads = dict(list(heads.items())[:MAX_REFS])
+
+    known = {str(sha).strip() for sha in (cursors or {}).values() if str(sha).strip()}
+    alive: list[str] = []
+    for sha in sorted(known):
+        try:
+            await _git(repo, ['cat-file', '-e', f'{sha}^{{commit}}'], LOG_TIMEOUT_S)
+            alive.append(sha)
+        except GitReportError:
+            # 강제 푸시·리베이스로 사라진 기준점. 남은 커서들이 공통 역사를 여전히
+            # 걸러 주므로 처음부터 쏟아지지는 않는다. 다만 조용히 넘기지는 않는다.
+            warning = (warning + ' · ' if warning else '') + (
+                '사라진 기준 커밋이 있어 그 브랜치는 다시 처음부터 봅니다.'
+            )
+    if not alive:
+        # 기준이 하나도 없다(첫 등록 직후이거나 전부 사라졌다). 역사를 쏟아내는 대신
+        # 지금 상태를 기준으로 삼고 다음 회차부터 본다.
+        return RepoReport(
+            repo_path=str(repo), branch=ALL_BRANCHES, head='', commits=[],
+            fetch_warning=warning, ref_heads=ref_heads,
+        )
+
+    fmt = f'%H{_FIELD}%an{_FIELD}%ae{_FIELD}%ad{_FIELD}%s{_FIELD}%b{_BODY_END}'
+    raw = await _git(repo, [
+        'log', *sorted(ref_heads.values()), '--not', *alive,
+        '--reverse', f'--max-count={MAX_COMMITS + 1}',
+        '--numstat', '-z', '--date=format:%Y-%m-%d %H:%M',
+        f'--pretty=format:{_RECORD}{fmt}',
+    ], LOG_TIMEOUT_S)
+    commits = parse_log(raw)
+    truncated = len(commits) > MAX_COMMITS
+    if truncated:
+        commits = commits[-MAX_COMMITS:]
+
+    moved = [name for name, sha in sorted(ref_heads.items()) if (cursors or {}).get(name) != sha]
+    return RepoReport(
+        repo_path=str(repo),
+        # 어느 브랜치들이 움직였는지 그대로 적는다. 커밋 하나하나에 브랜치를 붙이지는
+        # 않는다 — 머지된 커밋은 여러 브랜치에 걸쳐 있어 하나로 정할 수가 없다.
+        branch=', '.join(moved) if moved else ALL_BRANCHES,
+        head='',
+        commits=commits,
+        truncated=truncated,
+        fetch_warning=warning,
+        ref_heads=ref_heads,
+    )
+
+
 def build_facts(report: RepoReport) -> str:
     """모델에게 넘길 사실 묶음. 여기 없는 것은 보고서에 나와서는 안 된다."""
     if not report.commits:
@@ -369,25 +482,9 @@ async def list_refs(repo_path: str, *, refresh: bool = True) -> dict:
     if current == 'HEAD':
         current = ''  # 분리된 HEAD 는 브랜치 이름이 아니다
 
-    # 짧은 이름이 아니라 전체 ref 로 받는다. `feature/login` 같은 로컬 브랜치도 이름에
-    # 슬래시가 있어서, 짧은 이름만 보고 원격 여부를 가르면 로컬을 원격으로 오분류한다.
-    raw = await _git(repo, [
-        'for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/remotes',
-    ], LOG_TIMEOUT_S)
-    local: list[str] = []
-    remote: list[str] = []
-    for line in raw.splitlines():
-        ref = line.strip()
-        if ref.startswith('refs/heads/'):
-            local.append(ref[len('refs/heads/'):])
-        elif ref.startswith('refs/remotes/'):
-            name = ref[len('refs/remotes/'):]
-            # origin/HEAD 는 브랜치가 아니라 기본 브랜치를 가리키는 별칭이다. 목록에 두면
-            # 사람이 고를 수 있고, 원격의 기본 브랜치가 바뀌면 보는 대상이 조용히 바뀐다.
-            if not name.endswith('/HEAD'):
-                remote.append(name)
-    local = local[:MAX_REFS]
-    remote = remote[:MAX_REFS]
+    remote_shas, local_shas = await _ref_shas(repo)
+    local = list(local_shas)[:MAX_REFS]
+    remote = list(remote_shas)[:MAX_REFS]
 
     return {
         'repo_path': str(repo),

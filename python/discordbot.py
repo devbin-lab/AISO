@@ -354,7 +354,10 @@ async def register_repo_report(
     try:
         # fetch 하지 않는다 — 브랜치 목록을 뽑을 때 이미 받아 왔고, 등록 버튼을 누른
         # 사람을 네트워크 대기로 붙잡아 둘 이유가 없다.
-        baseline = await gitreport.collect(repo_path, branch, "", fetch=False)
+        if branch == gitreport.ALL_BRANCHES:
+            baseline = await gitreport.collect_all_branches(repo_path, {}, fetch=False)
+        else:
+            baseline = await gitreport.collect(repo_path, branch, "", fetch=False)
     except gitreport.GitReportError as error:
         return None, str(error)
 
@@ -368,6 +371,7 @@ async def register_repo_report(
         interval_hours=interval_hours,
         instruction=instruction,
         head=baseline.head,
+        cursors=baseline.ref_heads,
         guild_id=str(guild.id),
     )
     if refusal:
@@ -1371,18 +1375,31 @@ async def _run_repo_report(job: dict) -> None:
     channel = guild.get_channel(int(job["channel_id"])) if str(job.get("channel_id", "")).isdigit() else None
     if channel is None:
         return
+    branch = str(job.get("branch") or "HEAD")
+    all_branches = branch == gitreport.ALL_BRANCHES
     try:
-        report = await gitreport.collect(
-            str(job.get("repo_path") or ""),
-            str(job.get("branch") or "HEAD"),
-            str(job.get("last_commit") or ""),
-        )
+        if all_branches:
+            report = await gitreport.collect_all_branches(
+                str(job.get("repo_path") or ""),
+                dict(job.get("branch_cursors") or {}),
+            )
+        else:
+            report = await gitreport.collect(
+                str(job.get("repo_path") or ""),
+                branch,
+                str(job.get("last_commit") or ""),
+            )
     except gitreport.GitReportError as error:
         await _report_repo_failure(guild, job, str(error))
         return
     if not report.commits:
         # 새 커밋이 없으면 아무 말도 하지 않는다. 조용한 것이 정상이다.
-        if report.head and report.head != str(job.get("last_commit") or ""):
+        # 다만 기준점은 지금 상태로 당겨 둔다 — 등록 직후 첫 회차나, 기준이 사라져
+        # 다시 잡아야 하는 경우가 여기로 온다.
+        if all_branches:
+            if report.ref_heads and report.ref_heads != dict(job.get("branch_cursors") or {}):
+                discordsched.update_job(job.get("id", ""), {"branch_cursors": report.ref_heads})
+        elif report.head and report.head != str(job.get("last_commit") or ""):
             discordsched.update_job(job.get("id", ""), {"last_commit": report.head})
         return
 
@@ -1425,6 +1442,10 @@ async def _run_repo_report(job: dict) -> None:
 
     name = Path(str(job.get("repo_path") or "")).name or "저장소"
     header = f"📦 **{name}** — {len(report.commits)}개 커밋"
+    if all_branches and report.branch != gitreport.ALL_BRANCHES:
+        # 어느 브랜치가 움직였는지 제목에 적는다. 여러 브랜치를 한꺼번에 보는 모드에서는
+        # 이 줄이 없으면 어디서 벌어진 일인지 보고서를 다 읽어야 알 수 있다.
+        header += f" · {report.branch}"
     sent = False
     try:
         for part in chunk_message(f"{header}\n\n{body}"):
@@ -1438,8 +1459,15 @@ async def _run_repo_report(job: dict) -> None:
         # 커서와 함께 '언제 보고했는지'도 남긴다. 새 커밋이 없으면 침묵하는 것이 정상인
         # 기능이라, 이 값이 없으면 설정 탭에서 정상적인 침묵과 고장난 침묵이 똑같아 보인다.
         # 실패 기록도 함께 지운다 — 지우지 않으면 다음 실패가 '같은 사유'로 묵살된다.
+        # 모든 브랜치 모드의 커서는 **읽은 시각의** ref 목록이다. 보내는 동안 누가
+        # 푸시했다면 그 커밋은 다음 회차에 잡혀야 하므로, 지금 다시 읽어서는 안 된다.
+        moved = (
+            {"branch_cursors": report.ref_heads}
+            if all_branches
+            else {"last_commit": report.commits[-1].sha}
+        )
         discordsched.update_job(job.get("id", ""), {
-            "last_commit": report.commits[-1].sha,
+            **moved,
             "last_reported_at": datetime.now().isoformat(timespec="minutes"),
             "last_failure": "",
         })

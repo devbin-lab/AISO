@@ -376,10 +376,24 @@ def build_channel_report_job(
     }, None
 
 
+ALL_BRANCHES = "*"  # branch 가 이 값이면 원격의 모든 브랜치를 함께 본다(gitreport.ALL_BRANCHES)
+
+# '모든 브랜치'를 뜻하는 표현들. 자연어로 등록할 때 모델이 무엇을 적어 보낼지 알 수 없어
+# 여기서 하나로 모은다. 공백이 든 말은 git 이 브랜치 이름으로 허용하지 않으므로 실제
+# 브랜치와 겹치지 않는다. 겹칠 수 있는 'all' 같은 홑단어는 일부러 넣지 않았다.
+_ALL_BRANCH_WORDS = {"*", "모든", "모든 브랜치", "모든브랜치", "전체", "전체 브랜치", "all branches"}
+
+
+def canonical_branch(branch) -> str:
+    """브랜치 입력을 표준형으로. '모든 브랜치' 계열만 * 로 모으고 나머지는 그대로 둔다."""
+    value = str(branch or "").strip()
+    return ALL_BRANCHES if value.lower() in _ALL_BRANCH_WORDS else value
+
+
 def build_repo_report_job(
     *, repo_path: str, branch: str, report_channel_id: str, report_channel_name: str,
     interval_hours, instruction: str = "", head: str = "", guild_id: str = "",
-    now: "datetime | None" = None,
+    cursors: "dict | None" = None, now: "datetime | None" = None,
 ) -> "tuple[dict | None, str | None]":
     """저장소 보고 예약 1건을 만든다. 등록은 하지 않는다.
 
@@ -394,7 +408,7 @@ def build_repo_report_job(
         return None, "저장소 경로를 입력해 주세요."
     if len(path) > MAX_REPO_PATH:
         return None, f"저장소 경로는 최대 {MAX_REPO_PATH}자까지 입력할 수 있습니다."
-    ref = str(branch or "").strip() or "HEAD"
+    ref = canonical_branch(branch) or "HEAD"
     if len(ref) > MAX_REPO_BRANCH:
         return None, f"브랜치 이름은 최대 {MAX_REPO_BRANCH}자까지 입력할 수 있습니다."
     try:
@@ -421,6 +435,9 @@ def build_repo_report_job(
         "branch": ref,
         # 등록 시점의 HEAD 를 기준으로 삼는다. 첫 보고가 저장소 전체 역사를 쏟아내지 않게 한다.
         "last_commit": str(head or "").strip(),
+        # 모든 브랜치 모드는 기준이 하나가 아니라 ref 마다 하나다. 브랜치가 각자 다른
+        # 속도로 움직이므로 sha 하나로는 "어디까지 봤는가"를 적을 수 없다.
+        "branch_cursors": dict(cursors or {}) if ref == ALL_BRANCHES else {},
         "text": note,
         "repeat": "interval",
         "interval_hours": hours,
@@ -567,7 +584,8 @@ def render_job(j: dict) -> str:
         return (
             f"[{j.get('id', '')[:8]}] 저장소 보고 · {j.get('interval_hours')}시간마다"
             f" · #{j.get('channel_name')}"
-            f" · {j.get('repo_path')} ({j.get('branch')})"
+            f" · {j.get('repo_path')}"
+            f" ({'모든 브랜치' if j.get('branch') == ALL_BRANCHES else j.get('branch')})"
             f" · 다음 {j.get('next_run')}"
         )
     if j.get("kind") == "channel_report":
@@ -634,6 +652,7 @@ REPO_REPORT_ADD_SCHEMA = {
             "로컬 git 저장소의 새 커밋을 시간 단위로 모아 요약해 디스코드 채널에 보고하는 반복 예약을 "
             "등록한다. 마지막으로 보고한 커밋을 기억하므로 같은 커밋을 두 번 보고하지 않는다. "
             "등록 이후의 새 커밋부터 보고한다. 커밋 메시지와 변경 파일·줄 수만 보내며 코드 본문은 보내지 않는다. "
+            "branch 에 * 를 주면 한 브랜치가 아니라 원격의 모든 브랜치를 함께 본다. "
             "repo_path 는 사용자가 알려 준 경로를 그대로 쓴다 — 짐작해서 만들어 넣지 않는다."
         ),
         "parameters": {
@@ -646,7 +665,11 @@ REPO_REPORT_ADD_SCHEMA = {
                 },
                 "branch": {
                     "type": "string",
-                    "description": "추적할 브랜치. 생략하면 현재 체크아웃된 브랜치.",
+                    "description": (
+                        "추적할 브랜치. 다른 사람이 올린 커밋을 보려면 origin/main 처럼 원격 "
+                        "브랜치를 쓴다 — 로컬 브랜치는 fetch 로 움직이지 않는다. 브랜치를 "
+                        "가리지 않고 모두 보려면 * 를 쓴다. 생략하면 현재 체크아웃된 브랜치."
+                    ),
                     "maxLength": MAX_REPO_BRANCH,
                 },
                 "report_channel": {
